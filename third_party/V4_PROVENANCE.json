@@ -1,0 +1,18 @@
+{
+  "source": "https://github.com/ujinf74/monoscale",
+  "commit": "df2cbf1c9b7951bf2c7dc1cca9aa4bbde761de6c",
+  "commit_date": "2026-09-15T17:10:13+09:00",
+  "subject": "Derive the birth cut from the flow, measure it, and leave it off",
+  "packages": [
+    "src/monoscale_core",
+    "src/monoscale_tracker",
+    "src/monoscale_odometry"
+  ],
+  "integration_policy": {
+    "translation": "Vision-only x/y: use_inertial_prediction=false, inertial_use_acceleration=false, fusion_model=velocity",
+    "yaw": "Use the local F9R adapter's bias-corrected orientation yaw. imu_yaw_from_gyro=false prevents reintegration of its raw angular_velocity.z.",
+    "tf": "Upstream TF outputs are disabled; lane_odom_stabilizer is the single map->base_link authority."
+  },
+  "baseline": "vision_lane_v4_ws lane detection, map fusion, F9R adapter, and odom stabilizer retained",
+  "license": "third_party/MONOSCALE_LICENSE; upstream package license headers retained"
+}

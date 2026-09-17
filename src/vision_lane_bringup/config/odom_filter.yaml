@@ -1,0 +1,18 @@
+lane_odom_stabilizer:
+  ros__parameters:
+    input_odom_topic: /localization/monoscale_raw
+    output_odom_topic: /localization/kinematic_state
+    input_parent_frame: odom
+    parent_frame: map
+    child_frame: base_link
+    publish_tf: true
+    # Parking-speed plausibility gates. Rejected samples are never accumulated.
+    max_linear_speed_mps: 5.0
+    max_angular_speed_deg_s: 120.0
+    max_translation_step_m: 0.30
+    max_yaw_step_deg: 10.0
+    # Low-pass only while nearly stopped, so ordinary driving has no LPF lag.
+    stationary_linear_speed_mps: 0.08
+    stationary_angular_speed_deg_s: 3.0
+    stationary_tau_sec: 0.20
+    reset_gap_sec: 0.75

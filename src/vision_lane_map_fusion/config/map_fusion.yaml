@@ -1,0 +1,28 @@
+lane_map_fusion:
+  ros__parameters:
+    input_topic: /parking/cpp/marking_segments
+    input_frame: base_link
+    map_frame: lane_map
+    camera_id: front
+    camera_ids: [front]
+    warmup_frames: 120
+    keyframe_translation_m: 0.05
+    keyframe_yaw_deg: 1.0
+    max_input_age_sec: 0.5
+    match_angle_deg: 4.0
+    match_offset_m: 0.08
+    match_overlap_m: 0.20
+    match_overlap_ratio: 0.25
+    support_bin_m: 0.10
+    confirm_keyframes: 2
+    min_segment_length_m: 0.65
+    max_segment_length_m: 12.0
+    min_confidence: 0.45
+    max_landmarks: 1000
+    tentative_ttl_sec: 15.0
+    map_x_min_m: -10.0
+    map_x_max_m: 40.0
+    map_y_min_m: -15.0
+    map_y_max_m: 15.0
+    map_resolution_m: 0.05
+    map_publish_hz: 5.0

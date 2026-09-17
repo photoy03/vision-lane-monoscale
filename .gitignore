@@ -1,0 +1,30 @@
+# ROS 2 / colcon build products
+build/
+install/
+log/
+.colcon/
+
+# Python and editor caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.vscode/
+.idea/
+
+# Runtime recordings and profiling output
+*.bag
+*.db3
+*.mcap
+*.jsonl
+*.csv
+vision_lane_runs/
+
+# Historical backups created during local migration/rebuild work
+monoscale_pre_*/
+yaw_build_backup_*/
+yaw_restore_backup_*/
+
+# Temporary files
+*.swp
+*.swo
+*~

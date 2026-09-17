@@ -1,0 +1,41 @@
+global_mapping_cpp:
+  ros__parameters:
+    input_mode: topic
+    use_static_pose: false
+    require_odom_for_mapping: true
+    allow_local_without_odom: true
+    sync_images_to_odom: true
+    sync_queue_size: 8
+    sync_max_wait_sec: 0.25
+    odom_buffer_duration_sec: 2.0
+    max_odom_age_sec: 0.15
+    max_odom_interpolation_gap_sec: 0.20
+    startup_warmup_frames: 120
+    # Spatial high-frequency energy rejects motion-blurred/vibrating images.
+    # Temporal HPF is intentionally only reported as frame_delta_mean: sudden
+    # scene changes also occur during valid turns and must not be accumulated alone.
+    image_quality_gate_mode: reject
+    image_quality_min_sharpness: 25.0
+    image_quality_sample_width: 640
+    profile_report_every: 120
+    preprocess_backend: cpu
+    cuda_fallback_to_cpu: false
+    publish_raw_image: false
+    publish_debug_map: true
+    publish_debug_vectors: true
+    map_publish_every_n: 5
+    vectorize_every_n: 1
+    x_min_m: -4.0
+    x_max_m: 4.0
+    y_min_m: 0.0
+    y_max_m: 5.0
+    meters_per_pixel: 0.0125
+    # Fixed stage-1 marking-evidence image around the initial origin.
+    # This is NOT an obstacle OccupancyGrid or the final fused map.
+    map_x_min_m: -10.0
+    map_x_max_m: 20.0
+    map_y_min_m: -15.0
+    map_y_max_m: 15.0
+    map_resolution_m: 0.05
+    map_min_translation_m: 0.05
+    map_min_yaw_deg: 1.0

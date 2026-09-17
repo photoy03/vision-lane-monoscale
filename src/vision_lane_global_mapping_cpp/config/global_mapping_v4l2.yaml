@@ -1,0 +1,120 @@
+global_mapping_cpp:
+  ros__parameters:
+    # Standalone mode: this node owns /dev/video2 and keeps only the newest frame.
+    # Stop usb_cam before launching because a V4L2 device is normally exclusive.
+    input_mode: v4l2
+    v4l2_device: /dev/video2
+    capture_width: 2560
+    capture_height: 1440
+    capture_fps: 30.0
+    capture_fourcc: MJPG
+    capture_buffer_size: 1
+    capture_poll_ms: 1
+    publish_raw_image: false
+    raw_image_topic: /parking/cpp/image_raw
+
+    odom_topic: /parking/odom
+    output_topic: /parking/cpp/marking_segments
+    map_image_topic: /parking/cpp/global_marking_map
+    status_topic: /parking/cpp/status
+    calibration_yaml: /home/jaehun/vision_lane_ws/other_cv/calib_output/fisheye_calibration_cpp.yaml
+    camera_id: front
+    camera_frame: front_camera_optical_frame
+    map_frame: map
+    base_frame: base_link
+
+    # Production mapping requires timestamped fused odometry. If it is missing,
+    # local vectors continue but global accumulation is deliberately blocked.
+    use_static_pose: false
+    odom_buffer_duration_sec: 2.0
+    max_odom_age_sec: 0.20
+    max_odom_interpolation_gap_sec: 0.25
+    require_odom_for_mapping: true
+    allow_local_without_odom: true
+
+    publish_debug_map: true
+    map_publish_every_n: 5
+    profile_csv_path: /tmp/v52_cpp_v4l2_profile.csv
+    profile_report_every: 120
+
+    # cpu: reference path. cuda: HSV/masks/normalization/Top-hat on GPU,
+    # then the same CPU adaptive threshold, Hough, temporal and mapping path.
+    preprocess_backend: cpu
+    cuda_device_id: 0
+    cuda_fallback_to_cpu: false
+
+    camera_height_m: 0.8
+    camera_forward_m: 0.0
+    camera_left_m: 0.0
+    pitch_deg: 30.0
+    roll_deg: 0.0
+    yaw_deg: 0.0
+    x_min_m: -4.0
+    x_max_m: 4.0
+    y_min_m: 0.0
+    y_max_m: 5.0
+    meters_per_pixel: 0.0125
+
+    white_s_max: 60
+    white_v_min: 140
+    yellow_h_min: 15
+    yellow_h_max: 40
+    yellow_s_min: 70
+    yellow_v_min: 70
+    glare_v_min: 248
+    glare_s_max: 95
+    glare_min_area_ratio: 0.006
+    glare_dilate: 9
+    illumination_sigma_m: 0.60
+    illumination_scale: 0.35
+    normalization_scale: 128.0
+    tophat_size_m: 0.30
+    threshold_bands: 6
+    threshold_update_interval: 3
+    threshold_sample_stride: 4
+    mad_k: 5.5
+    threshold_margin: 3.0
+    threshold_min: 8.0
+    threshold_max: 80.0
+    strong_response_margin: 36.0
+    glare_recovery_margin: 20.0
+
+    hough_threshold: 28
+    hough_min_line_length_m: 0.65
+    hough_max_line_gap_m: 0.18
+    hough_max_raw_segments: 120
+    candidate_min_length_m: 0.70
+    candidate_min_binary_support: 0.72
+    candidate_min_color_support: 0.08
+    candidate_min_score: 0.46
+    candidate_max_glare_ratio: 0.85
+    line_min_width_m: 0.05
+    line_max_width_m: 0.22
+    line_target_width_m: 0.12
+    dominant_angle_tolerance_deg: 12.0
+    dominant_min_confidence: 0.35
+    merge_distance_m: 0.20
+    merge_gap_m: 0.35
+    final_min_span_m: 0.85
+    final_min_score: 0.52
+    max_vectors_each: 8
+    vectorize_every_n: 1
+
+    temporal_history_size: 5
+    temporal_confirm_hits: 3
+    temporal_angle_gate_deg: 7.0
+    temporal_offset_gate_m: 0.32
+    temporal_gap_gate_m: 0.60
+    temporal_max_missed_updates: 3
+    temporal_ema_alpha: 0.35
+
+    map_x_min_m: -2.0
+    map_x_max_m: 20.0
+    map_y_min_m: -10.0
+    map_y_max_m: 10.0
+    map_resolution_m: 0.03
+    map_evidence_increment: 1.0
+    map_evidence_max: 20.0
+    map_confirm_evidence: 3.0
+    map_min_translation_m: 0.05
+    map_min_yaw_deg: 1.0
