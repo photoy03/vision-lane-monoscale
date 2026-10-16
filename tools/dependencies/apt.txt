@@ -1,0 +1,20 @@
+# Ubuntu 22.04 build, test and diagnostic tools beyond package.xml/rosdep.
+# ROS 2 Humble apt repository must already be configured. No automatic install.
+build-essential
+cmake
+pkg-config
+python3-colcon-common-extensions
+python3-rosdep
+python3-pytest
+python3-numpy
+python3-opencv
+python3-yaml
+python3-matplotlib
+python3-psutil
+libopencv-dev
+libeigen3-dev
+libgomp1
+gstreamer1.0-tools
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
+# gcc-11 and a compatible NVIDIA driver/Toolkit are additional CUDA prerequisites.

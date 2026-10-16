@@ -1,0 +1,16 @@
+# Preserved effective values; command-line launch arguments retain priority.
+launch_arguments:
+  device: /dev/video2
+  width: '2560'
+  height: '1440'
+  fps: '30'
+  imu_device: /dev/ttyACM0
+  imu_topic: /sensing/imu/imu_data
+  launch_camera: 'true'
+  launch_f9r: 'true'
+  calibration: ''
+  rig_file: ''
+  rear_enabled: 'false'
+  rear_device: ''
+  rear_rig_file: ''
+  rear_calibration: ''

@@ -1,0 +1,10 @@
+/measurement/front/image_raw/compressed:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
+/measurement/rear/image_raw/compressed:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile

@@ -1,0 +1,10 @@
+# Preserved effective values; command-line launch arguments retain priority.
+launch_arguments:
+  use_sim_time: 'false'
+  launch_viewer: 'true'
+  launch_rviz: 'false'
+  launch_occupancy: 'false'
+  stage_diagnostics: 'false'
+  recovery_session_id: ''
+  map_extent_mode: github_fixed
+  output_dir: ''

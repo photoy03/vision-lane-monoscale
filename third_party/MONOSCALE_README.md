@@ -1,0 +1,130 @@
+# monoscale
+
+지면평면을 기준으로 **미터 단위 스케일을 얻는 시각-관성 오도메트리**와, 그
+과정에서 나온 지면점으로 만드는 **점유격자**다. 스테레오도 라이다도 쓰지
+않는다. 스케일은 카메라 장착 높이와 지면평면에서 나오고, 카메라는 1대부터
+N대까지 쓸 수 있다. 사전 기록 지도를 쓰지 않고(mapless), 학습 모델도 쓰지
+않는다.
+
+차량에 올라가는 것은 전부 C++이다. 이 스택은 Python 추정기로 개발됐고, 그
+Python은 궤적이 일치하는 것을 확인한 뒤 이력에만 남기고 트리에서 걷어냈다.
+어느 시점을 옮긴 것인지와 무엇을 남기지 않았는지는
+[`src/monoscale_core/README.md`](src/monoscale_core/README.md)에 있다.
+
+## 패키지
+
+| 패키지 | 하는 일 |
+| --- | --- |
+| `monoscale_core` | 추정 그 자체. ROS를 모른다 — 그래서 그래프 없이 시험되고, 나중에 추종기와 한 프로세스로 묶일 수 있다. |
+| `monoscale_tracker` | C++ KLT 전단. 이미지에서 특징 궤적만 뽑아 발행한다. |
+| `monoscale_odometry` | 위를 감싸는 노드. bag을 직접 재생해 채점하는 `monoscale_replay`도 여기 있다. |
+| `monoscale_occupancy_grid_map` | 지면점을 격자에 누적한다. |
+| `monoscale_evaluation` | 참값 대비 채점. 차량에는 올리지 않는다. |
+| `monoscale_carla` | CARLA 전용: 카메라 조립, 참값 탭, 주행 스크립트. |
+
+## 토픽
+
+```
+이미지  →  monoscale_tracker         →  /vision/tracks/<camera>
+        →  monoscale_odometry        →  /localization/kinematic_state
+                                        /perception/ground_points
+        →  monoscale_occupancy_grid_map  →  /perception/occupancy_grid_map
+```
+
+`/perception/ground_points`는 map 프레임의 PointCloud2다. 점마다 `label`
+(지면 0, 장애물 1)과 그 점을 본 카메라 위치(`origin_x`, `origin_y`)를 싣기
+때문에, 격자 노드는 외부 파라미터도 TF도 필요 없다. 격자를 다시 손봐도
+오도메트리를 다시 돌릴 필요가 없다는 뜻이기도 하다. 실제로 매핑 주기를 어떻게
+두든 궤적은 비트 단위로 같다 — 지도는 자세 루프의 일부가 아니라 부산물이다.
+
+## 빌드와 실행
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --base-paths src --symlink-install
+source install/setup.bash
+
+ros2 launch monoscale_odometry odometry.launch.py
+```
+
+실제 전방 USB 피쉬아이 카메라는 별도 터미널에서 다음 launch 파일로 입력 토픽에
+연결한다. 기본값은 `/dev/video2`, 1920x1080, 30 FPS, `mono8`이다.
+
+```bash
+ros2 launch monoscale_odometry front_fisheye_camera.launch.py
+
+# 장치나 영상 형식이 다를 때
+ros2 launch monoscale_odometry front_fisheye_camera.launch.py \
+  device:=/dev/video0 width:=1280 height:=720 framerate:=30
+```
+
+카메라 한 대와 MonoScale 오도메트리를 함께 실행할 때는 다음 명령을 사용한다.
+실기 설정은 wall clock을 사용하고 없는 후방 카메라를 기다리지 않는다. IMU는
+별도로 `monoscale_ublox` launch를 먼저 실행해야 하며, 수신기가 유효한 NAV-ATT
+orientation을 내보내는 상태여야 한다.
+
+```bash
+ros2 launch monoscale_odometry hardware_single_camera.launch.py
+```
+
+
+이 launch 파일은 이미지를
+`/sensing/camera/front/fisheye/image_raw`, 카메라 정보를
+`/sensing/camera/front/fisheye/camera_info`로 발행한다. 렌즈 고유의 내부 파라미터와
+왜곡 계수는 자동으로 알 수 없으므로, 실제 카메라를 보정한 뒤
+`vision_fisheye.param.yaml`의 `front` 보정값도 같은 해상도에 맞춰야 한다.
+실기 launch는 `/home/tukorea32/calib_output/fisheye_calibration.npz`의 2560x1440
+fisheye `K`, `D`를 사용하며 1920x1080 입력에는 내부적으로 비례 축소한다.
+
+u-blox C102-F9R은 ZED-F9R 포트(`/dev/gps0`)를 다음처럼 연결한다. 노드는
+수신기의 저장 설정은 바꾸지 않고 RAM에서 원시 관성 출력을 켠 뒤 MonoScale이
+구독하는 `/sensing/imu/imu_data`에 `sensor_msgs/Imu`를 발행한다.
+NAV-ATT가 유효하지 않으면 시작 후 2초 동안 측정한 z축 gyro bias를 뺀 각속도를
+적분해 yaw를 발행한다. 이 2초 동안 차량은 반드시 완전히 정지해 있어야 한다.
+
+```bash
+ros2 launch monoscale_ublox f9r_imu.launch.py
+```
+
+CUDA는 필요 없다. `monoscale_tracker`의 광류에 GPU 경로가 있지만
+(`use_cuda`), cudaoptflow가 있는 OpenCV를 만났을 때만 빌드되고 기본값은
+꺼져 있다.
+
+## 카메라 대수
+
+`camera_names`가 대수를 정한다. 기본값은 차량에 달린 두 대다.
+
+```yaml
+camera_names: ['front', 'rear']
+front.k: [...]                      # 3x3, 행 우선
+front.rotation_base_from_camera: [...]   # 3x3
+front.translation_base_from_camera: [x, y, z]
+front_image_topic: /sensing/camera/front/image_raw
+```
+
+이름을 하나 더 넣으면 그 이름으로 같은 파라미터를 읽고, 프레임은 스탬프가
+가장 가깝게 모이는 조합으로 정렬된다. 한 대만 쓰면 카메라끼리의 불일치라는
+신호가 사라지므로 `single_camera_variance`가 그 자리를 대신한다 — 돌긴 하지만
+두 대보다 눈에 띄게 나쁘다.
+
+## 테스트
+
+```bash
+colcon test --packages-select monoscale_core
+colcon test-result --all
+```
+
+기하, 앵커맵, 필터, 관성, 자세, 격자, 그리고 합성 주행 위의 추정기 전체까지
+96개다. 채점 패키지의 Python 테스트는 `python3 -m pytest src/monoscale_evaluation/test`.
+
+## 기록된 주행에 대고 채점하기
+
+```bash
+ros2 run monoscale_odometry monoscale_replay <bag> \
+  --params src/monoscale_odometry/config/vision_fisheye.param.yaml \
+  --set track_topic_prefix:=/vision/tracks
+```
+
+bag을 직접 읽어 라이브러리를 녹화 순서대로 돌린다. 시계도 난수도 읽지 않으므로
+같은 bag은 데스크톱에서든 Orin에서든 같은 궤적을 낸다 — 회귀가 보이는 것은
+그 때문이다.
