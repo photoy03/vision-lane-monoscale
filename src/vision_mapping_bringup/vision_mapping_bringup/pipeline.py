@@ -391,7 +391,8 @@ def _launch(context, group='all'):
                          ('yaw_turn_blend', 'yaw_turn_blend', float),
                          ('yaw_max_visual_correction_deg', 'yaw_max_visual_correction_deg', float),
                          ('resample_odom_to_camera', 'resample_to_vision_stamps', bool),
-                         ('straight_resample_span_sec', 'max_straight_resample_span_sec', float))),
+                         ('straight_resample_span_sec', 'max_straight_resample_span_sec', float),
+                         ('pose_imu_fill', 'imu_fill_enabled', bool))),
                  }]),
         make_node(package='lane_detection', executable='global_mapping_node',
              name='global_mapping_cpp', output='screen', parameters=[

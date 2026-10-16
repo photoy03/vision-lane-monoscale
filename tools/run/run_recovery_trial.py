@@ -242,6 +242,7 @@ def main() -> int:
         "tracker_imu_yaw_history_sec",
         "lane_pending_commit_budget",
         "tracker_opencv_threads", "tracker_executor_threads", "odom_executor_threads",
+        "pose_imu_fill",
     }
     launch_overrides: dict[str, str] = {}
     for item in args.launch_arg:
@@ -252,7 +253,8 @@ def main() -> int:
             raise SystemExit(f"duplicate --launch-arg: {name}")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
             raise SystemExit(f"invalid value for --launch-arg {name}: {value!r}")
-        if name in {"launch_occupancy", "launch_lane_fusion", "tracker_motion_prediction", "tracker_motion_warp"}:
+        if name in {"launch_occupancy", "launch_lane_fusion", "tracker_motion_prediction", "tracker_motion_warp",
+                    "pose_imu_fill"}:
             if value.lower() not in {"true", "false"}:
                 raise SystemExit(f"{name} must be true or false")
             value = value.lower()

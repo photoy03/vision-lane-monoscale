@@ -13,3 +13,5 @@ launch_arguments:
   straight_resample_span_sec: ''
   yaw_max_visual_correction_deg: ''
   resample_odom_to_camera: ''
+  # IMU-rate pose fill between raw visual odometry updates (lane_odom_stabilizer imu_fill_enabled).
+  pose_imu_fill: ''

@@ -22,6 +22,7 @@ from monoscale_pose.odom_filter import (
     VisionYawCorrector,
     VisionYawSample,
     interpolate_imu_yaw,
+    imu_fill_poses,
     interpolate_pose,
     imu_straight_resample_safe,
     imu_stationary_resample_safe,
@@ -163,6 +164,21 @@ class OdomStabilizer(Node):
                     self.imu_stationary_max_curve_yaw_deg,
                     self.imu_stationary_max_endpoint_yaw_error_deg)):
             raise ValueError("invalid IMU straight-resample limits")
+        # IMU-rate fill: between two accepted raw updates further apart than
+        # max_resample_span_sec, publish corrected poses on a fixed grid whose
+        # heading follows the F9R yaw (same offset policy as imu_straight) and
+        # whose position integrates that heading to the visual endpoint. Never
+        # extrapolates; rejected fills fall back to the existing resampling.
+        self.imu_fill_enabled = bool(self.declare_parameter("imu_fill_enabled", False).value)
+        self.imu_fill_rate_hz = float(self.declare_parameter("imu_fill_rate_hz", 20.0).value)
+        self.imu_fill_max_span_sec = float(self.declare_parameter("imu_fill_max_span_sec", 3.0).value)
+        self.imu_fill_max_closure_m = float(self.declare_parameter("imu_fill_max_closure_m", 0.25).value)
+        self.imu_fill_max_closure_ratio = float(self.declare_parameter(
+            "imu_fill_max_closure_ratio", 0.3).value)
+        if not all(math.isfinite(v) and v > 0.0 for v in (
+                self.imu_fill_rate_hz, self.imu_fill_max_span_sec,
+                self.imu_fill_max_closure_m, self.imu_fill_max_closure_ratio)):
+            raise ValueError("invalid IMU fill limits")
         self.max_straight_resample_span_sec = float(self.declare_parameter(
             "max_straight_resample_span_sec", 0.0).value)
         self.max_straight_resample_translation_m = float(self.declare_parameter(
@@ -217,14 +233,18 @@ class OdomStabilizer(Node):
         self.imu_frame_rejected = 0
         self.resample_gap_rejected = 0
         self.stationary_resampled_published = 0
+        self.imu_fill_gaps_accepted = 0
+        self.imu_fill_gaps_rejected = 0
+        self.imu_fill_published = 0
         self.last_raw_span_ms = 0.0
         self.last_output_delay_ms = 0.0
         self.get_logger().info(
             "lane odom filter: %s(%s) -> %s(%s), child=%s, filtered TF=%s, "
-            "vision_yaw=%s sign=%+.0f resample=%s"
+            "vision_yaw=%s sign=%+.0f resample=%s imu_fill=%s(%.0fHz, <=%.1fs)"
             % (self.input_topic, self.input_parent_frame, self.output_topic,
                self.parent_frame, self.child_frame, self.publish_tf,
-               self.vision_tracks_topic, self.vision_yaw_sign, self.resample_to_vision)
+               self.vision_tracks_topic, self.vision_yaw_sign, self.resample_to_vision,
+               self.imu_fill_enabled, self.imu_fill_rate_hz, self.imu_fill_max_span_sec)
         )
 
     def on_vision(self, msg):
@@ -331,7 +351,24 @@ class OdomStabilizer(Node):
             straight_yaw_deg=self.max_straight_resample_yaw_deg,
             straight_lateral=self.max_straight_resample_lateral_m,
         )
-        has_backfill_target = any(target < stamp - 1e-6 for target in targets)
+        fill_poses = None
+        if (self.imu_fill_enabled and span > self.max_resample_span_sec + 1e-9 and
+                span <= self.imu_fill_max_span_sec):
+            step = 1.0 / self.imu_fill_rate_hz
+            grid = [previous[0] + step * k for k in range(1, int(span / step) + 1)]
+            fill_poses = imu_fill_poses(
+                previous[1], pose, previous[0], stamp, grid + targets,
+                tuple(self.imu_yaw_samples),
+                max_sample_gap_sec=self.imu_straight_max_sample_gap_sec,
+                max_closure_m=self.imu_fill_max_closure_m,
+                max_closure_ratio=self.imu_fill_max_closure_ratio)
+            if fill_poses is None:
+                self.imu_fill_gaps_rejected += 1
+            else:
+                self.imu_fill_gaps_accepted += 1
+                targets = sorted(set(fill_poses) | {stamp})
+                resample_kind = "imu_fill"
+        has_backfill_target = fill_poses is None and any(target < stamp - 1e-6 for target in targets)
         guarded_gap = (
             self.resample_to_vision and self.imu_straight_resampling_enabled and
             span > self.max_resample_span_sec + 1e-9 and has_backfill_target
@@ -367,7 +404,9 @@ class OdomStabilizer(Node):
                 "reject", straight_safe=straight_safe)
             if resample_kind == "imu_straight":
                 self.imu_straight_gap_accepted += 1
-        if span > self.max_resample_span_sec + 1e-9 and resample_kind == "reject":
+        if fill_poses is not None:
+            pass
+        elif span > self.max_resample_span_sec + 1e-9 and resample_kind == "reject":
             # The camera stamps are bracketed, but motion across a long raw
             # solve gap is too uncertain to present as exact image-time odom.
             self.resample_gap_rejected += sum(
@@ -385,7 +424,9 @@ class OdomStabilizer(Node):
             if self.previous_stamp is not None and target <= self.previous_stamp + 1e-9:
                 continue
             ratio = (target - previous[0]) / span if span > 0.0 else 1.0
-            held_pose = interpolate_pose(previous[1], pose, ratio)
+            held_pose = fill_poses.get(target) if fill_poses else None
+            if held_pose is None:
+                held_pose = interpolate_pose(previous[1], pose, ratio)
             # Stationary IMU evidence is only a safety gate: keep yaw interpolated
             # from the accepted MonoScale endpoints instead of substituting IMU heading.
             if use_imu_yaw_for_resample(resample_kind) and abs(target - stamp) > 1e-6:
@@ -423,6 +464,8 @@ class OdomStabilizer(Node):
                     self.imu_straight_resampled_published += 1
                 elif resample_kind == "imu_stationary":
                     self.imu_stationary_resampled_published += 1
+                elif resample_kind == "imu_fill":
+                    self.imu_fill_published += 1
         self.previous_corrected = current
 
     @staticmethod
@@ -504,6 +547,9 @@ class OdomStabilizer(Node):
             "imu_stationary_gaps_accepted_total": self.imu_stationary_gap_accepted,
             "imu_stationary_gaps_rejected_total": self.imu_stationary_gap_rejected,
             "imu_stationary_resampled_total": self.imu_stationary_resampled_published,
+            "imu_fill_gaps_accepted_total": self.imu_fill_gaps_accepted,
+            "imu_fill_gaps_rejected_total": self.imu_fill_gaps_rejected,
+            "imu_fill_published_total": self.imu_fill_published,
             "pending_vision_stamps": len(self.pending_vision_stamps),
             "last_raw_span_ms": self.last_raw_span_ms,
             "last_output_delay_ms": self.last_output_delay_ms,

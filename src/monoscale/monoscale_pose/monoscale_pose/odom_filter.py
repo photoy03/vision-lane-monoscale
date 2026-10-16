@@ -1,5 +1,6 @@
 """ROS-free filter used to make MonoScale poses safe for lane accumulation."""
 
+import bisect
 from collections import deque
 from dataclasses import dataclass
 import math
@@ -69,6 +70,80 @@ def interpolate_imu_yaw(samples, stamp, max_sample_gap_sec=0.12):
         ratio = (stamp - previous[0]) / (sample_stamp - previous[0])
         return wrap_pi(previous[1] + ratio * wrap_pi(sample_yaw - previous[1]))
     return None
+
+
+def imu_fill_poses(first, second, start_stamp, end_stamp, targets, samples,
+                   max_sample_gap_sec=0.12, max_closure_m=0.25, max_closure_ratio=0.3):
+    """Place poses at ``targets`` strictly inside (start, end) between two accepted poses.
+
+    Heading follows the IMU yaw shape with the endpoint offsets blended linearly,
+    exactly as the imu_straight resample already does. Position integrates that
+    heading at constant speed, scaled to the observed visual displacement; any
+    remaining closure error is spread linearly so both endpoints stay exact.
+    Nothing is extrapolated past ``end``. Returns {target: Pose2} or None when
+    IMU coverage is missing or the IMU path disagrees with the visual endpoints.
+    """
+    span = end_stamp - start_stamp
+    if not math.isfinite(span) or span <= 0.0:
+        return None
+    window = [(t, y) for t, y in samples
+              if math.isfinite(t) and math.isfinite(y) and
+              start_stamp - max_sample_gap_sec <= t <= end_stamp + max_sample_gap_sec]
+    stamps = [t for t, _ in window]
+
+    def imu_yaw(stamp):
+        index = bisect.bisect_left(stamps, stamp)
+        if index < len(stamps) and abs(stamps[index] - stamp) <= 1e-9:
+            return wrap_pi(window[index][1])
+        if index == 0 or index == len(stamps):
+            return None
+        (t0, y0), (t1, y1) = window[index - 1], window[index]
+        if t1 - t0 > max_sample_gap_sec:
+            return None
+        return wrap_pi(y0 + (stamp - t0) / (t1 - t0) * wrap_pi(y1 - y0))
+
+    imu_start, imu_end = imu_yaw(start_stamp), imu_yaw(end_stamp)
+    if imu_start is None or imu_end is None:
+        return None
+    offset_start = wrap_pi(first.yaw - imu_start)
+    offset_step = wrap_pi(wrap_pi(second.yaw - imu_end) - offset_start)
+
+    def heading(stamp, imu):
+        ratio = min(max((stamp - start_stamp) / span, 0.0), 1.0)
+        return wrap_pi(imu + offset_start + ratio * offset_step)
+
+    wanted = sorted({t for t in targets if start_stamp + 1e-9 < t < end_stamp - 1e-9})
+    grid = sorted(set(wanted) | {t for t in stamps if start_stamp < t < end_stamp} | {end_stamp})
+    path, yaws = {}, {}
+    px = py = 0.0
+    previous_t, previous_h = start_stamp, heading(start_stamp, imu_start)
+    for stamp in grid:
+        imu = imu_yaw(stamp)
+        if imu is None:
+            return None
+        current_h = heading(stamp, imu)
+        middle = wrap_pi(previous_h + 0.5 * wrap_pi(current_h - previous_h))
+        dt = stamp - previous_t
+        px += math.cos(middle) * dt
+        py += math.sin(middle) * dt
+        path[stamp], yaws[stamp] = (px, py), current_h
+        previous_t, previous_h = stamp, current_h
+    dx, dy = second.x - first.x, second.y - first.y
+    end_x, end_y = path[end_stamp]
+    norm = end_x * end_x + end_y * end_y
+    # Signed scale: reversing moves against the heading.
+    scale = (dx * end_x + dy * end_y) / norm if norm > 1e-12 else 0.0
+    error_x, error_y = dx - scale * end_x, dy - scale * end_y
+    distance = math.hypot(dx, dy)
+    if math.hypot(error_x, error_y) > max(max_closure_m, max_closure_ratio * distance):
+        return None
+    poses = {}
+    for stamp in wanted:
+        ratio = (stamp - start_stamp) / span
+        x, y = path[stamp]
+        poses[stamp] = Pose2(first.x + scale * x + ratio * error_x,
+                             first.y + scale * y + ratio * error_y, yaws[stamp])
+    return poses
 
 
 def imu_straight_resample_safe(

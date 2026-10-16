@@ -11,6 +11,10 @@
 - sensors/monoscale_ublox: 기존 F9R. 카메라는 시스템 gscam. 빈 영상 전처리 예약 폴더는 보관본으로 이동.
 - bringup: 실차 설정·구성 생성·기록 helper. 공통 지도 backend는 다음 작업이다.
 
+- monoscale_pose(2026-10-17 추가): pose_timeline.hpp는 lane_detection과 occupancy가 함께 쓰는 ROS 없는 pose 시각 매칭 header다.
+  odom_stabilizer는 raw visual odom 사이(0.25 s 초과, 3 s 이하 간격)를 F9R yaw 모양 + visual 끝점으로 20 Hz로 채워 발행한다
+  (imu_fill_enabled, 기본 on, launch 인수 pose_imu_fill:=false로 끔). 끝점 뒤로 예측하지 않으며 yaw 정책과 단일 TF 권한은 그대로다.
+
 ## launch
 
 | 파일 | 범위 |

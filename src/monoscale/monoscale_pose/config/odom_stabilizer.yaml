@@ -48,3 +48,10 @@ lane_odom_stabilizer:
     imu_straight_max_lateral_m: 0.12
     imu_straight_max_sample_gap_sec: 0.12
     max_straight_resample_span_sec: 0.0
+    # IMU-rate fill between raw visual updates; on by default after the 2026-10-17
+    # 5-run replay comparison (lane frames without pose 0.76->0.50, pending resolved 0.25->0.64).
+    imu_fill_enabled: true
+    imu_fill_rate_hz: 20.0
+    imu_fill_max_span_sec: 3.0
+    imu_fill_max_closure_m: 0.25
+    imu_fill_max_closure_ratio: 0.3

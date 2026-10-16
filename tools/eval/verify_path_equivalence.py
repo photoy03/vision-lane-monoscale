@@ -32,6 +32,12 @@ ADDED_EXPLICIT = {
         'min_blob_reference_pixels': 80, 'publish_rate_hz': 5.0, 'map_resolution_m': 0.1,
         'map_x_min_m': -30.0, 'map_x_max_m': 30.0, 'map_y_min_m': -30.0, 'map_y_max_m': 30.0,
     },
+    # Item 5: IMU-rate fill parameters. imu_fill_enabled=True is the one intended
+    # behavior change (the node's own default stays False); the rest equal defaults.
+    'lane_odom_stabilizer': {
+        'imu_fill_enabled': True, 'imu_fill_rate_hz': 20.0, 'imu_fill_max_span_sec': 3.0,
+        'imu_fill_max_closure_m': 0.25, 'imu_fill_max_closure_ratio': 0.3,
+    },
 }
 
 
@@ -50,8 +56,9 @@ def without_added(nodes):
 def launch_defaults_compatible(reference, current):
     # An empty default now means "use the package default"; the effective
     # graph comparison proves the resulting values did not change.
-    return reference.keys() == current.keys() and all(
-        reference[key] == current[key] or current[key] == '' for key in reference)
+    # New arguments are allowed only with an empty (package-default) value.
+    return reference.keys() <= current.keys() and all(
+        reference.get(key, '') == current[key] or current[key] == '' for key in current)
 
 
 class Action:
