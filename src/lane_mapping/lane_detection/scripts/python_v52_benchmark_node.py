@@ -28,7 +28,7 @@ class PythonV52Benchmark(Node):
         ).value)
         calibration = Path(self.declare_parameter(
             "calibration_npz",
-            str(shared / "config/fisheye_calibration.npz"),
+            str(Path(get_package_share_directory("vision_lane_bringup")) / "config/calibration/front.npz"),
         ).value)
         image_topic = self.declare_parameter("image_topic", "/camera/image_raw").value
         profile_path = Path(self.declare_parameter(

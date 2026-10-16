@@ -74,7 +74,7 @@ class RigTests(unittest.TestCase):
             ET.parse(path)
 
     def test_stage1_gates(self):
-        params = yaml.safe_load((BRINGUP / 'config/lane_detection.yaml').read_text())['global_mapping_cpp']['ros__parameters']
+        params = yaml.safe_load((ROOT / 'src/lane_mapping/lane_detection/config/global_mapping_cpp.yaml').read_text())['global_mapping_cpp']['ros__parameters']
         self.assertEqual(params['input_mode'], 'topic')
         self.assertFalse(params['use_static_pose'])
         self.assertTrue(params['sync_images_to_odom'])

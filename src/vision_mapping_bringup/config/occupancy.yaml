@@ -1,20 +1,22 @@
-# Preserved effective values; command-line launch arguments retain priority.
+# Vehicle overrides only. Node defaults live in the owning package:
+#   monoscale_occupancy_grid_map/config/occupancy.param.yaml (monoscale_occupancy_grid_map); map extent/frame: map.yaml
+# launch_arguments: command-line knobs. An empty value means "use the package default".
 launch_arguments:
   occupancy_topic: /perception/occupancy_grid_map
-  occupancy_processing_width: '1280'
-  occupancy_use_cuda: 'true'
-  occupancy_rolling_radius_m: '60.0'
-  occupancy_keyframe_travel_m: '0.25'
-  occupancy_occupied_probability: '0.85'
-  occupancy_free_probability: '0.40'
-  occupancy_free_cost_max: '1000.0'
-  occupancy_free_cap: '0.5'
-  occupancy_free_to_occupied: '1.0'
-  occupancy_occlusion_aware: '0.55'
-  occupancy_max_pending_keyframes: '2'
-  occupancy_max_odom_gap_sec: '0.40'
-  occupancy_max_odom_translation_m: '0.10'
-  occupancy_max_odom_yaw_deg: '3.0'
-  occupancy_image_quality_gate_mode: reject
-  occupancy_image_quality_min_sharpness: '25.0'
+  occupancy_processing_width: ''
+  occupancy_use_cuda: ''
+  occupancy_rolling_radius_m: ''
+  occupancy_keyframe_travel_m: ''
+  occupancy_occupied_probability: ''
+  occupancy_free_probability: ''
+  occupancy_free_cost_max: ''
+  occupancy_free_cap: ''
+  occupancy_free_to_occupied: ''
+  occupancy_occlusion_aware: ''
+  occupancy_max_pending_keyframes: ''
+  occupancy_max_odom_gap_sec: ''
+  occupancy_max_odom_translation_m: ''
+  occupancy_max_odom_yaw_deg: ''
+  occupancy_image_quality_gate_mode: ''
+  occupancy_image_quality_min_sharpness: ''
   occupancy_filter_lanes: 'false'

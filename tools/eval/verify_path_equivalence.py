@@ -20,6 +20,35 @@ LAYOUT = {
     **{name:'src/monoscale/'+name for name in ('monoscale_core','monoscale_tracker','monoscale_odometry','monoscale_occupancy_grid_map','monoscale_pose')},
 }
 
+# Parameters now passed explicitly (package defaults / shared map.yaml) that the
+# reference left to the node's C++ declaration. Each value equals that default.
+ADDED_EXPLICIT = {
+    'monoscale_occupancy_grid_map': {
+        'min_blob_reference_pixels': 80, 'publish_rate_hz': 5.0, 'map_resolution_m': 0.1,
+        'map_x_min_m': -30.0, 'map_x_max_m': 30.0, 'map_y_min_m': -30.0, 'map_y_max_m': 30.0,
+    },
+}
+
+
+def without_added(nodes):
+    result = []
+    for node in nodes:
+        node = dict(node)
+        added = ADDED_EXPLICIT.get(node.get('name'), {})
+        if isinstance(node.get('parameters'), dict) and added:
+            node['parameters'] = {key: value for key, value in node['parameters'].items()
+                                  if not (key in added and value == added[key])}
+        result.append(node)
+    return result
+
+
+def launch_defaults_compatible(reference, current):
+    # An empty default now means "use the package default"; the effective
+    # graph comparison proves the resulting values did not change.
+    return reference.keys() == current.keys() and all(
+        reference[key] == current[key] or current[key] == '' for key in reference)
+
+
 class Action:
     def __init__(self,*args,**kwargs): self.args=args; self.kw=kwargs
 
@@ -92,8 +121,8 @@ def main():
                 b,gb=graph(NEW,LAYOUT,case)
                 if old:
                     a,ga=graph(old,old_layout,case)
-                    assert a==b, 'Launch defaults changed'
-                    assert ga==gb, f'Effective node/parameter graph changed: {case}'
+                    assert launch_defaults_compatible(a,b), 'Launch defaults changed'
+                    assert without_added(ga)==without_added(gb), f'Effective node/parameter graph changed: {case}'
                 parts=[]
                 for group in ('sensors','monoscale','lanes'):
                     _,part=graph(NEW,LAYOUT,case,group); parts.extend(part)

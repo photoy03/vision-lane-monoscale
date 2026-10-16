@@ -1,47 +1,6 @@
-# Preserved effective values; command-line launch arguments retain priority.
-/**:
-  ros__parameters:
-    input_topic: /parking/cpp/marking_segments
-    input_frame: base_link
-    map_frame: lane_map
-    camera_id: front
-    camera_ids:
-    - front
-    warmup_frames: 120
-    keyframe_translation_m: 0.1
-    keyframe_yaw_deg: 1.5
-    max_input_age_sec: 0.5
-    reject_late_input: false
-    rolling_distance_m: 60.0
-    extent_mode: github_fixed
-    match_angle_deg: 5.0
-    match_offset_m: 0.15
-    match_overlap_m: 0.2
-    match_overlap_ratio: 0.25
-    continuation_mode: false
-    continuation_gap_m: 0.3
-    duplicate_render_offset_m: 0.2
-    duplicate_candidate_offset_m: 0.5
-    enable_pose_registration: true
-    support_bin_m: 0.1
-    confirm_keyframes: 3
-    min_segment_length_m: 0.65
-    max_segment_length_m: 12.0
-    min_confidence: 0.5
-    max_landmarks: 1000
-    tentative_ttl_sec: 8.0
-    confirmed_ttl_sec: 300.0
-    occupancy_filter_enabled: false
-    occupancy_topic: /perception/occupancy_grid_map
-    occupancy_threshold: 70
-    occupancy_confirm_updates: 3
-    occupancy_inflation_m: 0.15
-    map_x_min_m: -30.0
-    map_x_max_m: 30.0
-    map_y_min_m: -30.0
-    map_y_max_m: 30.0
-    map_resolution_m: 0.05
-    map_publish_hz: 5.0
+# Vehicle overrides only. Node defaults live in the owning package:
+#   lane_map/config/map_fusion.yaml (lane_map_fusion); map extent/frame: map.yaml
+# launch_arguments: command-line knobs. An empty value means "use the package default".
 launch_arguments:
   launch_lane_fusion: 'true'
   map_fusion_mode: legacy

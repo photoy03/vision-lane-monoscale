@@ -28,6 +28,8 @@ import tempfile
 import time
 import uuid
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 class CheckFailed(RuntimeError):
     def __init__(self, code, message):
@@ -213,7 +215,7 @@ def main(argv=None):
         'sync_images_to_odom': 'true', 'sync_max_wait_sec': '0.08', 'sync_queue_size': '8',
         'startup_warmup_frames': '0', 'publish_debug_map': 'false', 'publish_debug_vectors': 'false',
         'preprocess_backend': 'cpu', 'vectorize_every_n': '1', 'meters_per_pixel': '0.0125',
-        'calibration_yaml': ('fisheye_calibration_cpp.yaml' if args.package_calibration
+        'calibration_yaml': (str(ROOT / 'src/vision_mapping_bringup/config/calibration/front_opencv.yaml') if args.package_calibration
                              else str(run / 'calibration.yaml')),
         'profile_csv_path': str(run / 'profile.csv'),
     }

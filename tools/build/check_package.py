@@ -59,11 +59,11 @@ def check_source(root):
                     and np.array_equal(d, info['D'])
                     and tuple(size) == (info['image_width'], info['image_height'])):
                 errors.append('Human-readable calibration and runtime NPZ disagree')
-            lane_yaml = cv2.FileStorage(str(root / 'src/lane_mapping/lane_detection/config/fisheye_calibration_cpp.yaml'), cv2.FILE_STORAGE_READ)
+            lane_yaml = cv2.FileStorage(str(config / 'calibration/front_opencv.yaml'), cv2.FILE_STORAGE_READ)
             try:
                 if not (np.array_equal(k, lane_yaml.getNode('K').mat())
                         and np.array_equal(d, lane_yaml.getNode('D').mat().reshape(-1))):
-                    errors.append('Lane OpenCV calibration and bringup NPZ disagree')
+                    errors.append('OpenCV calibration (front_opencv.yaml) and runtime NPZ disagree')
             finally:
                 lane_yaml.release()
     except Exception as exc:

@@ -118,6 +118,13 @@ public:
     const double occlusion_aware = declare_parameter<double>("occlusion_aware", 0.98);
     extent_mode_ = declare_parameter<std::string>("extent_mode", "github_fixed");
     const double rate = declare_parameter<double>("publish_rate_hz", 5.0);
+    // Shared map definition (vision_mapping_bringup/config/map.yaml). The
+    // defaults are the documented fixed 600x600 lattice at 0.1 m from (-30,-30).
+    const double map_resolution = declare_parameter<double>("map_resolution_m", 0.1);
+    const double map_x_min = declare_parameter<double>("map_x_min_m", -30.0);
+    const double map_x_max = declare_parameter<double>("map_x_max_m", 30.0);
+    const double map_y_min = declare_parameter<double>("map_y_min_m", -30.0);
+    const double map_y_max = declare_parameter<double>("map_y_max_m", 30.0);
 
     // The mounts, one block per camera, the same numbers the offline path
     // reads out of vision_fisheye.param.yaml.
@@ -185,8 +192,19 @@ public:
       throw std::invalid_argument("invalid occupancy topics, image width, odom gap, or quality gate");
     }
 
+    if (!std::isfinite(map_resolution) || map_resolution <= 0.0 ||
+      !std::isfinite(map_x_min) || !std::isfinite(map_x_max) || map_x_max <= map_x_min ||
+      !std::isfinite(map_y_min) || !std::isfinite(map_y_max) || map_y_max <= map_y_min)
+    {
+      throw std::invalid_argument("invalid map extent or resolution");
+    }
     monoscale_occupancy::SweepSettings settings;  // operating-point defaults
     settings.use_cuda = use_cuda;
+    settings.resolution = map_resolution;
+    settings.origin_x = map_x_min;
+    settings.origin_y = map_y_min;
+    settings.grid_width = static_cast<int>(std::lround((map_x_max - map_x_min) / map_resolution));
+    settings.grid_height = static_cast<int>(std::lround((map_y_max - map_y_min) / map_resolution));
     settings.rolling_radius = rolling_radius;
     settings.keyframe_travel = keyframe_travel;
     settings.occupied_probability = occupied_probability;

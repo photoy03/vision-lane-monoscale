@@ -1,6 +1,8 @@
 # Human-readable snapshot only. Runtime still loads the unchanged NPZ below.
 schema_version: 1
 runtime_calibration: front.npz
+# Same intrinsics in OpenCV FileStorage form, for standalone lane_detection launches.
+opencv_calibration: front_opencv.yaml
 distortion_model: equidistant
 image_width: 2560
 image_height: 1440

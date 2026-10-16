@@ -4,9 +4,8 @@
     "src/vision_mapping_bringup/config/calibration/front.npz": "7c82891ee611d762a003e9243990cc07e3264abf5e738ee5fc5ebd4211c4b79f",
     "src/vision_mapping_bringup/config/rig.yaml": "9ffe6c2a01cdfb8e58219150a585ae4b6bdf1a5746fdcd62263e2335d103f7cd",
     "src/vision_mapping_bringup/config/rear_rig.yaml": "fddda382587e9ad5f39104cff717f926aa63519a6bc2746a4a3fc2006f716064",
-    "src/lane_mapping/lane_detection/config/fisheye_calibration.npz": "7c82891ee611d762a003e9243990cc07e3264abf5e738ee5fc5ebd4211c4b79f",
     "src/vision_mapping_bringup/config/calibration/rear.npz": "7c82891ee611d762a003e9243990cc07e3264abf5e738ee5fc5ebd4211c4b79f",
-    "src/lane_mapping/lane_detection/config/fisheye_calibration_cpp.yaml": "705603b187014b9d5e821d9cc943b11d1600676e559a7784e54fd1086c1d3825"
+    "src/vision_mapping_bringup/config/calibration/front_opencv.yaml": "705603b187014b9d5e821d9cc943b11d1600676e559a7784e54fd1086c1d3825"
   },
   "required_paths": [
     "src/vision_mapping_bringup/launch/live.launch.py",

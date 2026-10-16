@@ -31,16 +31,30 @@ single_camera_lane/vision_support는 이전 명령 호환용 두 파일만 남�
 
 ## config
 
-tracker/odometry/pose/lane_detection/lane_map YAML에는 노드 ros__parameters와 launch_arguments가 있다.
-occupancy/sensors/runtime YAML에는 기존 CLI 인수 기본값이 있다. runtime은 전체실행/지도범위 공통 옵션이다.
-CLI 인수 우선순위 유지. YAML 전체를 --params-file로 직접 넘기지 않고 bringup이 노드 값을 추출한다.
-qos.yaml은 replay, recording_qos.yaml은 기록 override다.
-개별 MonoScale/lane package의 config는 독립 실행·오프라인 도구 호환 때문에 유지한다.
-live의 기본값은 bringup/config를 사용한다.
+원칙: 노드 기본값은 그 노드를 가진 패키지 config에 한 벌만 두고, bringup config에는 차량 고유 덮어쓰기와 launch 인수만 둔다.
+bringup(pipeline.py)은 `패키지 기본값 → bringup 덮어쓰기 → 비어 있지 않은 launch 인수` 순서로 합친다.
 
-calibration/front.npz는 기존 NPZ와 byte 동일하다. rear.npz는 같은 값의 복사본이지 독립 재보정 결과가 아니다.
-기존 rear_calibration='' 동작(전방 재사용)을 유지한다. 별도 후방 파일은 rear_calibration 인수로 지정한다.
-info.yaml은 설명용이다. rig.yaml은 전방/IMU, rear_rig.yaml은 기존 임시 후방 설치값이다.
-tests/fixtures/carla는 시험 YAML 두 개이지 simulator가 아니다.
+| 노드 | 패키지 기본값 | bringup 덮어쓰기 |
+|---|---|---|
+| feature_tracker, monoscale_odometry | monoscale_odometry/config/vision_fisheye.param.yaml + deployment.param.yaml | 없음 (tracker.yaml/odometry.yaml은 launch 인수만) |
+| lane_odom_stabilizer | monoscale_pose/config/odom_stabilizer.yaml | 없음 (pose.yaml은 launch 인수만) |
+| global_mapping_cpp | lane_detection/config/global_mapping_cpp.yaml | lane_detection.yaml: 카메라 장치·캡처 크기·광학 frame |
+| lane_map_fusion | lane_map/config/map_fusion.yaml | 없음 (지도 범위·frame은 map.yaml) |
+| monoscale_occupancy_grid_map | monoscale_occupancy_grid_map/config/occupancy.param.yaml (카메라 블록 제외) | 없음 (지도 범위·frame은 map.yaml) |
+
+launch 인수 값이 비어 있으면(`''`) 패키지 기본값을 쓴다. 값을 주면 그 값이 우선한다.
+기본값과 다른 값을 쓰는 인수만 bringup에 값이 남아 있다: `image_quality_gate_mode:=monitor`(차선), `lane_pending_recovery:=true`, `occupancy_topic`, `occupancy_filter_lanes`, `map_extent_mode`.
+
+map.yaml은 차선 지도(lane_map_fusion)와 occupancy가 함께 쓰는 지도 정의 하나다: frame, 고정 범위 box(-30~30 m), rolling 반경(60 m),
+층별 해상도(차선 0.05 m, occupancy 0.1 m). occupancy의 600×600·0.1 m·원점(-30,-30)도 이제 이 값에서 계산한다(기본값 동일).
+lane_detection 노드 내부의 디버그 BEV 지도(-10~20 m × -15~15 m)는 검출용 화면이며 공유 지도와 별개다.
+
+보정 파일은 vision_mapping_bringup/config/calibration 한 곳에만 있다: front.npz(실행용), front_opencv.yaml(같은 값의 OpenCV 형식,
+lane_detection 단독 launch가 기본으로 사용), rear.npz(전방 복사본, 독립 보정 아님), info.yaml(설명용).
+rear_calibration 빈 인수는 기존처럼 전방 값을 재사용한다. rig.yaml은 전방/IMU, rear_rig.yaml은 기존 임시 후방 설치값이다.
+qos.yaml은 replay, recording_qos.yaml은 기록 override다. tests/fixtures/carla는 시험 YAML 두 개이지 simulator가 아니다.
+
+lane_detection 단독 launch: global_mapping_cpp.launch.py는 기본값 + 정적 pose 데모 설정, global_mapping_v4l2*.launch.py는
+기본값 + global_mapping_v4l2.yaml(장치·캡처 overlay)을 쓴다. 이 정리로 단독 실행 값이 실차 검증값으로 바뀌었다(목록은 검증 보고서).
 
 이전 자료는 /home/jaehun/vision_support_ws_archive_20261017에 보관한다.

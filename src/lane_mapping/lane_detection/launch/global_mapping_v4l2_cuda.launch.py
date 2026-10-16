@@ -9,13 +9,11 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    cfg = (
-        Path(get_package_share_directory("vision_lane_global_mapping_cpp"))
-        / "config"
-        / "global_mapping_v4l2.yaml"
-    )
+    config = Path(get_package_share_directory("vision_lane_global_mapping_cpp")) / "config"
+    calibration = Path(get_package_share_directory("vision_lane_bringup")) / "config/calibration/front_opencv.yaml"
     return LaunchDescription(
         [
+            DeclareLaunchArgument("calibration_yaml", default_value=str(calibration)),
             DeclareLaunchArgument(
                 "cuda_fallback_to_cpu",
                 default_value="false",
@@ -27,8 +25,10 @@ def generate_launch_description():
                 name="global_mapping_cpp",
                 output="screen",
                 parameters=[
-                    str(cfg),
+                    str(config / "global_mapping_cpp.yaml"),
+                    str(config / "global_mapping_v4l2.yaml"),
                     {
+                        "calibration_yaml": LaunchConfiguration("calibration_yaml"),
                         "preprocess_backend": "cuda",
                         "cuda_fallback_to_cpu": ParameterValue(
                             LaunchConfiguration("cuda_fallback_to_cpu"), value_type=bool

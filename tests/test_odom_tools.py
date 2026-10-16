@@ -357,12 +357,12 @@ class OdomTests(unittest.TestCase):
         self.assertIsNone(interpolate_imu_yaw([(1.0, 0.0)], 1.1))
 
     def test_lane_sync_limits_are_explicit(self):
-        lane = yaml.safe_load((ROOT / 'src/vision_mapping_bringup/config/lane_detection.yaml').read_text())['global_mapping_cpp']['ros__parameters']
+        lane = yaml.safe_load((ROOT / 'src/lane_mapping/lane_detection/config/global_mapping_cpp.yaml').read_text())['global_mapping_cpp']['ros__parameters']
         self.assertEqual(lane['max_odom_interpolation_gap_sec'], .25)
         self.assertEqual(lane['max_odom_prediction_sec'], .40)
         self.assertEqual(lane['sync_max_wait_sec'], 1.20)
         self.assertGreaterEqual(lane['sync_queue_size'], 30)
-        odom = yaml.safe_load((ROOT / 'src/vision_mapping_bringup/config/pose.yaml').read_text())['lane_odom_stabilizer']['ros__parameters']
+        odom = yaml.safe_load((ROOT / 'src/monoscale/monoscale_pose/config/odom_stabilizer.yaml').read_text())['lane_odom_stabilizer']['ros__parameters']
         self.assertLessEqual(odom['max_resample_span_sec'], .25)
         self.assertEqual(odom['imu_stationary_max_curve_yaw_deg'], .5)
         self.assertEqual(odom['imu_stationary_max_endpoint_yaw_error_deg'], 4.0)
