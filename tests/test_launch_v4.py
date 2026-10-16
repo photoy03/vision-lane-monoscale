@@ -24,7 +24,7 @@ module('launch',LaunchDescription=Item)
 module('launch.actions',**{n:Item for n in ['DeclareLaunchArgument','EmitEvent','LogInfo','OpaqueFunction','RegisterEventHandler']})
 module('launch.event_handlers',OnProcessExit=Item);module('launch.events',Shutdown=Item)
 module('launch.substitutions',LaunchConfiguration=LC);module('launch_ros');module('launch_ros.actions',Node=Item)
-spec=importlib.util.spec_from_file_location('v4',root/'src/vision_mapping_bringup/vision_lane_bringup/pipeline.py')
+spec=importlib.util.spec_from_file_location('v4',root/'src/vision_mapping_bringup/vision_mapping_bringup/pipeline.py')
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 with tempfile.TemporaryDirectory() as td:
     t=Path(td)
@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory() as td:
         assert len([x for x in nodes if x.kw.get('package')=='gscam'])==n
         expected=2 if mode=='compare' else 1
         viewers=[x for x in nodes if x.kw.get('package')=='rqt_image_view']
-        fusion=[x for x in nodes if x.kw.get('package')=='vision_lane_map_fusion']
+        fusion=[x for x in nodes if x.kw.get('package')=='lane_map']
         occupancy=[x for x in nodes if x.kw.get('package')=='monoscale_occupancy_grid_map']
         rviz=[x for x in nodes if x.kw.get('package')=='rviz2']
         assert len(occupancy)==1 and len(rviz)==1
@@ -120,8 +120,8 @@ with tempfile.TemporaryDirectory() as td:
     recovery=dict(replay,output_dir=str(t/'recovery'),lane_pending_recovery='true',
                   recovery_session_id='test_recovery')
     recovery_nodes=m._launch(recovery)
-    mapper=[x for x in recovery_nodes if x.kw.get('package')=='vision_lane_global_mapping_cpp'][0]
-    fusion=[x for x in recovery_nodes if x.kw.get('package')=='vision_lane_map_fusion'][0]
+    mapper=[x for x in recovery_nodes if x.kw.get('package')=='lane_detection'][0]
+    fusion=[x for x in recovery_nodes if x.kw.get('package')=='lane_map'][0]
     mp=mapper.kw['parameters'][-1];fp=fusion.kw['parameters'][-1]
     assert mp['pending_observations_enabled'] is True and mp['recovered_output_enabled'] is True
     assert mp['recovery_session_id']=='test_recovery' and len(mp['recovery_calibration_id'])==64

@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>vision_lane_bringup</name>
+  <name>vision_mapping_bringup</name>
   <version>0.1.0</version>
   <description>Stage 1: shared color camera, MonoScale odometry and aligned lane mapping.</description>
   <maintainer email="jaehun@todo.todo">jaehun</maintainer>
@@ -31,7 +31,7 @@
   <exec_depend>monoscale_pose</exec_depend>
   <exec_depend>monoscale_occupancy_grid_map</exec_depend>
   <exec_depend>monoscale_ublox</exec_depend>
-  <exec_depend>vision_lane_global_mapping_cpp</exec_depend>
-  <exec_depend>vision_lane_map_fusion</exec_depend>
+  <exec_depend>lane_detection</exec_depend>
+  <exec_depend>lane_map</exec_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

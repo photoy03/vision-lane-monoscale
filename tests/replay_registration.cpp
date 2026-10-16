@@ -1,4 +1,4 @@
-#include "vision_lane_map_fusion/registration.hpp"
+#include "lane_map/registration.hpp"
 #include <iostream>
 using namespace lane_fusion;
 int main(){Settings s;s.confirm_views=2;s.min_confidence=.45;RegisteredBank b(s);LineBank raw(s);

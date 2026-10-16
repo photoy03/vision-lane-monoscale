@@ -11,6 +11,6 @@ if [[ ! -f "$cuda_root/install/setup.bash" ]]; then
   exit 1
 fi
 source "$cuda_root/install/setup.bash"
-exec ros2 launch vision_lane_bringup live.launch.py \
+exec ros2 launch vision_mapping_bringup live.launch.py \
   launch_occupancy:=true launch_rviz:=true launch_viewer:=false \
   occupancy_use_cuda:=true "$@"

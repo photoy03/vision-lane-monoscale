@@ -30,14 +30,26 @@ cd ~/vision_support_ws
 bash tools/build/build.sh cuda
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch vision_lane_bringup live.launch.py \
+ros2 launch vision_mapping_bringup live.launch.py \
   rear_enabled:=true device:=/dev/실제전방 rear_device:=/dev/실제후방 \
   launch_occupancy:=true launch_rviz:=true launch_viewer:=false
 ```
 
 장치는 실제 값으로 바꾼다. 기존 rear=false/occupancy=false 기본값을 유지한다.
 CPU-only는 tools/build/build.sh cpu. build/install/log는 빌드 시 생성되는 폴더다.
-ROS package 이름은 기존 vision_lane_bringup/vision_lane_global_mapping_cpp/vision_lane_map_fusion을 유지한다.
+ROS package 이름은 폴더 이름과 같다(2026-10-17 변경). 이전 명령은 아래처럼 바꾼다.
+
+| 이전(OLD) | 현재(NEW) |
+|---|---|
+| `ros2 launch vision_lane_bringup <file>.launch.py` | `ros2 launch vision_mapping_bringup <file>.launch.py` |
+| `ros2 run vision_lane_global_mapping_cpp global_mapping_node` | `ros2 run lane_detection global_mapping_node` |
+| `ros2 run vision_lane_global_mapping_cpp compressed_image_replay_node` | `ros2 run lane_detection compressed_image_replay_node` |
+| `ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2.launch.py` | `ros2 launch lane_detection global_mapping_v4l2.launch.py` |
+| `ros2 run vision_lane_map_fusion map_fusion_node` | `ros2 run lane_map map_fusion_node` |
+| `ros2 launch vision_lane_map_fusion map_fusion.launch.py` | `ros2 launch lane_map map_fusion.launch.py` |
+| Python `import vision_lane_bringup.pipeline` | `import vision_mapping_bringup.pipeline` |
+
+노드 이름(global_mapping_cpp, lane_map_fusion 등), 토픽, 메시지 패키지 vision_lane_interfaces는 바뀌지 않았다.
 
 - [구조와 변경 범위](docs/STRUCTURE_KO.md)
 - [설치·실행·기록·시험](docs/RUN_KO.md)

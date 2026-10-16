@@ -42,7 +42,7 @@ def load(name, path):
 
 from workspace_paths import package_source
 
-policy = load('odom_policy', ROOT / 'src/vision_mapping_bringup/vision_lane_bringup/odom_policy.py')
+policy = load('odom_policy', ROOT / 'src/vision_mapping_bringup/vision_mapping_bringup/odom_policy.py')
 summary = load('summary', ROOT / 'tools/eval/summarize_odom.py')
 
 
@@ -76,7 +76,7 @@ class OdomTests(unittest.TestCase):
         module('launch_ros')
         module('launch_ros.actions', Node=Action)
         with patch.dict(sys.modules, modules), patch.object(sys, 'path', [str(ROOT / 'src/vision_mapping_bringup'), *sys.path]):
-            launch = load('single_camera_launch', ROOT / 'src/vision_mapping_bringup/vision_lane_bringup/pipeline.py')
+            launch = load('single_camera_launch', ROOT / 'src/vision_mapping_bringup/vision_mapping_bringup/pipeline.py')
             for enable in ('false', 'true'):
                 with tempfile.TemporaryDirectory() as directory:
                     args = dict(device='/dev/video2', imu_device='/dev/ttyACM0',
@@ -133,7 +133,7 @@ class OdomTests(unittest.TestCase):
                     self.assertEqual(main['cameras'], ['front'])
                     self.assertEqual(main['odom_frame'], 'odom')
                     stabilizer = next(n for n in nodes if n['package'] == 'monoscale_pose')
-                    lane = next(n for n in nodes if n['package'] == 'vision_lane_global_mapping_cpp')
+                    lane = next(n for n in nodes if n['package'] == 'lane_detection')
                     self.assertEqual(stabilizer['parameters'][-1]['input_odom_topic'], main['odometry_topic'])
                     self.assertEqual(stabilizer['parameters'][-1]['input_parent_frame'], 'odom')
                     self.assertEqual(stabilizer['parameters'][-1]['parent_frame'], 'map')
@@ -152,7 +152,7 @@ class OdomTests(unittest.TestCase):
                         self.assertTrue(all(isinstance(p, dict) for p in odoms[1]['parameters']))
 
     def test_registration_comparison_is_separate_from_shared_map(self):
-        text = (ROOT / 'src/vision_mapping_bringup/vision_lane_bringup/pipeline.py').read_text()
+        text = (ROOT / 'src/vision_mapping_bringup/vision_mapping_bringup/pipeline.py').read_text()
         self.assertIn("'enable_pose_registration': False", text)
         self.assertIn("'enable_pose_registration': True", text)
         self.assertIn('/parking/cpp/global_marking_map_registered_compare', text)

@@ -639,7 +639,7 @@ class GlobalMappingNode : public rclcpp::Node {
     // Relative calibration assets belong to this package, not the shell CWD.
     if(!calibration_.empty() && std::filesystem::path(calibration_).is_relative()) {
       calibration_=(std::filesystem::path(ament_index_cpp::get_package_share_directory(
-        "vision_lane_global_mapping_cpp"))/"config"/calibration_).string();
+        "lane_detection"))/"config"/calibration_).string();
     }
     camera_id_=declare_parameter<std::string>("camera_id","front");
     camera_frame_=declare_parameter<std::string>("camera_frame","front_camera_optical_frame");

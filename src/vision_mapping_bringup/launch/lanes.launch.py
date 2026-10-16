@@ -1,5 +1,5 @@
 """Existing lane detection/mapping and optional viewers only."""
-from vision_lane_bringup.pipeline import description
+from vision_mapping_bringup.pipeline import description
 
 
 def generate_launch_description():

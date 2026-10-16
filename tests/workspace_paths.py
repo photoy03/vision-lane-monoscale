@@ -1,11 +1,11 @@
-"""Source locations for test fixtures; ROS package names are unchanged."""
+"""Source locations for test fixtures; ROS package names equal folder names."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = {
-    'vision_lane_bringup': 'src/vision_mapping_bringup',
-    'vision_lane_global_mapping_cpp': 'src/lane_mapping/lane_detection',
-    'vision_lane_map_fusion': 'src/lane_mapping/lane_map',
+    'vision_mapping_bringup': 'src/vision_mapping_bringup',
+    'lane_detection': 'src/lane_mapping/lane_detection',
+    'lane_map': 'src/lane_mapping/lane_map',
     'vision_lane_interfaces': 'src/interfaces/vision_lane_interfaces',
     'monoscale_ublox': 'src/sensors/monoscale_ublox',
     **{name: 'src/monoscale/' + name for name in

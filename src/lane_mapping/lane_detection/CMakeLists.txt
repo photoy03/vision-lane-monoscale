@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(vision_lane_global_mapping_cpp)
+project(lane_detection)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)

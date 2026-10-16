@@ -110,7 +110,7 @@ def _launch(context):
         front_compressed = "/measurement/front/image_raw/compressed"
         topics.append(front_compressed)
         republishers.append(Node(
-            package="vision_lane_bringup",
+            package="vision_mapping_bringup",
             executable="measurement_image_compressor.py",
             name="measurement_front_jpeg_republisher",
             output="screen",
@@ -134,7 +134,7 @@ def _launch(context):
             rear_compressed = "/measurement/rear/image_raw/compressed"
             topics.append(rear_compressed)
             republishers.append(Node(
-                package="vision_lane_bringup",
+                package="vision_mapping_bringup",
                 executable="measurement_image_compressor.py",
                 name="measurement_rear_jpeg_republisher",
                 output="screen",
@@ -153,7 +153,7 @@ def _launch(context):
     topics.extend(extra_topics)
     topics = list(dict.fromkeys(topics))
 
-    shared = Path(get_package_share_directory("vision_lane_bringup"))
+    shared = Path(get_package_share_directory("vision_mapping_bringup"))
     qos_path = shared / "config/recording_qos.yaml"
     command = [
         "ros2", "bag", "record",

@@ -12,13 +12,18 @@ import yaml
 
 NEW = Path(__file__).resolve().parents[2]
 LAYOUT = {
-    'vision_lane_bringup': 'src/vision_mapping_bringup',
-    'vision_lane_global_mapping_cpp': 'src/lane_mapping/lane_detection',
-    'vision_lane_map_fusion': 'src/lane_mapping/lane_map',
+    'vision_mapping_bringup': 'src/vision_mapping_bringup',
+    'lane_detection': 'src/lane_mapping/lane_detection',
+    'lane_map': 'src/lane_mapping/lane_map',
     'vision_lane_interfaces': 'src/interfaces/vision_lane_interfaces',
     'monoscale_ublox': 'src/sensors/monoscale_ublox',
     **{name:'src/monoscale/'+name for name in ('monoscale_core','monoscale_tracker','monoscale_odometry','monoscale_occupancy_grid_map','monoscale_pose')},
 }
+# Reference workspaces use the pre-rename ROS package names; compare under the new names.
+RENAMED = {'vision_lane_bringup': 'vision_mapping_bringup',
+           'vision_lane_global_mapping_cpp': 'lane_detection',
+           'vision_lane_map_fusion': 'lane_map'}
+OLD_NAMES = {new: old for old, new in RENAMED.items()}
 
 # Parameters now passed explicitly (package defaults / shared map.yaml) that the
 # reference left to the node's C++ declaration. Each value equals that default.
@@ -58,6 +63,7 @@ class Configuration:
 
 def graph(root, layout, case, group='all'):
     shares={name:root/path for name,path in layout.items()}
+    bringup='vision_mapping_bringup' if 'vision_mapping_bringup' in layout else 'vision_lane_bringup'
     def module(name,**attrs):
         result=types.ModuleType(name); result.__dict__.update(attrs); sys.modules[name]=result
     module('ament_index_python'); module('ament_index_python.packages',get_package_share_directory=lambda name:str(shares[name]))
@@ -67,13 +73,13 @@ def graph(root, layout, case, group='all'):
     module('launch.substitutions',LaunchConfiguration=Configuration)
     module('launch_ros'); module('launch_ros.actions',Node=Action)
     for name in list(sys.modules):
-        if name.split('.')[0] in ('vision_lane_bringup', 'monoscale_pose'):
+        if name.split('.')[0] in ('vision_lane_bringup', 'vision_mapping_bringup', 'monoscale_pose'):
             del sys.modules[name]
     previous_path = list(sys.path)
-    sys.path[:0] = [str(shares['vision_lane_bringup']), str(shares['monoscale_pose'])]
-    factory=shares['vision_lane_bringup']/'vision_lane_bringup/pipeline.py'
+    sys.path[:0] = [str(shares[bringup]), str(shares['monoscale_pose'])]
+    factory=shares[bringup]/bringup/'pipeline.py'
     modern=factory.exists()
-    if not modern: factory=shares['vision_lane_bringup']/'launch/single_camera_lane.launch.py'
+    if not modern: factory=shares[bringup]/'launch/single_camera_lane.launch.py'
     spec=importlib.util.spec_from_file_location('migration_launch',factory)
     launch=importlib.util.module_from_spec(spec); spec.loader.exec_module(launch)
     defaults={a.args[0]:a.kw['default_value'] for a in launch.generate_launch_description() if a.args and 'default_value' in a.kw}
@@ -90,12 +96,13 @@ def graph(root, layout, case, group='all'):
                     for key in ('/**',node.get('name'),'/' + node.get('name','')):
                         effective.update(data.get(key,{}).get('ros__parameters',{}))
             if 'parameters' in node: node['parameters']=effective
+            node['package']=RENAMED.get(node.get('package'),node.get('package'))
             if node.get('executable')=='odom_stabilizer_node.py': node['package']='@POSE_PACKAGE'
         def normalize(value):
             if isinstance(value,str):
                 value=value.replace(output,'@OUTPUT')
                 if value.endswith(('/lane_occupancy.rviz','/mapping.rviz')): return '@RVIZ'
-                for name,path in shares.items(): value=value.replace(str(path),'@PACKAGE/'+name)
+                for name,path in shares.items(): value=value.replace(str(path),'@PACKAGE/'+RENAMED.get(name,name))
                 return value
             if isinstance(value,list): return [normalize(x) for x in value]
             if isinstance(value,tuple): return tuple(normalize(x) for x in value)
@@ -110,7 +117,8 @@ def main():
     parser.add_argument('--reference',type=Path)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args(); old=args.reference.resolve() if args.reference else None
-    old_layout=LAYOUT if old and (old/'src/vision_mapping_bringup').exists() else {name:'src/'+name for name in LAYOUT}
+    old_layout=({OLD_NAMES.get(n,n):'src/'+OLD_NAMES.get(n,n) for n in LAYOUT}
+                if old and not (old/'src/vision_mapping_bringup').exists() else LAYOUT)
     cases=[]
     for dual in (False,True):
         for mode in ('legacy','continuation','compare'):

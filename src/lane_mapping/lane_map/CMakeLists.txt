@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(vision_lane_map_fusion)
+project(lane_map)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)

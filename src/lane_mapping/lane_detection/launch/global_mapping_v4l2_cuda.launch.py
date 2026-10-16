@@ -9,8 +9,8 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    config = Path(get_package_share_directory("vision_lane_global_mapping_cpp")) / "config"
-    calibration = Path(get_package_share_directory("vision_lane_bringup")) / "config/calibration/front_opencv.yaml"
+    config = Path(get_package_share_directory("lane_detection")) / "config"
+    calibration = Path(get_package_share_directory("vision_mapping_bringup")) / "config/calibration/front_opencv.yaml"
     return LaunchDescription(
         [
             DeclareLaunchArgument("calibration_yaml", default_value=str(calibration)),
@@ -20,7 +20,7 @@ def generate_launch_description():
                 description="Switch permanently to CPU if CUDA is unavailable or fails.",
             ),
             Node(
-                package="vision_lane_global_mapping_cpp",
+                package="lane_detection",
                 executable="global_mapping_node",
                 name="global_mapping_cpp",
                 output="screen",

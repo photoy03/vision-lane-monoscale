@@ -1,4 +1,4 @@
-#include "vision_lane_map_fusion/registration.hpp"
+#include "lane_map/registration.hpp"
 #include <cassert>
 #include <iostream>
 using namespace lane_fusion;

@@ -303,7 +303,7 @@ def main() -> int:
                          f"{args.minimum_free_gib:.2f} GiB")
 
     launch = [
-        "ros2", "launch", "vision_lane_bringup", "single_camera_lane.launch.py",
+        "ros2", "launch", "vision_mapping_bringup", "single_camera_lane.launch.py",
         "launch_camera:=false", "launch_f9r:=false", "use_sim_time:=true",
         "launch_viewer:=false", "launch_rviz:=false",
         f"launch_occupancy:={'true' if occupancy_enabled else 'false'}",
@@ -317,8 +317,8 @@ def main() -> int:
     ]
     launch.extend(f"{name}:={value}" for name, value in launch_overrides.items()
                   if name not in {"launch_occupancy", "launch_lane_fusion"})
-    republisher = repo / "install/vision_lane_global_mapping_cpp/lib/" \
-        "vision_lane_global_mapping_cpp/compressed_image_replay_node"
+    republisher = repo / "install/lane_detection/lib/" \
+        "lane_detection/compressed_image_replay_node"
     if not republisher.is_file():
         raise SystemExit(f"C++ compressed-image replay node is not built: {republisher}")
     front_repub = [str(republisher), "--ros-args", "-p", f"input_topic:={TOPICS[0]}",
@@ -364,7 +364,7 @@ def main() -> int:
                 Path("src/monoscale/monoscale_tracker/src/feature_tracker.cpp"),
                 Path("src/monoscale/monoscale_tracker/include/monoscale_tracker/gyro_rotation.hpp"),
                 Path("src/monoscale/monoscale_odometry/src/odometry_node.cpp"),
-                Path("src/vision_mapping_bringup/vision_lane_bringup/pipeline.py"),
+                Path("src/vision_mapping_bringup/vision_mapping_bringup/pipeline.py"),
                 Path("src/lane_mapping/lane_detection/src/global_mapping_node.cpp"),
                 Path("src/lane_mapping/lane_detection/src/compressed_image_replay_node.cpp"),
                 Path("src/lane_mapping/lane_detection/src/pose_timeline.hpp"),

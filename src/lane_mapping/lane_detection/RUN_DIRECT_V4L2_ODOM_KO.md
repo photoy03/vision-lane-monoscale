@@ -16,9 +16,9 @@
 cd ~/vision_lane_ws
 source /opt/ros/humble/setup.bash
 touch other_cv/5cv/COLCON_IGNORE
-chmod +x src/vision_lane_global_mapping_cpp/scripts/*.py
+chmod +x src/lane_detection/scripts/*.py
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release \
-  --packages-select vision_lane_interfaces vision_lane_global_mapping_cpp
+  --packages-select vision_lane_interfaces lane_detection
 source install/setup.bash
 ```
 
@@ -27,13 +27,13 @@ source install/setup.bash
 먼저 기존 `usb_cam`을 종료하고 `config/global_mapping_v4l2.yaml`의 장치와 calibration 경로를 확인한다.
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2.launch.py
+ros2 launch lane_detection global_mapping_v4l2.launch.py
 ```
 
 위 명령은 결과 비교용 CPU 기준선이다. CUDA 전처리는 다음 launch로 실행한다.
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2_cuda.launch.py
+ros2 launch lane_detection global_mapping_v4l2_cuda.launch.py
 ```
 
 CUDA launch는 `cuda_fallback_to_cpu:=false`가 기본이라서 CUDA 모듈이나 GPU를
@@ -42,7 +42,7 @@ CUDA 결과로 잘못 측정하지 않기 위한 설정이다. 현장 운용에�
 필요할 때만 다음처럼 실행한다.
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2_cuda.launch.py \
+ros2 launch lane_detection global_mapping_v4l2_cuda.launch.py \
   cuda_fallback_to_cpu:=true
 ```
 
@@ -83,7 +83,7 @@ CPU와 CUDA CSV는 각각 다음 경로에 저장된다.
 비교한다.
 
 ```bash
-ros2 run vision_lane_global_mapping_cpp compare_preprocess_backends.py \
+ros2 run lane_detection compare_preprocess_backends.py \
   /tmp/v52_cpp_v4l2_profile.csv \
   /tmp/v52_cpp_v4l2_cuda_profile.csv \
   --warmup 120

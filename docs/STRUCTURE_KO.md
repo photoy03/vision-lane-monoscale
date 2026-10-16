@@ -26,7 +26,7 @@
 기능별 3개를 각각 한 번만 쓴다. 기능별 설정/인수는 일치시켜야 한다.
 각 실행의 출력 폴더는 별도다. 같은 output_dir를 공유하면 덮어쓰기 방지로 거부한다.
 single_camera_lane/vision_support는 이전 명령 호환용 두 파일만 남겼다.
-구성 코드는 vision_lane_bringup/pipeline.py 한곳이며 기능별 launch는 선택한 그룹만 실제 시작한다.
+구성 코드는 vision_mapping_bringup/pipeline.py 한곳이며 기능별 launch는 선택한 그룹만 실제 시작한다.
 그룹 합집합이 전체와 같은지도 시험한다.
 
 ## config

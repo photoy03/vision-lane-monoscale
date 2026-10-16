@@ -1,5 +1,5 @@
 #include <cassert>
-#include "vision_lane_map_fusion/recovery_identity.hpp"
+#include "lane_map/recovery_identity.hpp"
 
 using namespace lane_fusion;
 

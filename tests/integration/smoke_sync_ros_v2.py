@@ -80,11 +80,11 @@ def main(argv=None):
 
     root = args.workspace.expanduser().resolve()
     sys.path.insert(0, str(root / 'src/vision_mapping_bringup'))
-    from vision_lane_bringup.rig import read_calibration, write_opencv_yaml
-    exe = Path(get_package_prefix('vision_lane_global_mapping_cpp')) / 'lib/vision_lane_global_mapping_cpp/global_mapping_node'
+    from vision_mapping_bringup.rig import read_calibration, write_opencv_yaml
+    exe = Path(get_package_prefix('lane_detection')) / 'lib/lane_detection/global_mapping_node'
     if not exe.is_file():
         raise RuntimeError(f'Built executable not found: {exe}')
-    if exe.resolve() != (root / 'install/vision_lane_global_mapping_cpp/lib/vision_lane_global_mapping_cpp/global_mapping_node').resolve():
+    if exe.resolve() != (root / 'install/lane_detection/lib/lane_detection/global_mapping_node').resolve():
         raise RuntimeError('Wrong workspace overlay: use this workspace tools/run/with_cpu_env.sh')
 
     run = Path(tempfile.mkdtemp(prefix='stage1_sync_diag_'))

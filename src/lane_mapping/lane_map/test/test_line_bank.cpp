@@ -2,8 +2,8 @@
 #include <chrono>
 #include <iostream>
 #include <random>
-#include "vision_lane_map_fusion/line_bank.hpp"
-#include "vision_lane_map_fusion/registration.hpp"
+#include "lane_map/line_bank.hpp"
+#include "lane_map/registration.hpp"
 using namespace lane_fusion;
 static Observation line(double y=0,double a=0,double b=2) {return {{a,y},{b,y},.12,.9};}
 static constexpr int64_t sec=1000000000LL;

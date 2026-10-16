@@ -18,8 +18,8 @@ from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from vision_lane_bringup.rig import read_calibration, write_opencv_yaml, rotation_base_from_camera, quaternion_xyzw
-from vision_lane_bringup.odom_policy import odom_policy
+from vision_mapping_bringup.rig import read_calibration, write_opencv_yaml, rotation_base_from_camera, quaternion_xyzw
+from vision_mapping_bringup.odom_policy import odom_policy
 
 
 CONFIG_GROUPS = ('sensors', 'tracker', 'odometry', 'pose', 'occupancy', 'lane_detection', 'lane_map',
@@ -32,15 +32,15 @@ PACKAGE_DEFAULTS = {
     'monoscale_odometry': (('monoscale_odometry', 'config/vision_fisheye.param.yaml'),
                            ('monoscale_odometry', 'config/deployment.param.yaml')),
     'lane_odom_stabilizer': (('monoscale_pose', 'config/odom_stabilizer.yaml'),),
-    'global_mapping_cpp': (('vision_lane_global_mapping_cpp', 'config/global_mapping_cpp.yaml'),),
-    'lane_map_fusion': (('vision_lane_map_fusion', 'config/map_fusion.yaml'),),
+    'global_mapping_cpp': (('lane_detection', 'config/global_mapping_cpp.yaml'),),
+    'lane_map_fusion': (('lane_map', 'config/map_fusion.yaml'),),
     'monoscale_occupancy_grid_map': (
         ('monoscale_occupancy_grid_map', 'config/occupancy.param.yaml'),),
 }
 
 
 def config_data(filename):
-    shared = Path(get_package_share_directory('vision_lane_bringup'))
+    shared = Path(get_package_share_directory('vision_mapping_bringup'))
     return yaml.safe_load((shared / 'config' / filename).read_text(encoding='utf-8'))
 
 
@@ -80,7 +80,7 @@ def _launch(context, group='all'):
     def make_node(**kwargs):
         package = kwargs['package']
         category = ('sensors' if package in ('gscam', 'monoscale_ublox', 'tf2_ros')
-                    else 'lanes' if package in ('vision_lane_global_mapping_cpp', 'vision_lane_map_fusion', 'rqt_image_view', 'rviz2')
+                    else 'lanes' if package in ('lane_detection', 'lane_map', 'rqt_image_view', 'rviz2')
                     else 'monoscale')
         node = Node(**kwargs)
         selected[id(node)] = category
@@ -108,9 +108,9 @@ def _launch(context, group='all'):
         return out
     world = map_definition()
 
-    shared = Path(get_package_share_directory('vision_lane_bringup'))
+    shared = Path(get_package_share_directory('vision_mapping_bringup'))
     mono = Path(get_package_share_directory('monoscale_odometry'))
-    lane = Path(get_package_share_directory('vision_lane_global_mapping_cpp'))
+    lane = Path(get_package_share_directory('lane_detection'))
     rig_path = Path(arg('rig_file') or shared / 'config/rig.yaml')
     rig = yaml.safe_load(rig_path.read_text(encoding='utf-8'))
     if rig.get('imu_axes_aligned_with_base') is not True:
@@ -378,7 +378,7 @@ def _launch(context, group='all'):
                          ('resample_odom_to_camera', 'resample_to_vision_stamps', bool),
                          ('straight_resample_span_sec', 'max_straight_resample_span_sec', float))),
                  }]),
-        make_node(package='vision_lane_global_mapping_cpp', executable='global_mapping_node',
+        make_node(package='lane_detection', executable='global_mapping_node',
              name='global_mapping_cpp', output='screen', parameters=[
                  node_parameters('lane_detection.yaml', 'global_mapping_cpp'), {
                      'use_sim_time': sim_time, 'image_topic': image_topic,
@@ -487,7 +487,7 @@ def _launch(context, group='all'):
         'warmup_frames': 0 if flag('lane_pending_recovery') else 120,
     }
     if launch_lane_fusion and map_fusion_mode in ('legacy', 'compare'):
-        nodes.append(make_node(package='vision_lane_map_fusion', executable='map_fusion_node',
+        nodes.append(make_node(package='lane_map', executable='map_fusion_node',
             name='lane_map_fusion', output='screen', parameters=[fusion_config, {
                 'use_sim_time': sim_time, 'continuation_mode': False,
                 'map_frame': world['frame'], 'enable_pose_registration': False,
@@ -503,7 +503,7 @@ def _launch(context, group='all'):
                 'status_topic': '/parking/cpp/map_fusion/status',
             }]))
     if launch_lane_fusion and map_fusion_mode in ('continuation', 'compare'):
-        nodes.append(make_node(package='vision_lane_map_fusion', executable='map_fusion_node',
+        nodes.append(make_node(package='lane_map', executable='map_fusion_node',
             name='lane_map_fusion_continuation', output='screen', parameters=[fusion_config, {
                 'use_sim_time': sim_time, 'continuation_mode': True,
                 'map_frame': world['frame'], 'enable_pose_registration': False,
@@ -523,7 +523,7 @@ def _launch(context, group='all'):
     # odom frame. This extra topic is allowed to move lane poses privately and
     # therefore must never replace the shared-map output by accident.
     if launch_lane_fusion and compare_lane_registration:
-        nodes.append(make_node(package='vision_lane_map_fusion', executable='map_fusion_node',
+        nodes.append(make_node(package='lane_map', executable='map_fusion_node',
             name='lane_map_fusion_registered_compare', output='screen',
             parameters=[fusion_config, {
                 'use_sim_time': sim_time, 'continuation_mode': False,

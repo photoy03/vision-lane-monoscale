@@ -9,7 +9,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 BRINGUP = ROOT / 'src/vision_mapping_bringup'
-spec = importlib.util.spec_from_file_location('rig', BRINGUP / 'vision_lane_bringup/rig.py')
+spec = importlib.util.spec_from_file_location('rig', BRINGUP / 'vision_mapping_bringup/rig.py')
 rig = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rig)
 

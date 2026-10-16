@@ -1,5 +1,5 @@
-#include "vision_lane_map_fusion/line_bank.hpp"
-#include "vision_lane_map_fusion/registration.hpp"
+#include "lane_map/line_bank.hpp"
+#include "lane_map/registration.hpp"
 #include <iostream>
 using namespace lane_fusion;
 int main(){ Settings s;s.confirm_views=2;s.min_confidence=.45;LineBank b(s);

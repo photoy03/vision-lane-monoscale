@@ -27,8 +27,8 @@
 #include <opencv2/core.hpp>
 using Recovered = vision_lane_interfaces::msg::RecoveredMarkingSegmentArray;
 #include <opencv2/imgproc.hpp>
-#include "vision_lane_map_fusion/registration.hpp"
-#include "vision_lane_map_fusion/recovery_identity.hpp"
+#include "lane_map/registration.hpp"
+#include "lane_map/recovery_identity.hpp"
 
 using Array = vision_lane_interfaces::msg::MarkingSegmentArray;
 using Steady = std::chrono::steady_clock;

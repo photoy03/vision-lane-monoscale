@@ -16,7 +16,7 @@ from vision_lane_interfaces.msg import MarkingSegmentArray
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src/vision_mapping_bringup'))
-from vision_lane_bringup.rig import read_calibration, write_opencv_yaml
+from vision_mapping_bringup.rig import read_calibration, write_opencv_yaml
 
 
 def main():
@@ -45,7 +45,7 @@ def main():
             'publish_debug_map': 'false', 'preprocess_backend': 'cpu',
             'calibration_yaml': str(tmp / 'camera.yaml'), 'profile_csv_path': str(tmp / 'profile.csv'),
         }
-        command = ['ros2', 'run', 'vision_lane_global_mapping_cpp', 'global_mapping_node',
+        command = ['ros2', 'run', 'lane_detection', 'global_mapping_node',
                    '--ros-args', '-r', '__node:=stage1_lane_test']
         for name, value in params.items():
             command += ['-p', f'{name}:={value}']

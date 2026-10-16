@@ -16,24 +16,29 @@ CUDA 기본: /usr/local/cuda-11.8, gcc11, architecture86. 다른 GPU는 호환�
 CPU-only: tools/build/build.sh cpu. ROS와 pip opencv/numpy를 혼용하지 않는다.
 드라이버/Toolkit은 별도 설치 항목이다. 기존 proprietary 선언을 포함해 공개 재배포 허가는 별도 확인한다.
 
+## 패키지 이름 변경 (OLD → NEW)
+
+vision_lane_bringup → vision_mapping_bringup, vision_lane_global_mapping_cpp → lane_detection,
+vision_lane_map_fusion → lane_map. 명령 대응표는 README.md에 있다. 노드 이름·토픽은 그대로다.
+
 ## 전체 실행과 기록
 
 ```bash
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch vision_lane_bringup live.launch.py --show-args
-ros2 launch vision_lane_bringup live.launch.py \
+ros2 launch vision_mapping_bringup live.launch.py --show-args
+ros2 launch vision_mapping_bringup live.launch.py \
   rear_enabled:=true device:=/dev/실제전방 rear_device:=/dev/실제후방 \
   launch_occupancy:=true launch_rviz:=true launch_viewer:=false
 # 별도 터미널에서 두 source 후
-ros2 launch vision_lane_bringup measurement.launch.py \
+ros2 launch vision_mapping_bringup measurement.launch.py \
   trial_name:=layout_check record_rear_camera:=true record_occupancy:=true
 ```
 
 ## 재생
 
 ```bash
-ros2 launch vision_lane_bringup replay.launch.py \
+ros2 launch vision_mapping_bringup replay.launch.py \
   rear_enabled:=true launch_occupancy:=true launch_rviz:=true launch_viewer:=false
 # 별도 터미널: raw Image가 있는 bag
 ros2 bag play /실제/bag --clock

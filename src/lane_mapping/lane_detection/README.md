@@ -20,9 +20,9 @@ plane sweep and `ParkingOccupancyMapper` are outside this benchmark.
 cd ~/vision_lane_ws
 source /opt/ros/humble/setup.bash
 touch other_cv/5cv/COLCON_IGNORE
-chmod +x src/vision_lane_global_mapping_cpp/scripts/*.py
+chmod +x src/lane_detection/scripts/*.py
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release \
-  --packages-select vision_lane_interfaces vision_lane_global_mapping_cpp
+  --packages-select vision_lane_interfaces lane_detection
 source install/setup.bash
 ```
 
@@ -39,7 +39,7 @@ Jetson alone is not sufficient if OpenCV itself was built without those modules.
 Convert the existing `.npz` calibration once:
 
 ```bash
-ros2 run vision_lane_global_mapping_cpp convert_fisheye_npz.py \
+ros2 run lane_detection convert_fisheye_npz.py \
   ~/vision_lane_ws/other_cv/calib_output/fisheye_calibration.npz \
   ~/vision_lane_ws/other_cv/calib_output/fisheye_calibration_cpp.yaml
 ```
@@ -47,7 +47,7 @@ ros2 run vision_lane_global_mapping_cpp convert_fisheye_npz.py \
 For the topic/benchmark path, edit `config/global_mapping_cpp.yaml` and run:
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_cpp.launch.py
+ros2 launch lane_detection global_mapping_cpp.launch.py
 ```
 
 `use_static_pose: true` is only for core-speed comparison. It prevents repeated
@@ -60,13 +60,13 @@ Stop `usb_cam` first, because the direct node must own `/dev/video2`. Edit the
 device and calibration path in `config/global_mapping_v4l2.yaml`, then run:
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2.launch.py
+ros2 launch lane_detection global_mapping_v4l2.launch.py
 ```
 
 The command above is the CPU reference. Run the strict CUDA path with:
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2_cuda.launch.py
+ros2 launch lane_detection global_mapping_v4l2_cuda.launch.py
 ```
 
 The CUDA path uploads the camera frame once and performs metric-BEV remap,
@@ -86,7 +86,7 @@ the effective backend in `/parking/cpp/status` and in the CSV's
 After recording separate runs of the same scene, compare them with:
 
 ```bash
-ros2 run vision_lane_global_mapping_cpp compare_preprocess_backends.py \
+ros2 run lane_detection compare_preprocess_backends.py \
   /tmp/v52_cpp_v4l2_profile.csv \
   /tmp/v52_cpp_v4l2_cuda_profile.csv --warmup 120
 ```
@@ -138,7 +138,7 @@ Do not run both simultaneously. Keep debug-map publication and UI disabled.
 Python reference wrapper (uses the original v5.2 functions):
 
 ```bash
-ros2 run vision_lane_global_mapping_cpp python_v52_benchmark_node.py \
+ros2 run lane_detection python_v52_benchmark_node.py \
   --ros-args \
   -p image_topic:=/camera/image_raw \
   -p core_script:=$HOME/vision_lane_ws/other_cv/realtime_metric_bev_global_mapping_v5_2_temporal_vector_tracker.py \
@@ -149,20 +149,20 @@ ros2 run vision_lane_global_mapping_cpp python_v52_benchmark_node.py \
 C++ reference:
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_cpp.launch.py
+ros2 launch lane_detection global_mapping_cpp.launch.py
 ```
 
 After discarding 120 warm-up frames:
 
 ```bash
-ros2 run vision_lane_global_mapping_cpp compare_profiles.py \
+ros2 run lane_detection compare_profiles.py \
   /tmp/v52_python_profile.csv /tmp/v52_cpp_profile.csv --warmup 120
 ```
 
 Create a reusable PNG dashboard plus CSV and Markdown tables:
 
 ```bash
-ros2 run vision_lane_global_mapping_cpp plot_profiles.py \
+ros2 run lane_detection plot_profiles.py \
   /tmp/v52_python_profile.csv /tmp/v52_cpp_profile.csv \
   --warmup 120 --output-dir /tmp/v52_profile_report
 ```

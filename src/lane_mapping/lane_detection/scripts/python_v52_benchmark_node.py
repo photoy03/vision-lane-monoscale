@@ -21,14 +21,14 @@ from sensor_msgs.msg import Image
 class PythonV52Benchmark(Node):
     def __init__(self):
         super().__init__("python_v52_benchmark")
-        shared = Path(get_package_share_directory("vision_lane_global_mapping_cpp"))
+        shared = Path(get_package_share_directory("lane_detection"))
         core_path = Path(self.declare_parameter(
             "core_script",
             str(shared / "reference/realtime_metric_bev_global_mapping_v5_2_temporal_vector_tracker.py"),
         ).value)
         calibration = Path(self.declare_parameter(
             "calibration_npz",
-            str(Path(get_package_share_directory("vision_lane_bringup")) / "config/calibration/front.npz"),
+            str(Path(get_package_share_directory("vision_mapping_bringup")) / "config/calibration/front.npz"),
         ).value)
         image_topic = self.declare_parameter("image_topic", "/camera/image_raw").value
         profile_path = Path(self.declare_parameter(

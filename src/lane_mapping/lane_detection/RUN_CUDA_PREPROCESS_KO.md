@@ -59,7 +59,7 @@ vision_lane: OpenCV CUDA modules not found; CPU backend only
 의도적으로 실행되지 않는다.
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2.launch.py
+ros2 launch lane_detection global_mapping_v4l2.launch.py
 ```
 
 CUDA를 사용하려면 CUDA 모듈을 포함해 빌드한 OpenCV의 CMake 설정 경로를 지정해
@@ -69,7 +69,7 @@ CUDA를 사용하려면 CUDA 모듈을 포함해 빌드한 OpenCV의 CMake 설�
 colcon build --symlink-install \
   --cmake-args -DCMAKE_BUILD_TYPE=Release \
                -DOpenCV_DIR=/usr/local/lib/cmake/opencv4 \
-  --packages-select vision_lane_interfaces vision_lane_global_mapping_cpp
+  --packages-select vision_lane_interfaces lane_detection
 ```
 
 실제 경로는 설치 방식에 따라 달라진다. Python 가상환경에서 `import cv2`가
@@ -85,7 +85,7 @@ touch other_cv/5cv/COLCON_IGNORE
 
 colcon build --symlink-install \
   --cmake-args -DCMAKE_BUILD_TYPE=Release \
-  --packages-select vision_lane_interfaces vision_lane_global_mapping_cpp
+  --packages-select vision_lane_interfaces lane_detection
 
 source install/setup.bash
 ```
@@ -95,7 +95,7 @@ source install/setup.bash
 `usb_cam`이 `/dev/video2`를 사용하고 있다면 먼저 종료한다.
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2.launch.py
+ros2 launch lane_detection global_mapping_v4l2.launch.py
 ```
 
 기본 YAML은 다음 설정이다.
@@ -107,7 +107,7 @@ preprocess_backend: cpu
 ## 4. CUDA 실행
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2_cuda.launch.py
+ros2 launch lane_detection global_mapping_v4l2_cuda.launch.py
 ```
 
 정상 시작 로그:
@@ -121,7 +121,7 @@ CUDA 빌드나 장치가 없으면 기본 CUDA launch는 즉시 오류를 발생
 자동 전환해 운용을 계속하려면 다음처럼 실행한다.
 
 ```bash
-ros2 launch vision_lane_global_mapping_cpp global_mapping_v4l2_cuda.launch.py \
+ros2 launch lane_detection global_mapping_v4l2_cuda.launch.py \
   cuda_fallback_to_cpu:=true
 ```
 
