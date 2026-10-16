@@ -2,9 +2,10 @@
 
 #include <cstdint>
 #include <map>
-#include "pose_timeline.hpp"
+#include "monoscale_pose/pose_timeline.hpp"
 
 namespace vision_lane {
+using monoscale_pose::PoseMatchKind;
 
 // Readiness is metadata, not permission to commit a cached pose. The caller
 // must obtain a fresh measured pose immediately before the ordered commit.

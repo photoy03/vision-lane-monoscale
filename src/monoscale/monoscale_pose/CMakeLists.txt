@@ -5,4 +5,13 @@ find_package(ament_cmake_python REQUIRED)
 ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS scripts/odom_stabilizer_node.py DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+# Header-only, ROS-free pose-at-timestamp lookup shared by lane_detection and
+# monoscale_occupancy_grid_map.
+install(DIRECTORY include/ DESTINATION include)
+ament_export_include_directories(include)
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_pose_timeline test/test_pose_timeline.cpp)
+  target_include_directories(test_pose_timeline PRIVATE include)
+endif()
 ament_package()

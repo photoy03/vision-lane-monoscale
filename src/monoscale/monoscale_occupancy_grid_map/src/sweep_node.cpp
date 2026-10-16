@@ -31,6 +31,7 @@
 #include <sensor_msgs/msg/image.hpp>
 
 #include "monoscale_occupancy_grid_map/pose_interpolation.hpp"
+#include "monoscale_pose/pose_timeline.hpp"
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
 namespace
@@ -318,7 +319,7 @@ private:
   void on_odometry(const nav_msgs::msg::Odometry & message)
   {
     std::lock_guard<std::mutex> guard(mutex_);
-    const double stamp = rclcpp::Time(message.header.stamp).seconds();
+    const int64_t stamp_ns = rclcpp::Time(message.header.stamp).nanoseconds();
     if (message.header.frame_id != map_frame_ || message.child_frame_id != base_frame_) {
       ++odom_frame_rejected_;
       RCLCPP_WARN_THROTTLE(
@@ -328,9 +329,7 @@ private:
         message.child_frame_id.c_str());
       return;
     }
-    if (!std::isfinite(stamp) || stamp <= 0.0 ||
-      (!odometry_.empty() && stamp <= odometry_.back().first))
-    {
+    if (stamp_ns <= 0 || (odometry_.size() > 0 && stamp_ns <= odometry_.latest_stamp_ns())) {
       ++odom_stamp_rejected_;
       return;
     }
@@ -359,42 +358,41 @@ private:
       1.0 - 2.0 * (q.x * q.x + q.y * q.y));
     const double sinp = 2.0 * (q.w * q.y - q.z * q.x);
     pose.pitch = std::abs(sinp) >= 1.0 ? std::copysign(M_PI / 2.0, sinp) : std::asin(sinp);
-    odometry_.push_back({stamp, pose});
-    while (odometry_.size() > 4000) {odometry_.pop_front();}
+    monoscale_pose::TimedPose sample{stamp_ns, pose.x, pose.y, pose.yaw};
+    sample.roll = pose.roll;
+    sample.pitch = pose.pitch;
+    if (!odometry_.insert(sample)) {
+      ++odom_value_rejected_;
+      return;
+    }
     // The pose that just arrived is what the held frames were waiting for.
     for (const auto & name : cameras_) {drain(name);}
   }
 
-  // The pose at an image stamp, interpolated from the odometry ring. Nullopt
+  // The pose at an image stamp from the shared pose timeline: an exact sample
+  // or a gap/translation/yaw-bounded blend of the bracketing pair. Nullopt
   // until odometry brackets the stamp -- a frame with no pose is not keyframed.
-  std::optional<monoscale_occupancy::Pose5> pose_at(double stamp)
+  std::optional<monoscale_occupancy::Pose5> pose_at(int64_t stamp_ns)
   {
-    if (odometry_.empty()) {return std::nullopt;}
-    if (stamp < odometry_.front().first || stamp > odometry_.back().first) {
-      return std::nullopt;
-    }
-    const auto hi = std::lower_bound(odometry_.begin(), odometry_.end(), stamp,
-      [](const auto & sample, double time) {return sample.first < time;});
-    if (hi != odometry_.end() && hi->first == stamp) {return hi->second;}
-    if (hi == odometry_.begin() || hi == odometry_.end()) {return std::nullopt;}
-    const auto & a = *std::prev(hi);
-    const auto & b = *hi;
-    const double span = b.first - a.first;
-    if (!(span > 0.0)) {
-      ++pose_gap_rejected_;
-      return std::nullopt;
-    }
-    const double w = (stamp - a.first) / span;
-    const auto interpolation=monoscale_occupancy::interpolate_pose_bounded(
-      a.second,b.second,w,span,max_odom_interpolation_gap_sec_,
-      max_odom_interpolation_translation_m_,max_odom_interpolation_yaw_deg_);
-    using Reject=monoscale_occupancy::PoseInterpolationReject;
-    switch(interpolation.rejection) {
-      case Reject::gap: ++pose_gap_rejected_; break;
-      case Reject::translation: ++pose_motion_rejected_; break;
-      case Reject::yaw: ++pose_yaw_rejected_; break;
-      case Reject::none: return interpolation.pose;
-      case Reject::invalid: ++pose_invalid_rejected_; break;
+    const auto match = odometry_.lookup_bounded(stamp_ns, {max_odom_interpolation_gap_sec_,
+      max_odom_interpolation_translation_m_, max_odom_interpolation_yaw_deg_});
+    using Kind = monoscale_pose::PoseMatchKind;
+    switch (match.kind) {
+      case Kind::exact:
+      case Kind::interpolated: {
+          monoscale_occupancy::Pose5 pose;
+          pose.x = match.pose.x;
+          pose.y = match.pose.y;
+          pose.yaw = match.pose.yaw;
+          pose.roll = match.pose.roll;
+          pose.pitch = match.pose.pitch;
+          return pose;
+        }
+      case Kind::gap_too_large: ++pose_gap_rejected_; break;
+      case Kind::translation_too_large: ++pose_motion_rejected_; break;
+      case Kind::yaw_too_large: ++pose_yaw_rejected_; break;
+      case Kind::invalid: ++pose_invalid_rejected_; break;
+      default: break;  // Outside the history: wait or expire in drain().
     }
     return std::nullopt;
   }
@@ -452,7 +450,7 @@ private:
     // Offline never saw this because there the whole trajectory is loaded
     // before the first frame is placed.
     auto & queue = pending_[name];
-    queue.push_back({stamp, gray32});
+    queue.push_back({rclcpp::Time(message.header.stamp).nanoseconds(), stamp, gray32});
     while (queue.size() > kPendingFrames) {
       queue.pop_front();
       ++pending_overflow_dropped_;
@@ -466,16 +464,16 @@ private:
   {
     auto & queue = pending_[name];
     while (!queue.empty()) {
-      const double stamp = queue.front().first;
-      const auto pose = pose_at(stamp);
+      const auto & held = queue.front();
+      const auto pose = pose_at(held.stamp_ns);
       if (!pose) {
-        if (!odometry_.empty() && stamp < odometry_.front().first) {
+        if (odometry_.size() > 0 && held.stamp_ns < odometry_.oldest_stamp_ns()) {
           // Older than any pose still held: it can never be placed now.
           queue.pop_front();
           ++pending_expired_dropped_;
           continue;
         }
-        if (!odometry_.empty() && stamp <= odometry_.back().first) {
+        if (odometry_.size() > 0 && held.stamp_ns <= odometry_.latest_stamp_ns()) {
           // The right bracket already arrived. A gap that is too wide cannot
           // be repaired by future odometry; do not block all newer images.
           queue.pop_front();
@@ -484,7 +482,7 @@ private:
         }
         return;  // Newer than the newest pose. Wait for the odometry.
       }
-      admit(name, stamp, queue.front().second, *pose);
+      admit(name, held.stamp, held.gray, *pose);
       queue.pop_front();
     }
   }
@@ -782,9 +780,16 @@ private:
   // Hard cap on ring length. 6 m of baseline at the 5 cm keyframe spacing
   // needs 120; this is double that, and bounds the ring near 1 GB per camera.
   static constexpr size_t kRingFrames = 256;
-  std::map<std::string, std::deque<std::pair<double, cv::Mat>>> pending_;
+  struct HeldFrame
+  {
+    int64_t stamp_ns;  // matched against the pose timeline
+    double stamp;      // carried into keyframes and the grid header
+    cv::Mat gray;
+  };
+  std::map<std::string, std::deque<HeldFrame>> pending_;
   std::map<std::string, double> next_at_;
-  std::deque<std::pair<double, monoscale_occupancy::Pose5>> odometry_;
+  // Odometry history; strictly increasing stamps (checked in on_odometry).
+  monoscale_pose::PoseTimeline odometry_{1.0e6, 4000};
 
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> image_subs_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr> info_subs_;

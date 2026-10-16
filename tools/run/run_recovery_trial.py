@@ -367,7 +367,7 @@ def main() -> int:
                 Path("src/vision_mapping_bringup/vision_mapping_bringup/pipeline.py"),
                 Path("src/lane_mapping/lane_detection/src/global_mapping_node.cpp"),
                 Path("src/lane_mapping/lane_detection/src/compressed_image_replay_node.cpp"),
-                Path("src/lane_mapping/lane_detection/src/pose_timeline.hpp"),
+                Path("src/monoscale/monoscale_pose/include/monoscale_pose/pose_timeline.hpp"),
                 Path("src/lane_mapping/lane_detection/src/pending_lane_observations.hpp"),
                 Path("src/monoscale/monoscale_occupancy_grid_map/src/sweep_node.cpp"),
                 Path("src/lane_mapping/lane_map/src/map_fusion_node.cpp"),

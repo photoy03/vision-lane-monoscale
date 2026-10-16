@@ -49,7 +49,7 @@
 #include <vision_lane_interfaces/msg/marking_segment.hpp>
 #include <vision_lane_interfaces/msg/marking_segment_array.hpp>
 #include <vision_lane_interfaces/msg/recovered_marking_segment_array.hpp>
-#include "pose_timeline.hpp"
+#include "monoscale_pose/pose_timeline.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include "pending_lane_observations.hpp"
 #include "pending_readiness.hpp"
@@ -184,7 +184,7 @@ struct PoseLookup {
   bool predicted{false};
   double age_sec{std::numeric_limits<double>::infinity()};
   double bracket_span_sec{std::numeric_limits<double>::infinity()};
-  vision_lane::PoseMatchKind kind{vision_lane::PoseMatchKind::none};
+  monoscale_pose::PoseMatchKind kind{monoscale_pose::PoseMatchKind::none};
   double position_variance{0.0};
   double yaw_variance{0.0};
   bool covariance_source_valid{false};
@@ -710,7 +710,7 @@ class GlobalMappingNode : public rclcpp::Node {
         image_quality_gate_mode_!="reject")||!std::isfinite(image_quality_min_sharpness_)||
        image_quality_min_sharpness_<0.0||image_quality_sample_width_<64)
       throw std::runtime_error("invalid image quality gate configuration");
-    pose_timeline_=vision_lane::PoseTimeline(odom_buffer_duration_sec_);
+    pose_timeline_=monoscale_pose::PoseTimeline(odom_buffer_duration_sec_);
 
     publish_map_=declare_parameter<bool>("publish_debug_map",false);
     publish_vectors_debug_=declare_parameter<bool>("publish_debug_vectors",false);
@@ -1027,7 +1027,7 @@ class GlobalMappingNode : public rclcpp::Node {
     map_.reset();
     {
       std::lock_guard<std::mutex>lock(odom_mutex_);
-      pose_timeline_=vision_lane::PoseTimeline(odom_buffer_duration_sec_);
+      pose_timeline_=monoscale_pose::PoseTimeline(odom_buffer_duration_sec_);
     }
     ++run_epoch_;
     if(run_epoch_==0)run_epoch_=1;
@@ -1129,13 +1129,13 @@ class GlobalMappingNode : public rclcpp::Node {
       else ++sync_matched_;
     } else {
       ++sync_timeout_;
-      if(lookup.kind==vision_lane::PoseMatchKind::gap_too_large)++sync_timeout_gap_;
-      else if(lookup.kind==vision_lane::PoseMatchKind::bracket_too_far)++sync_timeout_age_;
+      if(lookup.kind==monoscale_pose::PoseMatchKind::gap_too_large)++sync_timeout_gap_;
+      else if(lookup.kind==monoscale_pose::PoseMatchKind::bracket_too_far)++sync_timeout_age_;
       else {
         ++sync_timeout_no_bracket_;
-        if(lookup.kind==vision_lane::PoseMatchKind::buffer_empty)++sync_timeout_buffer_empty_;
-        else if(lookup.kind==vision_lane::PoseMatchKind::stamp_before_oldest)++sync_timeout_before_oldest_;
-        else if(lookup.kind==vision_lane::PoseMatchKind::stamp_after_latest)++sync_timeout_after_latest_;
+        if(lookup.kind==monoscale_pose::PoseMatchKind::buffer_empty)++sync_timeout_buffer_empty_;
+        else if(lookup.kind==monoscale_pose::PoseMatchKind::stamp_before_oldest)++sync_timeout_before_oldest_;
+        else if(lookup.kind==monoscale_pose::PoseMatchKind::stamp_after_latest)++sync_timeout_after_latest_;
       }
     }
     // All callbacks use the default mutually-exclusive group. This never
@@ -1164,7 +1164,7 @@ class GlobalMappingNode : public rclcpp::Node {
       <<",\"last_odom_header_stamp_ns\":"<<last_odom_header_stamp_ns_
       <<",\"last_odom_arrival_age_ms\":"<<last_odom_arrival_age_ms
       <<",\"last_sync_wait_ms\":"<<last_sync_wait_ms_
-      <<",\"last_pose_match\":\""<<vision_lane::pose_match_kind_name(last_pose_match_kind_)<<"\""
+      <<",\"last_pose_match\":\""<<monoscale_pose::pose_match_kind_name(last_pose_match_kind_)<<"\""
       <<",\"timeout_no_bracket\":"<<sync_timeout_no_bracket_
       <<",\"timeout_buffer_empty\":"<<sync_timeout_buffer_empty_
       <<",\"timeout_before_oldest\":"<<sync_timeout_before_oldest_
@@ -1261,7 +1261,7 @@ class GlobalMappingNode : public rclcpp::Node {
   }
 
   PoseLookup lookup_pose(const rclcpp::Time&stamp,bool allow_prediction=false){
-    if(use_static_)return {static_pose_,true,false,false,0.0,0.0,vision_lane::PoseMatchKind::exact};
+    if(use_static_)return {static_pose_,true,false,false,0.0,0.0,monoscale_pose::PoseMatchKind::exact};
     std::lock_guard<std::mutex>lock(odom_mutex_);
     auto result=pose_timeline_.lookup(stamp.nanoseconds(),max_odom_age_sec_,
       max_odom_interpolation_gap_sec_,!sync_images_to_odom_);
@@ -1271,7 +1271,7 @@ class GlobalMappingNode : public rclcpp::Node {
       if(prediction.valid)result=prediction;
     }
     return {{result.pose.x,result.pose.y,result.pose.yaw},result.valid,result.interpolated,
-      result.kind==vision_lane::PoseMatchKind::predicted,
+      result.kind==monoscale_pose::PoseMatchKind::predicted,
       result.age_sec,result.bracket_span_sec,result.kind,
       result.position_variance,result.yaw_variance,result.covariance_source_valid,
       result.lower_stamp_ns,result.upper_stamp_ns,
@@ -1295,8 +1295,8 @@ class GlobalMappingNode : public rclcpp::Node {
     for(const auto &entry:pending_observations_.entries()){
       const auto lookup=lookup_pose(rclcpp::Time(entry.stamp_ns,get_clock()->get_clock_type()));
       ++pending_readiness_lookups_;
-      const bool ready=vision_lane::is_measured_pose(lookup.valid,lookup.predicted)&&
-        (lookup.kind==vision_lane::PoseMatchKind::exact||lookup.kind==vision_lane::PoseMatchKind::interpolated);
+      const bool ready=monoscale_pose::is_measured_pose(lookup.valid,lookup.predicted)&&
+        (lookup.kind==monoscale_pose::PoseMatchKind::exact||lookup.kind==monoscale_pose::PoseMatchKind::interpolated);
       const bool changed=ready!=pending_readiness_.ready(entry.payload.second);
       pending_readiness_.set(entry.payload.second,ready);
       if(changed)log_pending_oracle_event(ready?"READINESS_READY":"READINESS_LOST",entry.epoch,
@@ -1333,13 +1333,13 @@ class GlobalMappingNode : public rclcpp::Node {
       const auto *front=pending_observations_.front();
       if(!front)break;
       const auto lookup=lookup_pose(rclcpp::Time(front->stamp_ns,get_clock()->get_clock_type()));
-      const bool exact_or_interpolated=lookup.kind==vision_lane::PoseMatchKind::exact||
-        lookup.kind==vision_lane::PoseMatchKind::interpolated;
+      const bool exact_or_interpolated=lookup.kind==monoscale_pose::PoseMatchKind::exact||
+        lookup.kind==monoscale_pose::PoseMatchKind::interpolated;
       if(pending_readiness_enabled_){
         // Only this ordered consumer mutates tracking/map state. Cached
         // readiness is advisory; this fresh lookup remains the commit gate.
         const auto service=vision_lane::pending_service(
-          vision_lane::is_measured_pose(lookup.valid,lookup.predicted)&&exact_or_interpolated,
+          monoscale_pose::is_measured_pose(lookup.valid,lookup.predicted)&&exact_or_interpolated,
           lookup.kind,pending_observations_.front_expired(now_ns,ttl_ns),
           std::max<int64_t>(0,now_ns-front->arrival_steady_ns),
           static_cast<int64_t>(pending_observation_unresolvable_grace_sec_*1e9),
@@ -1362,15 +1362,15 @@ class GlobalMappingNode : public rclcpp::Node {
           pending_readiness_.erase(dropped->payload.second);
           if(ttl)++pending_ttl_dropped_;else ++pending_unresolvable_dropped_;
           log_recovery_event(event,dropped->epoch,dropped->payload.second,dropped->camera_id,
-            dropped->stamp_ns,vision_lane::pose_match_kind_name(lookup.kind));
+            dropped->stamp_ns,monoscale_pose::pose_match_kind_name(lookup.kind));
           continue;
         }
       }
-      if(!vision_lane::is_measured_pose(lookup.valid,lookup.predicted)||!exact_or_interpolated){
+      if(!monoscale_pose::is_measured_pose(lookup.valid,lookup.predicted)||!exact_or_interpolated){
         // A large bracket gap may become resolvable as delayed odometry arrives.
         // Only a stamp older than the retained timeline is eligible for early retirement.
         const bool pose_stamp_evicted_from_timeline=
-          lookup.kind==vision_lane::PoseMatchKind::stamp_before_oldest;
+          lookup.kind==monoscale_pose::PoseMatchKind::stamp_before_oldest;
         const int64_t pending_age_ns=std::max<int64_t>(0,now_ns-front->arrival_steady_ns);
         const int64_t grace_ns=static_cast<int64_t>(pending_observation_unresolvable_grace_sec_*1e9);
         if(pose_stamp_evicted_from_timeline&&pending_age_ns>=grace_ns){
@@ -1381,7 +1381,7 @@ class GlobalMappingNode : public rclcpp::Node {
           if(dropped){
             ++pending_unresolvable_dropped_;
             log_recovery_event("POSE_GAP_DROP",dropped->epoch,dropped->payload.second,
-              dropped->camera_id,dropped->stamp_ns,vision_lane::pose_match_kind_name(lookup.kind));
+              dropped->camera_id,dropped->stamp_ns,monoscale_pose::pose_match_kind_name(lookup.kind));
           }
           continue;
         }
@@ -1406,17 +1406,17 @@ class GlobalMappingNode : public rclcpp::Node {
         log_pending_oracle_event("NONMONOTONIC_DROP",item->epoch,item->payload.second,item->camera_id,
           item->stamp_ns,item->arrival_steady_ns,item->arrival_steady_ns+ttl_ns,&lookup,drain_cycle,processed);
         ++pending_nonmonotonic_dropped_;
-        log_recovery_event("NONMONOTONIC_DROP",item->epoch,item->payload.second,item->camera_id,item->stamp_ns,vision_lane::pose_match_kind_name(lookup.kind));
+        log_recovery_event("NONMONOTONIC_DROP",item->epoch,item->payload.second,item->camera_id,item->stamp_ns,monoscale_pose::pose_match_kind_name(lookup.kind));
         pending_reset_tracker_before_next_=true;
         continue;
       }
-      const double confidence=vision_lane::pose_confidence_scale(
+      const double confidence=monoscale_pose::pose_confidence_scale(
         lookup.position_variance,lookup.yaw_variance,lookup.covariance_source_valid);
       for(auto &observation:item->payload.first)observation.confidence*=confidence;
       tracker_.update(item->payload.first,lookup.pose);
       last_global_tracker_stamp_ns_=item->stamp_ns;
       if(recovered_output_enabled_)publish_recovered_segments(*item,lookup);
-      else log_recovery_event("RESOLVED_MAP_ONLY",item->epoch,item->payload.second,item->camera_id,item->stamp_ns,vision_lane::pose_match_kind_name(lookup.kind));
+      else log_recovery_event("RESOLVED_MAP_ONLY",item->epoch,item->payload.second,item->camera_id,item->stamp_ns,monoscale_pose::pose_match_kind_name(lookup.kind));
       ++pending_resolved_total_;
       ++processed;
 
@@ -1445,8 +1445,8 @@ class GlobalMappingNode : public rclcpp::Node {
       const auto *head=pending_observations_.front();
       if(head){
         const auto head_lookup=lookup_pose(rclcpp::Time(head->stamp_ns,get_clock()->get_clock_type()));
-        if(vision_lane::is_measured_pose(head_lookup.valid,head_lookup.predicted)&&
-           (head_lookup.kind==vision_lane::PoseMatchKind::exact||head_lookup.kind==vision_lane::PoseMatchKind::interpolated))
+        if(monoscale_pose::is_measured_pose(head_lookup.valid,head_lookup.predicted)&&
+           (head_lookup.kind==monoscale_pose::PoseMatchKind::exact||head_lookup.kind==monoscale_pose::PoseMatchKind::interpolated))
           log_pending_oracle_event("READY_BUT_NOT_SERVED",head->epoch,head->payload.second,head->camera_id,
             head->stamp_ns,head->arrival_steady_ns,head->arrival_steady_ns+ttl_ns,&head_lookup,drain_cycle,processed);
       }
@@ -1477,7 +1477,7 @@ class GlobalMappingNode : public rclcpp::Node {
     }
 
     const PoseLookup lookup=pose_override.has_value()?*pose_override:lookup_pose(stamp);
-    const bool measured_pose=vision_lane::is_measured_pose(lookup.valid,lookup.predicted);
+    const bool measured_pose=monoscale_pose::is_measured_pose(lookup.valid,lookup.predicted);
     // A prediction is valid for short-lived local tracking, but it is not a
     // measured pose and must never be advertised as safe for global fusion.
     pr.pose_valid=measured_pose;
@@ -1554,13 +1554,13 @@ class GlobalMappingNode : public rclcpp::Node {
         }
         if(!measured_pose&&allow_local_without_odom_){
           auto local_obs=obs;
-          const double local_confidence=vision_lane::pose_confidence_scale(
+          const double local_confidence=monoscale_pose::pose_confidence_scale(
             lookup.position_variance,lookup.yaw_variance,lookup.covariance_source_valid);
           for(auto &observation:local_obs)observation.confidence*=local_confidence;
           local_tracker_.update(local_obs,Pose2{});
         }
       }else{
-        const double pose_confidence=vision_lane::pose_confidence_scale(
+        const double pose_confidence=monoscale_pose::pose_confidence_scale(
           lookup.position_variance,lookup.yaw_variance,lookup.covariance_source_valid);
         for(auto &observation:obs) observation.confidence*=pose_confidence;
         if(measured_pose){
@@ -1603,8 +1603,8 @@ class GlobalMappingNode : public rclcpp::Node {
     else if(!mapping_pose_ok){
       if(pending_readiness_enabled_&&pending_observations_.contains(run_epoch_,camera_id_,stamp.nanoseconds())){
         const auto current=lookup_pose(stamp);
-        const bool ready=vision_lane::is_measured_pose(current.valid,current.predicted)&&
-          (current.kind==vision_lane::PoseMatchKind::exact||current.kind==vision_lane::PoseMatchKind::interpolated);
+        const bool ready=monoscale_pose::is_measured_pose(current.valid,current.predicted)&&
+          (current.kind==monoscale_pose::PoseMatchKind::exact||current.kind==monoscale_pose::PoseMatchKind::interpolated);
         pr.map_block_reason=ready?"PENDING_ORDERED_COMMIT":"PENDING_MEASURED_POSE";
       }else pr.map_block_reason=pending_observations_enabled_?"PENDING_MEASURED_POSE":(lookup.predicted?"PREDICTED_POSE":"POSE_UNAVAILABLE");
     }
@@ -1678,7 +1678,7 @@ class GlobalMappingNode : public rclcpp::Node {
       <<camera<<','<<stamp_ns<<','<<event_ros_ns<<','<<event_steady_ns<<','
       <<arrival_steady_ns<<','<<deadline_steady_ns<<','<<pending_observations_.size()<<','
       <<head_id<<','<<head_stamp_ns<<','<<timeline_size<<','<<oldest_stamp_ns<<','
-      <<latest_stamp_ns<<','<<(lookup?vision_lane::pose_match_kind_name(lookup->kind):"none")<<','
+      <<latest_stamp_ns<<','<<(lookup?monoscale_pose::pose_match_kind_name(lookup->kind):"none")<<','
       <<(lookup&&lookup->valid?1:0)<<','<<(lookup&&lookup->predicted?1:0)<<','<<bracket_ms<<','
       <<(lookup?lookup->lower_stamp_ns:0)<<','<<(lookup?lookup->upper_stamp_ns:0)<<','
       <<(lookup?lookup->lower_arrival_steady_ns:0)<<','
@@ -1703,7 +1703,7 @@ class GlobalMappingNode : public rclcpp::Node {
     out.header.frame_id=base_frame_;
     out.session_id=recovery_session_id_;out.epoch=item.epoch;out.observation_id=item.payload.second;
     out.camera_id=camera_id_;out.source_frame=camera_frame_;out.calibration_id=recovery_calibration_id_;
-    out.pose_match=lookup.kind==vision_lane::PoseMatchKind::exact?"exact":"interpolated";
+    out.pose_match=lookup.kind==monoscale_pose::PoseMatchKind::exact?"exact":"interpolated";
     out.observer_pose.x=lookup.pose.x;out.observer_pose.y=lookup.pose.y;out.observer_pose.theta=lookup.pose.yaw;
     for(const auto&o:tracker_.project(lookup.pose,true,false)){
       if(!o.confirmed||o.reprojected)continue;
@@ -1747,7 +1747,7 @@ class GlobalMappingNode : public rclcpp::Node {
       <<",\"pose_predicted\":"<<lookup.predicted
       <<",\"pose_age_ms\":"<<(lookup.valid?lookup.age_sec*1000.0:-1.0)
       <<",\"pose_bracket_span_ms\":"<<(std::isfinite(lookup.bracket_span_sec)?lookup.bracket_span_sec*1000.0:-1.0)
-      <<",\"pose_match\":\""<<vision_lane::pose_match_kind_name(lookup.kind)<<"\""
+      <<",\"pose_match\":\""<<monoscale_pose::pose_match_kind_name(lookup.kind)<<"\""
       <<",\"tracker_frame\":\""<<(lookup.valid&&!lookup.predicted?"map":"base_link")<<"\""
       <<",\"global_tracker_gap_resets\":"<<global_tracker_gap_resets_
       <<",\"pose_lower_stamp_ns\":"<<lookup.lower_stamp_ns
@@ -1757,7 +1757,7 @@ class GlobalMappingNode : public rclcpp::Node {
       <<",\"pose_covariance_source_valid\":"<<lookup.covariance_source_valid
       <<",\"pose_position_sigma_m\":"<<(lookup.covariance_source_valid||lookup.predicted?std::sqrt(std::max(0.0,lookup.position_variance)):-1.0)
       <<",\"pose_yaw_sigma_deg\":"<<(lookup.covariance_source_valid||lookup.predicted?std::sqrt(std::max(0.0,lookup.yaw_variance))*180.0/kPi:-1.0)
-      <<",\"pose_confidence_scale\":"<<vision_lane::pose_confidence_scale(lookup.position_variance,lookup.yaw_variance,lookup.covariance_source_valid)
+      <<",\"pose_confidence_scale\":"<<monoscale_pose::pose_confidence_scale(lookup.position_variance,lookup.yaw_variance,lookup.covariance_source_valid)
       <<",\"initial_map_seed\":"<<map_result.initial_seed<<",\"motion_detected\":"<<map_result.motion_detected<<",\"motion_translation_m\":"<<map_result.translation_m
       <<",\"motion_yaw_deg\":"<<map_result.yaw_deg<<",\"map_accumulated\":"<<map_result.accumulated
       <<",\"map_updates\":"<<map_.updates()<<",\"active\":"<<p.active<<",\"confirmed\":"<<p.confirmed
@@ -1792,7 +1792,7 @@ class GlobalMappingNode : public rclcpp::Node {
         <<','<<last_processed_stamp_ns_<<','<<last_sync_wait_ms_<<','<<warming_up_
         <<','<<sync_matched_<<','<<sync_timeout_<<','<<sync_dropped_
         <<','<<p.sharpness<<','<<p.frame_delta<<','<<p.quality_rejected
-        <<','<<vision_lane::pose_match_kind_name(lookup.kind)
+        <<','<<monoscale_pose::pose_match_kind_name(lookup.kind)
         <<','<<(std::isfinite(lookup.bracket_span_sec)?lookup.bracket_span_sec*1000.0:-1.0)
         <<','<<lookup.lower_stamp_ns<<','<<lookup.upper_stamp_ns
         <<','<<lookup.lower_arrival_delta_ms<<','<<lookup.upper_arrival_delta_ms<<','<<p.map_eligible<<','<<p.map_block_reason<<','<<odom_received_<<','<<(odom_received_-rejected_odom_)<<','<<odom_rejected_value_<<','<<odom_rejected_frame_<<','<<odom_rejected_stamp_<<','<<odom_rejected_timeline_<<','<<last_odom_header_stamp_ns_<<','<<(last_odom_arrival_steady_ns_>0?(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count()-last_odom_arrival_steady_ns_)*1e-6:-1.0)<<'\n';
@@ -1856,7 +1856,7 @@ class GlobalMappingNode : public rclcpp::Node {
   uint64_t sync_timeout_no_bracket_{0},sync_timeout_gap_{0},sync_timeout_age_{0};
   uint64_t sync_timeout_buffer_empty_{0},sync_timeout_before_oldest_{0},sync_timeout_after_latest_{0};
   uint64_t sync_queue_high_water_{0};
-  vision_lane::PoseMatchKind last_pose_match_kind_{vision_lane::PoseMatchKind::none};
+  monoscale_pose::PoseMatchKind last_pose_match_kind_{monoscale_pose::PoseMatchKind::none};
   int64_t last_received_image_ns_{0},last_processed_stamp_ns_{0};
   struct PendingImage {
     std_msgs::msg::Header header;
@@ -1882,7 +1882,7 @@ class GlobalMappingNode : public rclcpp::Node {
 #endif
 
   std::mutex odom_mutex_;
-  vision_lane::PoseTimeline pose_timeline_;
+  monoscale_pose::PoseTimeline pose_timeline_;
   std::mutex capture_mutex_;
   cv::VideoCapture capture_;
   cv::Mat latest_frame_;

@@ -1,15 +1,20 @@
 #pragma once
 
-// ROS/OpenCV-free timestamp lookup, also exercised by the offline unit tests.
+// Shared, ROS/OpenCV-free pose-at-timestamp lookup over an odometry history.
+// Used by lane_detection (lookup/predict: age + gap gates, optional bounded
+// prediction) and monoscale_occupancy_grid_map (lookup_bounded: gap +
+// translation + yaw gates over a strictly bracketing interval). Each consumer
+// keeps its own gate values; only the matching code is shared.
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <limits>
 #include <iterator>
 #include <stdexcept>
 
-namespace vision_lane {
+namespace monoscale_pose {
 enum class PoseMatchKind {
   none,
   buffer_empty,
@@ -22,6 +27,9 @@ enum class PoseMatchKind {
   no_bracket,
   gap_too_large,
   bracket_too_far,
+  translation_too_large,
+  yaw_too_large,
+  invalid,
 };
 
 inline const char *pose_match_kind_name(PoseMatchKind kind) {
@@ -36,6 +44,9 @@ inline const char *pose_match_kind_name(PoseMatchKind kind) {
     case PoseMatchKind::no_bracket: return "no_bracket";
     case PoseMatchKind::gap_too_large: return "gap_too_large";
     case PoseMatchKind::bracket_too_far: return "bracket_too_far";
+    case PoseMatchKind::translation_too_large: return "translation_too_large";
+    case PoseMatchKind::yaw_too_large: return "yaw_too_large";
+    case PoseMatchKind::invalid: return "invalid";
     default: return "none";
   }
 }
@@ -53,7 +64,18 @@ struct TimedPose {
   bool covariance_source_valid{false};
   // Monotonic callback-arrival time, independent from header.stamp.
   int64_t arrival_steady_ns{0};
+  // Attitude, carried and interpolated by lookup_bounded only (lookup/predict
+  // treat the pose as planar). Kept last so positional initializers above stay valid.
+  double roll{0.0}, pitch{0.0};
 };
+// Gates for lookup_bounded: a bracket is used only when it is short in time and
+// the vehicle moved little across it, so the linear blend stays trustworthy.
+struct MotionGates {
+  double max_gap_sec;
+  double max_translation_m;
+  double max_yaw_deg;
+};
+
 struct PoseMatch {
   TimedPose pose{};
   bool valid{false}, interpolated{false};
@@ -109,9 +131,11 @@ inline double pose_confidence_scale(double position_variance, double yaw_varianc
 
 class PoseTimeline {
  public:
-  explicit PoseTimeline(double duration_sec = 2.0) : duration_sec_(duration_sec) {
+  explicit PoseTimeline(double duration_sec = 2.0, size_t max_samples = 4096)
+      : duration_sec_(duration_sec), max_samples_(max_samples) {
     if (!std::isfinite(duration_sec) || duration_sec <= 0.0)
       throw std::invalid_argument("odom buffer duration must be positive");
+    if (max_samples < 2) throw std::invalid_argument("pose buffer needs at least two samples");
   }
   bool insert(TimedPose value) {
     if (value.stamp_ns <= 0 || !std::isfinite(value.x) ||
@@ -126,7 +150,7 @@ class PoseTimeline {
            seconds(samples_.back().stamp_ns, samples_.front().stamp_ns) > duration_sec_)
       samples_.pop_front();
     // A broken/high-rate source must not create an unbounded pose buffer.
-    while (samples_.size() > 4096) samples_.pop_front();
+    while (samples_.size() > max_samples_) samples_.pop_front();
     return true;
   }
   PoseMatch lookup(int64_t stamp, double max_age, double max_gap,
@@ -231,6 +255,70 @@ class PoseTimeline {
       predicted.position_variance, predicted.yaw_variance,
       last.covariance_source_valid}, &last, nullptr);
   }
+  // Pose strictly inside [oldest, latest]: an exact sample, or a linear blend of
+  // the bracketing pair when the gap, translation and yaw change are all within
+  // the gates. Never extrapolates and has no age limit beyond the bracket.
+  PoseMatch lookup_bounded(int64_t stamp, const MotionGates &gates) const {
+    if (samples_.empty())
+      return {{}, false, false, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(), PoseMatchKind::buffer_empty};
+    if (stamp < samples_.front().stamp_ns)
+      return with_sources({{}, false, false, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(), PoseMatchKind::stamp_before_oldest},
+        nullptr, &samples_.front());
+    if (stamp > samples_.back().stamp_ns)
+      return with_sources({{}, false, false, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(), PoseMatchKind::stamp_after_latest},
+        &samples_.back(), nullptr);
+    const auto hi = std::lower_bound(samples_.begin(), samples_.end(), stamp,
+      [](const TimedPose &p, int64_t t) { return p.stamp_ns < t; });
+    if (hi->stamp_ns == stamp)
+      return with_sources({*hi, true, false, 0.0, 0.0, PoseMatchKind::exact,
+        hi->position_variance, hi->yaw_variance, hi->covariance_source_valid}, &*hi, &*hi);
+    const TimedPose &a = *std::prev(hi);
+    const TimedPose &b = *hi;
+    const double span = seconds(b.stamp_ns, a.stamp_ns);
+    const double age = std::max(seconds(stamp, a.stamp_ns), seconds(b.stamp_ns, stamp));
+    const auto rejected = [&](PoseMatchKind kind) {
+      return with_sources({{}, false, false, age, span, kind}, &a, &b);
+    };
+    const auto finite_pose = [](const TimedPose &p) {
+      return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.yaw) &&
+        std::isfinite(p.roll) && std::isfinite(p.pitch);
+    };
+    const double fraction = static_cast<double>(stamp - a.stamp_ns) /
+      static_cast<double>(b.stamp_ns - a.stamp_ns);
+    if (!finite_pose(a) || !finite_pose(b) || !std::isfinite(gates.max_gap_sec) ||
+        !std::isfinite(gates.max_translation_m) || !std::isfinite(gates.max_yaw_deg) ||
+        gates.max_gap_sec <= 0.0 || gates.max_translation_m <= 0.0 ||
+        gates.max_yaw_deg <= 0.0 || gates.max_yaw_deg > 180.0)
+      return rejected(PoseMatchKind::invalid);
+    if (span > gates.max_gap_sec) return rejected(PoseMatchKind::gap_too_large);
+    const double translation = std::hypot(b.x - a.x, b.y - a.y);
+    if (!std::isfinite(translation)) return rejected(PoseMatchKind::invalid);
+    if (translation > gates.max_translation_m) return rejected(PoseMatchKind::translation_too_large);
+    const double dyaw = wrapped_angle(b.yaw - a.yaw);
+    constexpr double pi = 3.14159265358979323846;
+    if (std::abs(dyaw) > gates.max_yaw_deg * pi / 180.0) return rejected(PoseMatchKind::yaw_too_large);
+    TimedPose pose = a;
+    pose.stamp_ns = stamp;
+    pose.x = a.x + (b.x - a.x) * fraction;
+    pose.y = a.y + (b.y - a.y) * fraction;
+    // Not re-wrapped: equals the endpoint yaw at fraction 0 and differs from it
+    // only by the short-arc change, as the occupancy sweep has always used it.
+    pose.yaw = a.yaw + dyaw * fraction;
+    pose.roll = a.roll + (b.roll - a.roll) * fraction;
+    pose.pitch = a.pitch + (b.pitch - a.pitch) * fraction;
+    pose.vx = pose.vy = pose.yaw_rate = 0.0;
+    pose.covariance_source_valid = a.covariance_source_valid && b.covariance_source_valid;
+    pose.position_variance = pose.covariance_source_valid ?
+      interpolate_variance(a.position_variance, b.position_variance, fraction) : 0.0;
+    pose.yaw_variance = pose.covariance_source_valid ?
+      interpolate_variance(a.yaw_variance, b.yaw_variance, fraction) : 0.0;
+    if (!finite_pose(pose)) return rejected(PoseMatchKind::invalid);
+    return with_sources({pose, true, true, age, span, PoseMatchKind::interpolated,
+      pose.position_variance, pose.yaw_variance, pose.covariance_source_valid}, &a, &b);
+  }
   int64_t oldest_stamp_ns() const { return samples_.empty() ? 0 : samples_.front().stamp_ns; }
   int64_t latest_stamp_ns() const { return samples_.empty() ? 0 : samples_.back().stamp_ns; }
   size_t size() const { return samples_.size(); }
@@ -251,6 +339,7 @@ class PoseTimeline {
     return static_cast<double>(a - b) * 1e-9;
   }
   double duration_sec_;
+  size_t max_samples_;
   std::deque<TimedPose> samples_;
 };
-}  // namespace vision_lane
+}  // namespace monoscale_pose
