@@ -252,7 +252,7 @@ public:
     }
 #else
     RCLCPP_WARN(
-      get_logger(), "occupancy backend requested=%s, compiled=CPU; rebuild with scripts/build_cuda.sh",
+      get_logger(), "occupancy backend requested=%s, compiled=CPU; rebuild with tools/build/build.sh cuda",
       settings_.use_cuda ? "CUDA" : "CPU");
 #endif
 

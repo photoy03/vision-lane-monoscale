@@ -18,7 +18,6 @@
     "src/vision_mapping_bringup/config/pose.yaml",
     "src/vision_mapping_bringup/config/lane_detection.yaml",
     "src/vision_mapping_bringup/rviz/mapping.rviz",
-    "src/lane_mapping/lane_detection/reference/realtime_metric_bev_global_mapping_v5_2_temporal_vector_tracker.py",
     "tests/fixtures/carla/ioniq_carla_bridge/config/sensor_kit_calibration.yaml",
     "tests/fixtures/carla/ioniq_carla_bridge/config/sensor_mapping_fisheye_live.yaml",
     "third_party/MONOSCALE_LICENSE",

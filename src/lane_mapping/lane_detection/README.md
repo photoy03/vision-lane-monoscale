@@ -20,7 +20,7 @@ plane sweep and `ParkingOccupancyMapper` are outside this benchmark.
 cd ~/vision_lane_ws
 source /opt/ros/humble/setup.bash
 touch other_cv/5cv/COLCON_IGNORE
-chmod +x src/lane_detection/scripts/*.py
+chmod +x src/lane_mapping/lane_detection/scripts/*.py
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release \
   --packages-select vision_lane_interfaces lane_detection
 source install/setup.bash
@@ -135,16 +135,10 @@ Record one representative 2-5 minute image rosbag, including bright/dark and
 busy/quiet scenes. Replay the same bag twice, one implementation at a time.
 Do not run both simultaneously. Keep debug-map publication and UI disabled.
 
-Python reference wrapper (uses the original v5.2 functions):
-
-```bash
-ros2 run lane_detection python_v52_benchmark_node.py \
-  --ros-args \
-  -p image_topic:=/camera/image_raw \
-  -p core_script:=$HOME/vision_lane_ws/other_cv/realtime_metric_bev_global_mapping_v5_2_temporal_vector_tracker.py \
-  -p calibration_npz:=$HOME/vision_lane_ws/other_cv/calib_output/fisheye_calibration.npz \
-  -p profile_csv_path:=/tmp/v52_python_profile.csv
-```
+The Python v5.2 reference wrapper (python_v52_benchmark_node.py) and its
+reference copy of the v5.2 script were moved out of this package to
+`/home/jaehun/vision_support_ws_archive_20261017/item8_legacy_lane_benchmark/`
+(see the README there to restore them for a new comparison).
 
 C++ reference:
 

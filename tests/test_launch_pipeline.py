@@ -24,7 +24,7 @@ module('launch',LaunchDescription=Item)
 module('launch.actions',**{n:Item for n in ['DeclareLaunchArgument','EmitEvent','LogInfo','OpaqueFunction','RegisterEventHandler']})
 module('launch.event_handlers',OnProcessExit=Item);module('launch.events',Shutdown=Item)
 module('launch.substitutions',LaunchConfiguration=LC);module('launch_ros');module('launch_ros.actions',Node=Item)
-spec=importlib.util.spec_from_file_location('v4',root/'src/vision_mapping_bringup/vision_mapping_bringup/pipeline.py')
+spec=importlib.util.spec_from_file_location('pipeline',root/'src/vision_mapping_bringup/vision_mapping_bringup/pipeline.py')
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 with tempfile.TemporaryDirectory() as td:
     t=Path(td)

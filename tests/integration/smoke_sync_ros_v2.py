@@ -2,8 +2,8 @@
 """Stage-1 transport/synchronization diagnostic, v2. No camera/IMU required.
 
 Run via the stage-1 CPU environment:
-  bash tools/run/with_cpu_env.sh python3 tests/smoke_sync_ros_v2.py
-  bash tools/run/with_cpu_env.sh python3 tests/smoke_sync_ros_v2.py --width 320 --height 180
+  bash tools/run/with_env.sh cpu python3 tests/integration/smoke_sync_ros_v2.py
+  bash tools/run/with_env.sh cpu python3 tests/integration/smoke_sync_ros_v2.py --width 320 --height 180
 
 Does NOT modify or rebuild C++, CUDA, RMW configuration or sensor settings.
 Small 64x36 BGR probes are the default; the image size is fixed for the entire
@@ -85,7 +85,7 @@ def main(argv=None):
     if not exe.is_file():
         raise RuntimeError(f'Built executable not found: {exe}')
     if exe.resolve() != (root / 'install/lane_detection/lib/lane_detection/global_mapping_node').resolve():
-        raise RuntimeError('Wrong workspace overlay: use this workspace tools/run/with_cpu_env.sh')
+        raise RuntimeError('Wrong workspace overlay: use this workspace tools/run/with_env.sh')
 
     run = Path(tempfile.mkdtemp(prefix='stage1_sync_diag_'))
     calibration = root / 'src/vision_mapping_bringup/config/calibration/front.npz'

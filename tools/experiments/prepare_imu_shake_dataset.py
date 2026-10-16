@@ -192,7 +192,7 @@ def main() -> int:
         json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
     repo = args.config.resolve().parents[2]
     snapshot = root / "source_snapshot/working_source_prechange.tar.gz"
-    files = [p for top in (repo / "src", repo / "tools", repo / "tests", repo / "config")
+    files = [p for top in (repo / "src", repo / "tools", repo / "tests", repo / "docs")
              if top.exists() for p in top.rglob("*") if p.is_file() and not p.name.endswith(".pyc")]
     manifest = {"git_head": subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                                              capture_output=True, text=True).stdout.strip(),

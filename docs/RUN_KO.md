@@ -16,10 +16,28 @@ CUDA 기본: /usr/local/cuda-11.8, gcc11, architecture86. 다른 GPU는 호환�
 CPU-only: tools/build/build.sh cpu. ROS와 pip opencv/numpy를 혼용하지 않는다.
 드라이버/Toolkit은 별도 설치 항목이다. 기존 proprietary 선언을 포함해 공개 재배포 허가는 별도 확인한다.
 
-## 패키지 이름 변경 (OLD → NEW)
+## 명령 대응표 (OLD → NEW)
 
-vision_lane_bringup → vision_mapping_bringup, vision_lane_global_mapping_cpp → lane_detection,
-vision_lane_map_fusion → lane_map. 명령 대응표는 README.md에 있다. 노드 이름·토픽은 그대로다.
+| 이전 (vision_lane_v4_ws / 이전 vision_support_ws) | 현재 |
+|---|---|
+| `ros2 launch vision_lane_bringup <file>.launch.py` | `ros2 launch vision_mapping_bringup <file>.launch.py` |
+| `ros2 run vision_lane_global_mapping_cpp <exe>` | `ros2 run lane_detection <exe>` |
+| `ros2 run/launch vision_lane_map_fusion ...` | `ros2 run/launch lane_map ...` |
+| `ros2 launch vision_lane_bringup monoscale_lane_mapping.launch.py` (OLD) | `ros2 launch vision_mapping_bringup live.launch.py` |
+| `ros2 launch vision_lane_bringup measurement_bag.launch.py` (OLD) | `ros2 launch vision_mapping_bringup measurement.launch.py` |
+| `bash scripts/build_cuda.sh`, `tools/build_cuda.sh`, `tools/build/build_cuda.sh` | `bash tools/build/build.sh cuda` |
+| `bash scripts/build_cpu.sh`, `tools/build_cpu.sh`, `tools/build/build_cpu.sh` | `bash tools/build/build.sh cpu` |
+| `bash tools/run_cuda.sh [args]` | `bash tools/run/with_env.sh cuda ros2 launch vision_mapping_bringup live.launch.py launch_occupancy:=true occupancy_use_cuda:=true launch_rviz:=true launch_viewer:=false [args]` |
+| `bash tools/run_cpu.sh [args]` | `bash tools/run/with_env.sh cpu ros2 launch vision_mapping_bringup live.launch.py [args]` |
+| `bash tools/with_cpu_env.sh <cmd>` | `bash tools/run/with_env.sh cpu <cmd>` |
+| `cpu_environment.bash` / `cuda_environment.bash` | `source tools/build/environment.bash cpu\|cuda` |
+| `scripts/run_recovery_trial.py` | `tools/run/run_recovery_trial.py` |
+| `scripts/test_v4.sh` | `tools/eval/test_lane_registration.sh` |
+| `scripts/rebuild_v4.py`, `scripts/replay_v4.py` | `tools/experiments/rebuild_lane_map.py`, `tools/experiments/replay_lane_registration.py` |
+| `tests/test_launch_v4.py` | `tests/test_launch_pipeline.py` |
+| `python_v52_benchmark_node.py` (lane) | 보관 폴더 `item8_legacy_lane_benchmark/` |
+
+노드 이름·토픽·메시지 패키지(vision_lane_interfaces)는 그대로다. 호환용 launch(single_camera_lane, vision_support)는 유지한다.
 
 ## 전체 실행과 기록
 
@@ -68,8 +86,8 @@ raw odom·pose Hz/gap, bag에 녹화된 /localization/kinematic_state 대비 경
 ```bash
 colcon test --base-paths src --event-handlers console_direct+
 colcon test-result --all
-PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m pytest -q tests --ignore=tests/test_launch_v4.py
-PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 tests/test_launch_v4.py
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m pytest -q tests --ignore=tests/test_launch_pipeline.py
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 tests/test_launch_pipeline.py
 /usr/bin/python3 tools/build/check_package.py --system --cuda
 /usr/bin/python3 tools/build/export_source_package.py --output /tmp/vision_support_source.tar.gz
 ```

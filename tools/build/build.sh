@@ -2,7 +2,8 @@
 # Build all existing packages from the reorganized source tree; no retuning.
 set -eo pipefail
 support_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-source "$support_root/tools/build/cpu_environment.bash"
+# Clean ROS environment for both backends; the CUDA compiler is passed explicitly below.
+source "$support_root/tools/build/environment.bash" cpu
 support_backend=${1:-cuda}
 support_multiarch=$(gcc -dumpmachine)
 support_cmake_args=(

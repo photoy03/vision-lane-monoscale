@@ -73,9 +73,8 @@ if(BUILD_TESTING)
 endif()
 
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY reference DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS scripts/convert_fisheye_npz.py scripts/compare_profiles.py
-  scripts/compare_preprocess_backends.py scripts/python_v52_benchmark_node.py
+  scripts/compare_preprocess_backends.py
   scripts/plot_profiles.py
   DESTINATION lib/${PROJECT_NAME})
 ament_package()

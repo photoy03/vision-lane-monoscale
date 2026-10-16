@@ -3,7 +3,7 @@
 <package format="3">
   <name>monoscale_occupancy_grid_map</name>
   <version>0.0.1</version>
-  <description>Plane-sweep occupancy mapping, ported from tools/plane_sweep.py.</description>
+  <description>Plane-sweep occupancy mapping, ported from the upstream MonoScale tools/plane_sweep.py.</description>
   <maintainer email="ujin@tukorea.ac.kr">ujin</maintainer>
   <license>proprietary</license>
 

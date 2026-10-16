@@ -16,7 +16,7 @@
 cd ~/vision_lane_ws
 source /opt/ros/humble/setup.bash
 touch other_cv/5cv/COLCON_IGNORE
-chmod +x src/lane_detection/scripts/*.py
+chmod +x src/lane_mapping/lane_detection/scripts/*.py
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release \
   --packages-select vision_lane_interfaces lane_detection
 source install/setup.bash
