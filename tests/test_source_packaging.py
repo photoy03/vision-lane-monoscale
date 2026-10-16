@@ -8,7 +8,7 @@ import tarfile
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'tools'))
+sys.path.insert(0, str(ROOT / 'tools/build'))
 import check_package
 import export_source_package
 
@@ -47,7 +47,7 @@ def test_export_and_integrity(tmp_path):
 
 def test_missing_and_modified_calibration(tmp_path):
     import shutil
-    shutil.copytree(ROOT / 'tools/dependencies', tmp_path / 'tools/dependencies')
+    shutil.copytree(ROOT / 'tools/build/dependencies', tmp_path / 'tools/build/dependencies')
     shutil.copytree(ROOT / 'src', tmp_path / 'src')
     calibration = tmp_path / 'src/vision_mapping_bringup/config/calibration/front.npz'
     calibration.write_bytes(b'invalid NPZ')

@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def digest(path):
@@ -26,7 +26,7 @@ def checked_path(root, name):
 
 def check_source(root):
     errors = []
-    manifest = json.loads((root / 'tools/dependencies/assets.json').read_text())
+    manifest = json.loads((root / 'tools/build/dependencies/assets.json').read_text())
     for name in [*manifest['files'], *manifest['required_paths']]:
         path = checked_path(root, name)
         if not path.is_file():

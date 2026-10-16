@@ -1,7 +1,7 @@
 # ROS 2 / colcon 산출물
-build/
-install/
-log/
+/build/
+/install/
+/log/
 
 # rosbag 및 대용량 기록
 rosbag2_*/

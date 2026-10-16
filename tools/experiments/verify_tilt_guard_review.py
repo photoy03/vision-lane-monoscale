@@ -22,7 +22,7 @@ from rclpy.serialization import deserialize_message
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("session", type=Path)
-    parser.add_argument("--workspace", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--workspace", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     source = args.workspace / "src/monoscale/monoscale_pose/scripts/odom_stabilizer_node.py"

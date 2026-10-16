@@ -34,7 +34,7 @@ def load_config(path: Path) -> dict:
     if data.get("repeats", 0) < 1 or data.get("minimum_free_gib", 0) < 3:
         raise ValueError("repeats or minimum disk floor invalid")
     # Config paths are workspace-relative, independent of the invoking CWD.
-    workspace = Path(__file__).resolve().parents[1]
+    workspace = Path(__file__).resolve().parents[2]
     for key in ("output_root", "calibration", "front_rig", "rear_rig"):
         path_value = Path(data[key]).expanduser()
         data[key] = str((workspace / path_value).resolve() if not path_value.is_absolute() else path_value)
@@ -128,7 +128,7 @@ def main() -> int:
             print(f"PREFLIGHT_OK variants={','.join(variants)} gyro_config={args.gyro_config}")
             return 0
         repetitions = 1 if args.phase == "individual" else data["repeats"]
-        repo = Path(__file__).resolve().parents[1]
+        repo = Path(__file__).resolve().parents[2]
         for repetition in range(1, repetitions + 1):
             bag_order = bags if repetition % 2 else list(reversed(bags))
             variant_order = variants if repetition % 2 else list(reversed(variants))
@@ -159,7 +159,7 @@ def main() -> int:
                         overrides = dict(approved)
                     if variant.startswith("G"):
                         overrides.update(gyro)
-                    command = [sys.executable, str(repo / "tools/run_recovery_trial.py"),
+                    command = [sys.executable, str(repo / "tools/run/run_recovery_trial.py"),
                                "--bag", bag["path"], "--run-id", name, "--pending", "on",
                                "--output-root", str(root), "--domain-id", str(data["domain_id"]),
                                "--minimum-free-gib", str(data["minimum_free_gib"]),
@@ -173,7 +173,7 @@ def main() -> int:
                     result = subprocess.run(command, cwd=repo, check=False)
                     if result.returncode:
                         raise ValueError(f"trial {name} failed with exit {result.returncode}; matrix stopped")
-                    evaluator = [sys.executable, str(repo / "tools/evaluate_recovery_trial.py"), str(folder)]
+                    evaluator = [sys.executable, str(repo / "tools/eval/evaluate_recovery_trial.py"), str(folder)]
                     result = subprocess.run(evaluator, cwd=repo, check=False)
                     if result.returncode:
                         raise ValueError(f"trial {name} evaluation failed: {result.returncode}")

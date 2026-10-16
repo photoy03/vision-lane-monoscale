@@ -16,7 +16,7 @@ for line in a.journal.read_text().splitlines():
  pose=poses.get(str(stamp),d.get('corrected_pose',d['pose']))
  rows.append(' '.join(map(str,[stamp,*pose,len(d['local_segments'])])))
  rows.extend(' '.join(map(str,s[:6])) for s in d['local_segments'])
-root=Path(__file__).resolve().parents[1]
+root=Path(__file__).resolve().parents[2]
 with tempfile.TemporaryDirectory() as t:
  binary=Path(t)/'rebuild'
  subprocess.run(['g++','-std=c++17','-O2','-I'+str(root/'src/lane_mapping/lane_map/include'),str(root/'tests/rebuild_lines.cpp'),'-o',str(binary)],check=True)

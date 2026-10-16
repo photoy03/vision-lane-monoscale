@@ -17,7 +17,7 @@
   runtime/sensors YAML은 공통·입력 옵션 때문에 추가했다. launch 인수 우선순위는 그대로다.
 - NPZ는 config/calibration/front.npz, rear.npz. rear는 front 복사본이며 독립 보정 결과가 아니다.
   rear_calibration 빈 인수는 기존처럼 front 값을 재사용한다.
-- RViz는 rviz/mapping.rviz. 의존성은 tools/dependencies, CARLA 시험 YAML은 tests/fixtures/carla.
+- RViz는 rviz/mapping.rviz. 의존성은 tools/build/dependencies, CARLA 시험 YAML은 tests/fixtures/carla.
 - 통합 smoke 도구는 tests/integration. 과거 자료는 활성 docs에 섞지 않았다.
 - 기존 패키지별 config는 standalone/offline 호환 때문에 보존한다.
 
@@ -49,4 +49,4 @@
 복구가 필요하면 소스/support 트리만 대조해 복원하고 원본 workspace를 reset하거나 rosbag을 삭제하지 않는다.
 
 원본 라이선스 선언과 기존 compiler 경고를 임의로 고치지 않았다. CPU occupancy의 오래된
-scripts/build_cuda.sh 안내 문자열 대신 실제 명령은 bash tools/build.sh cuda다.
+scripts/build_cuda.sh 안내 문자열 대신 실제 명령은 bash tools/build/build.sh cuda다.

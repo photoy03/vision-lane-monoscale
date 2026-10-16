@@ -13,7 +13,11 @@ src/
     launch/                  sensors / monoscale / lanes / live / replay / measurement
     config/                  calibration + 기능별 YAML
     rviz/                    mapping.rviz
-tools/                       빌드·재생·평가·CSV·dependencies
+tools/
+  build/                     빌드·환경·의존성(dependencies)·소스 검사/export
+  run/                       재생 runner·실행 helper
+  eval/                      반복 비교·평가·오프라인 시험
+  experiments/               IMU shake 등 일회성 실험 도구
 tests/                       단위시험·integration·fixtures
 docs/                        현재 구조·실행·검증 설명
 third_party/                 출처·라이선스
@@ -23,7 +27,7 @@ third_party/                 출처·라이선스
 
 ```bash
 cd ~/vision_support_ws
-bash tools/build.sh cuda
+bash tools/build/build.sh cuda
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch vision_lane_bringup live.launch.py \
@@ -32,7 +36,7 @@ ros2 launch vision_lane_bringup live.launch.py \
 ```
 
 장치는 실제 값으로 바꾼다. 기존 rear=false/occupancy=false 기본값을 유지한다.
-CPU-only는 tools/build.sh cpu. build/install/log는 빌드 시 생성되는 폴더다.
+CPU-only는 tools/build/build.sh cpu. build/install/log는 빌드 시 생성되는 폴더다.
 ROS package 이름은 기존 vision_lane_bringup/vision_lane_global_mapping_cpp/vision_lane_map_fusion을 유지한다.
 
 - [구조와 변경 범위](docs/STRUCTURE_KO.md)

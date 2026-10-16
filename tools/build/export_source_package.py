@@ -9,10 +9,12 @@ import tarfile
 
 from check_package import check_source
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 TREES = ('src', 'tools', 'tests', 'third_party', 'docs')
 FILES = ('README.md', '.gitignore')
-SKIP_PARTS = {'__pycache__', '.pytest_cache', '.git', 'build', 'install', 'log'}
+SKIP_PARTS = {'__pycache__', '.pytest_cache', '.git'}
+# colcon outputs; tools/build/ is source and is kept.
+GENERATED_PARTS = {'build', 'install', 'log'}
 
 
 def source_files(root):
@@ -20,7 +22,8 @@ def source_files(root):
     for tree in TREES:
         for path in (root / tree).rglob('*'):
             rel = path.relative_to(root)
-            if any(part in SKIP_PARTS for part in rel.parts) or path.suffix in ('.pyc', '.orig', '.bag', '.db3', '.mcap'):
+            generated = rel.parts[:2] != ('tools', 'build') and any(part in GENERATED_PARTS for part in rel.parts)
+            if generated or any(part in SKIP_PARTS for part in rel.parts) or path.suffix in ('.pyc', '.orig', '.bag', '.db3', '.mcap'):
                 continue
             if path.is_symlink():
                 raise ValueError(f'Symlink not allowed in source export: {rel}')

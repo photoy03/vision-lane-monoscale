@@ -32,6 +32,15 @@ TOPICS = (
     "/sensing/camera/rear/fisheye/camera_info",
     "/sensing/imu/imu_data",
 )
+OUTPUT_TOPICS = (
+    "/localization/monoscale_raw",
+    "/localization/kinematic_state",
+    "/localization/odom_filter_status",
+    "/parking/cpp/marking_segments",
+    "/parking/cpp/global_marking_segments_fused",
+    "/parking/cpp/map_fusion/status",
+    "/perception/occupancy_grid_map",
+)
 READY_BASE = ("tracking front on", "v5.2 C++ node:", "CPU line map:",
               "lane odom filter:")
 READY_OCCUPANCY = "occupancy backend requested="
@@ -175,7 +184,7 @@ class ResourceSampler:
         self.stream.close()
 
 def main() -> int:
-    repo_default = Path(__file__).resolve().parents[1]
+    repo_default = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bag", required=True, type=Path, help="existing bag directory (read-only)")
     parser.add_argument("--run-id", required=True, help="new output folder name")
@@ -192,6 +201,8 @@ def main() -> int:
     parser.add_argument("--minimum-free-gib", type=float, default=3.0)
     parser.add_argument("--launch-arg", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument("--instrumentation", choices=("on", "off"), default="on")
+    parser.add_argument("--record-outputs", choices=("on", "off"), default="off",
+                        help="record pipeline output topics into <run>/outputs_bag")
     parser.add_argument("--sample-plan", type=Path, help="frozen sample_manifest.json")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -203,7 +214,7 @@ def main() -> int:
     sample_plan = args.sample_plan.expanduser().resolve() if args.sample_plan else None
     if sample_plan and not sample_plan.is_file():
         raise SystemExit(f"sample plan is missing: {sample_plan}")
-    if sample_plan and not (repo / "tools/sample_imu_maps.py").is_file():
+    if sample_plan and not (repo / "tools/experiments/sample_imu_maps.py").is_file():
         raise SystemExit("sample_imu_maps.py is missing")
     calibration, rig, rear_rig = (p.expanduser().resolve()
                                   for p in (args.calibration, args.rig, args.rear_rig))
@@ -327,9 +338,13 @@ def main() -> int:
     commands = {name: ros_command(repo, argv) for name, argv in
                 (("launch", launch), ("front_republisher", front_repub),
                  ("rear_republisher", rear_repub), ("player", player))}
+    if args.record_outputs == "on":
+        commands["recorder"] = ros_command(repo, [
+            "ros2", "bag", "record", "--use-sim-time", "-s", "sqlite3",
+            "-o", str(output / "outputs_bag"), *OUTPUT_TOPICS])
     if sample_plan:
         commands["sampler"] = ros_command(repo, [
-            "python3", str(repo / "tools/sample_imu_maps.py"),
+            "python3", str(repo / "tools/experiments/sample_imu_maps.py"),
             "--plan", str(sample_plan), "--output", str(output / "visual_samples")])
     manifest: dict[str, Any] = {
         "schema_version": 1, "run_id": args.run_id,
@@ -339,7 +354,9 @@ def main() -> int:
         "sample_plan": str(sample_plan) if sample_plan else None,
         "sample_plan_sha256": sha256(sample_plan) if sample_plan else None,
         "bag_info": info.stdout, "bag_topics": sorted(available_topics),
-        "replayed_topics": list(TOPICS), "ros_domain_id": args.domain_id,
+        "replayed_topics": list(TOPICS),
+        "recorded_output_topics": list(OUTPUT_TOPICS) if args.record_outputs == "on" else [],
+        "ros_domain_id": args.domain_id,
         "output_dir": str(output), "free_disk_gib_at_start": round(free_gib, 3),
         "config_hashes": {str(p): sha256(p) for p in (calibration, rig, rear_rig)},
         "source_hashes": {
@@ -357,7 +374,7 @@ def main() -> int:
                 Path("src/vision_mapping_bringup/config/qos.yaml"),
                 Path("src/lane_mapping/lane_detection/config/global_mapping_v4l2.yaml"),
                 Path("src/monoscale/monoscale_odometry/config/vision_fisheye.param.yaml"),
-                Path("tools/run_recovery_trial.py"),
+                Path("tools/run/run_recovery_trial.py"),
             )
         },
         "bag_metadata_sha256": sha256(bag / "metadata.yaml"),
@@ -377,9 +394,11 @@ def main() -> int:
     log_names = ["launch.log", "player.log", "front_republish.log", "rear_republish.log"]
     if sample_plan:
         log_names.append("sampler.log")
+    if args.record_outputs == "on":
+        log_names.append("recorder.log")
     logs = {name: (output / name).open("w", encoding="utf-8", buffering=1)
             for name in log_names}
-    launch_proc = front_proc = rear_proc = player_proc = sampler_proc = None
+    launch_proc = front_proc = rear_proc = player_proc = sampler_proc = recorder_proc = None
     resource_sampler: ResourceSampler | None = None
     result_code = 2
     try:
@@ -453,6 +472,21 @@ def main() -> int:
             if sampler_proc.poll() is not None:
                 raise RuntimeError("map sampler exited before playback; inspect sampler.log")
 
+        if args.record_outputs == "on":
+            recorder_proc = subprocess.Popen(
+                commands["recorder"], env=env, stdin=subprocess.DEVNULL,
+                stdout=logs["recorder.log"], stderr=subprocess.STDOUT, start_new_session=True)
+            # The recorder subscribes only to topics that already exist.
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                if "Subscribed to topic" in (output / "recorder.log").read_text(errors="replace") \
+                        or recorder_proc.poll() is not None:
+                    break
+                time.sleep(0.5)
+            if recorder_proc.poll() is not None:
+                raise RuntimeError("output recorder exited before playback; inspect recorder.log")
+            time.sleep(2.0)
+
         player_proc = subprocess.Popen(commands["player"], env=env, stdin=subprocess.DEVNULL,
                                        stdout=logs["player.log"], stderr=subprocess.STDOUT,
                                        start_new_session=True)
@@ -501,6 +535,9 @@ def main() -> int:
             sampler_proc = None
             if manifest["sample_process_exit_code"] != 0:
                 raise RuntimeError("map sampler did not finish cleanly; inspect sampler.log")
+        if recorder_proc is not None:
+            manifest["process_exit_codes"]["recorder"] = stop_owned(recorder_proc, 30.0)
+            recorder_proc = None
         manifest["process_exit_codes"]["front_republisher"] = stop_owned(front_proc)
         manifest["process_exit_codes"]["rear_republisher"] = stop_owned(rear_proc)
         front_proc = rear_proc = None
@@ -528,6 +565,8 @@ def main() -> int:
             manifest["sample_process_exit_code"] = stop_owned(sampler_proc, 10.0)
         if player_proc is not None:
             manifest["process_exit_codes"]["player"] = stop_owned(player_proc, 5.0)
+        if recorder_proc is not None:
+            manifest["process_exit_codes"]["recorder"] = stop_owned(recorder_proc, 30.0)
         if front_proc is not None:
             manifest["process_exit_codes"]["front_republisher"] = stop_owned(front_proc, 5.0)
         if rear_proc is not None:

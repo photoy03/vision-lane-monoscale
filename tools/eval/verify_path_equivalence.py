@@ -10,7 +10,7 @@ import tempfile
 import types
 import yaml
 
-NEW = Path(__file__).resolve().parents[1]
+NEW = Path(__file__).resolve().parents[2]
 LAYOUT = {
     'vision_lane_bringup': 'src/vision_mapping_bringup',
     'vision_lane_global_mapping_cpp': 'src/lane_mapping/lane_detection',

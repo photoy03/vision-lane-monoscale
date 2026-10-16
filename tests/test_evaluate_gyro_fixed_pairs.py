@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 
-module_path = Path(__file__).resolve().parents[1] / "tools/evaluate_gyro_fixed_pairs.py"
+module_path = Path(__file__).resolve().parents[1] / "tools/experiments/evaluate_gyro_fixed_pairs.py"
 spec = importlib.util.spec_from_file_location("evaluate_gyro_fixed_pairs", module_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

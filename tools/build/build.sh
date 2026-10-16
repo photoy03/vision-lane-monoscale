@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build all existing packages from the reorganized source tree; no retuning.
 set -eo pipefail
-support_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-source "$support_root/tools/cpu_environment.bash"
+support_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+source "$support_root/tools/build/cpu_environment.bash"
 support_backend=${1:-cuda}
 support_multiarch=$(gcc -dumpmachine)
 support_cmake_args=(
@@ -22,7 +22,7 @@ case "$support_backend" in
       -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/gcc-11 -DMONOSCALE_CUDA_ARCHITECTURES=86)
     ;;
   cpu) support_cmake_args+=(-DCMAKE_CUDA_COMPILER=NOTFOUND) ;;
-  *) echo 'Usage: bash tools/build.sh [cuda|cpu]' >&2; exit 2 ;;
+  *) echo 'Usage: bash tools/build/build.sh [cuda|cpu]' >&2; exit 2 ;;
 esac
 cd "$support_root"
 export CMAKE_BUILD_PARALLEL_LEVEL=2

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -eo pipefail
-cuda_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-source "$cuda_root/tools/cuda_environment.bash"
+cuda_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+source "$cuda_root/tools/build/cuda_environment.bash"
 if ! nvidia-smi >/dev/null 2>&1; then
   echo 'NVIDIA driver is not ready. Check nvidia-smi first.' >&2
   exit 1
 fi
 if [[ ! -f "$cuda_root/install/setup.bash" ]]; then
-  echo 'Build this workspace first: bash tools/build_cuda.sh' >&2
+  echo 'Build this workspace first: bash tools/build/build_cuda.sh' >&2
   exit 1
 fi
 source "$cuda_root/install/setup.bash"

@@ -8,7 +8,7 @@ import tempfile
 p=argparse.ArgumentParser()
 p.add_argument('journal',type=Path)
 a=p.parse_args()
-root=Path(__file__).resolve().parents[1]
+root=Path(__file__).resolve().parents[2]
 rows=[]
 for line in a.journal.read_text().splitlines():
     d=json.loads(line)
