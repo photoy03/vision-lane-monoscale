@@ -31,11 +31,15 @@ bash tools/build/build.sh cuda
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch vision_mapping_bringup live.launch.py \
-  rear_enabled:=true device:=/dev/실제전방 rear_device:=/dev/실제후방 \
+  device:=/dev/v4l/by-id/<전방카메라>-video-index0 \
+  imu_device:=/dev/serial/by-id/<F9R>-if00 \
+  rear_enabled:=true rear_device:=/dev/v4l/by-id/<후방카메라>-video-index0 \
   launch_occupancy:=true launch_rviz:=true launch_viewer:=false
 ```
 
-장치는 실제 값으로 바꾼다. 기존 rear=false/occupancy=false 기본값을 유지한다.
+장치 경로에는 기본값이 없다. 카메라·F9R을 켜는 실행(live/sensors)은 device, imu_device(후방 사용 시 rear_device)를 꼭 넘겨야 하며,
+빠지면 바로 이유와 예시를 출력하고 멈춘다. replay와 기능별 monoscale/lanes launch는 장치가 필요 없다.
+기존 rear=false/occupancy=false 기본값을 유지한다.
 CPU-only는 tools/build/build.sh cpu. build/install/log는 빌드 시 생성되는 폴더다.
 ROS package 이름은 폴더 이름과 같다(2026-10-17 변경). 이전 명령은 아래처럼 바꾼다.
 

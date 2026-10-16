@@ -46,12 +46,30 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch vision_mapping_bringup live.launch.py --show-args
 ros2 launch vision_mapping_bringup live.launch.py \
-  rear_enabled:=true device:=/dev/실제전방 rear_device:=/dev/실제후방 \
+  device:=/dev/v4l/by-id/<전방카메라>-video-index0 \
+  imu_device:=/dev/serial/by-id/<F9R>-if00 \
+  rear_enabled:=true rear_device:=/dev/v4l/by-id/<후방카메라>-video-index0 \
   launch_occupancy:=true launch_rviz:=true launch_viewer:=false
 # 별도 터미널에서 두 source 후
 ros2 launch vision_mapping_bringup measurement.launch.py \
   trial_name:=layout_check record_rear_camera:=true record_occupancy:=true
 ```
+
+### 장치 경로
+
+device / imu_device / rear_device에는 기본값이 없다. launch_camera:=true면 device, launch_f9r:=true면 imu_device,
+rear_enabled:=true이면서 카메라를 켜면 rear_device가 필요하고(device와 달라야 함), 빠지면 launch가 바로 멈춘다.
+replay.launch.py(드라이버 off)와 monoscale/lanes 기능별 launch에는 필요 없다.
+
+/dev/video2, /dev/ttyACM0 같은 번호는 USB를 꽂는 순서에 따라 바뀌므로 고정 이름을 쓴다.
+
+```bash
+ls -l /dev/v4l/by-id/      # 카메라: ...-video-index0 이 영상 장치
+ls -l /dev/serial/by-id/   # F9R: usb-u-blox_AG_..._if00
+```
+
+같은 모델 카메라 두 대처럼 by-id가 구분되지 않으면 /dev/v4l/by-path/(꽂은 USB 포트 기준)를 쓴다.
+나중 과제(미구현): udev 규칙으로 /dev/front_camera, /dev/rear_camera, /dev/f9r 같은 이름을 포트·시리얼에 고정한다.
 
 ## 재생
 

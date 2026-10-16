@@ -122,7 +122,9 @@ def main():
     cases=[]
     for dual in (False,True):
         for mode in ('legacy','continuation','compare'):
-            case={'rear_enabled':str(dual).lower(),'rear_device':'/dev/video4' if dual else '',
+            # Device paths have no default any more; use the reference's former defaults.
+            case={'device':'/dev/video2','imu_device':'/dev/ttyACM0',
+                  'rear_enabled':str(dual).lower(),'rear_device':'/dev/video4' if dual else '',
                   'launch_occupancy':'true','launch_rviz':'true','launch_viewer':'false','map_fusion_mode':mode}
             for shadow in (('false',) if dual else ('false','true')):
                 case['imu_accel_shadow']=shadow

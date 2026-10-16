@@ -107,6 +107,21 @@ def _launch(context, group='all'):
                     out[parameter] = cast(raw)
         return out
     world = map_definition()
+    # Hardware is only opened when the sensors group runs; replay/processing-only
+    # launches never need device paths.
+    drivers = group in ('all', 'sensors')
+    def device_path(name, needed_for, example):
+        value = arg(name).strip()
+        if not drivers:
+            return value
+        if not value:
+            raise ValueError(
+                f'{name}:=<path> is required with {needed_for}, e.g. {name}:={example} '
+                f'(stable names: ls -l /dev/v4l/by-id /dev/serial/by-id). '
+                f'For bag replay use replay.launch.py, or launch_camera:=false launch_f9r:=false.')
+        if not value.startswith('/dev/') or any(c in value for c in (' ', '!', '\n', '"')):
+            raise ValueError(f'{name} must be a /dev/ path without spaces or GStreamer syntax: {value!r}')
+        return value
 
     shared = Path(get_package_share_directory('vision_mapping_bringup'))
     mono = Path(get_package_share_directory('monoscale_odometry'))
@@ -239,9 +254,7 @@ def _launch(context, group='all'):
     tracker_deployment.update({key: value for key, value in tracker_overrides.items()
                                if key in tracker_deployment})
     if launch_camera:
-        device = arg('device')
-        if not device.startswith('/dev/') or any(c in device for c in (' ', '!', '\n', '"')):
-            raise ValueError('device must be a /dev/ path without GStreamer syntax')
+        device = device_path('device', 'launch_camera:=true', '/dev/v4l/by-id/usb-<front-camera>-video-index0')
         nodes.append(make_node(
             package='gscam', executable='gscam_node', name='stage1_color_camera', output='screen',
             parameters=[{
@@ -255,7 +268,9 @@ def _launch(context, group='all'):
     if launch_f9r:
         nodes.append(make_node(package='monoscale_ublox', executable='f9r_imu',
                           name='f9r_imu', output='screen', parameters=[{
-                              'device': arg('imu_device'), 'frame_id': 'imu_link',
+                              'device': device_path('imu_device', 'launch_f9r:=true',
+                                                    '/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00'),
+                              'frame_id': 'imu_link',
                               'gyro_yaw_fallback': True, 'gyro_bias_calibration_sec': 2.0,
                               'gyro_bias_stationary_threshold_rad_s': 0.035,
                               'gyro_yaw_rate_tau_sec': float(arg('imu_yaw_rate_tau_sec')),
@@ -297,10 +312,10 @@ def _launch(context, group='all'):
             'rear.translation_base_from_camera': rt, 'rear.rotation_base_from_camera': rr.flatten().tolist()}
         nodes.append(static_tf('rear_camera_tf', rt, quaternion_xyzw(rr), 'rear_fisheye_camera_optical_frame'))
         if launch_camera:
-            if not rear_device:
-                raise ValueError('rear_device is required when launching the rear camera driver')
-            if not rear_device.startswith('/dev/') or any(c in rear_device for c in (' ', '!', '\n', '"')) or rear_device == arg('device'):
-                raise ValueError('Rear device must be a different valid /dev/ path')
+            rear_device = device_path('rear_device', 'rear_enabled:=true and launch_camera:=true',
+                                      '/dev/v4l/by-id/usb-<rear-camera>-video-index0')
+            if drivers and rear_device == arg('device').strip():
+                raise ValueError('rear_device must differ from device')
             nodes.append(make_node(package='gscam', executable='gscam_node', name='rear_color_camera',
                 output='screen', parameters=[{
                     'gscam_config': f'v4l2src device={rear_device} ! image/jpeg,width={width},height={height},framerate={fps}/1 ! jpegdec ! videoconvert ! video/x-raw,format=RGB',
