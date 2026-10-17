@@ -43,6 +43,8 @@ OUTPUT_TOPICS = (
     "/pipeline/progress",
     "/mapping/snapshot/lanes",
     "/mapping/snapshot/occupancy",
+    "/mapping/fused_map",
+    "/mapping/fused_map/status",
 )
 READY_BASE = ("tracking front on", "v5.2 C++ node:", "CPU line map:",
               "lane odom filter:")
@@ -250,7 +252,7 @@ def main() -> int:
         "lane_pending_commit_budget",
         "tracker_opencv_threads", "tracker_executor_threads", "odom_executor_threads",
         "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
-        "lane_mapping_owner",
+        "lane_mapping_owner", "launch_fusion",
     }
     launch_overrides: dict[str, str] = {}
     for item in args.launch_arg:

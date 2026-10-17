@@ -49,7 +49,7 @@ def angle_deg(a: float, b: float) -> float:
     return abs(math.degrees(math.atan2(math.sin(a - b), math.cos(a - b))))
 
 
-SNAPSHOT_TOPICS = ("/mapping/snapshot/lanes", "/mapping/snapshot/occupancy")
+SNAPSHOT_TOPICS = ("/mapping/snapshot/lanes", "/mapping/snapshot/occupancy", "/mapping/fused_map")
 
 
 def _ns(t) -> int:
@@ -115,6 +115,58 @@ def snapshot_metrics(lanes: list, occupancy: list, history_sec: float = 10.0) ->
         lags.sort()
         m["fusion_dry_run_lag_p50_ms"] = 1000.0 * lags[len(lags) // 2]
         m["fusion_dry_run_lag_p90_ms"] = 1000.0 * lags[int(0.9 * (len(lags) - 1))]
+    return m
+
+
+def fused_metrics(fused: list, lanes: list, occupancy: list) -> dict[str, float]:
+    """Check /mapping/fused_map against the contract and the recorded snapshots.
+
+    Every set must be exact at its T (content_max <= T <= complete_through for
+    both layers, unless marked incomplete), T must increase, and each layer must
+    be one of the snapshots the producer published (same session, sequence and
+    content). Lag = arrival (ROS clock) - T.
+    """
+    m: dict[str, float] = {}
+    if not fused:
+        return m
+    import hashlib
+
+    def key(meta, data: bytes):
+        return (meta.session_id, meta.epoch, meta.snapshot_sequence, hashlib.sha1(data).hexdigest())
+
+    def lane_bytes(msg):
+        return repr([(s.track_id, s.start.x, s.start.y, s.end.x, s.end.y) for s in msg.lanes.segments]).encode()
+
+    lane_keys = {key(msg.meta, lane_bytes(msg)) for _, msg in lanes}
+    occupancy_keys = {key(msg.meta, bytes(msg.grid.data)) for _, msg in occupancy}
+    stamps = [_ns(msg.header.stamp) for _, msg in fused]
+    m["fused_count"] = len(fused)
+    m["fused_complete_ratio"] = sum(msg.complete for _, msg in fused) / len(fused)
+    m["fused_t_not_increasing"] = sum(b <= a for a, b in zip(stamps, stamps[1:]))
+    violations = 0
+    for _, msg in fused:
+        t = _ns(msg.header.stamp)
+        layers = [msg.lanes.meta, msg.occupancy.meta]
+        if msg.complete:
+            violations += any(not meta.valid or not (_ns(meta.content_max) <= t <= _ns(meta.complete_through))
+                              for meta in layers)
+    m["fused_contract_violations"] = violations
+    m["fused_future_content"] = sum(
+        any(_ns(meta.content_max) > _ns(msg.header.stamp) for meta in (msg.lanes.meta, msg.occupancy.meta))
+        for _, msg in fused if msg.complete)
+    if lanes and occupancy:
+        m["fused_layers_not_published"] = sum(
+            key(msg.lanes.meta, lane_bytes(msg.lanes)) not in lane_keys or
+            key(msg.occupancy.meta, bytes(msg.occupancy.grid.data)) not in occupancy_keys
+            for _, msg in fused)
+    m["fused_pose_valid_ratio"] = sum(msg.pose_valid for _, msg in fused) / len(fused)
+    lags = sorted(arrival - _ns(msg.header.stamp) * 1e-9 for arrival, msg in fused)
+    m["fused_lag_p50_ms"] = 1000.0 * lags[len(lags) // 2]
+    m["fused_lag_p90_ms"] = 1000.0 * lags[int(0.9 * (len(lags) - 1))]
+    skew = sorted(abs(_ns(msg.lanes.meta.content_max) - _ns(msg.occupancy.meta.content_max)) * 1e-6
+                  for _, msg in fused)
+    m["fused_layer_content_skew_p50_ms"] = skew[len(skew) // 2]
+    m["fused_layer_content_skew_p90_ms"] = skew[int(0.9 * (len(skew) - 1))]
     return m
 
 
@@ -319,6 +371,8 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                     m[f"watermark_{node}_lag_p50_ms"] = lags[len(lags) // 2]
                     m[f"watermark_{node}_lag_p90_ms"] = lags[int(0.9 * (len(lags) - 1))]
             m.update(snapshot_metrics(data["/mapping/snapshot/lanes"], data["/mapping/snapshot/occupancy"]))
+            m.update(fused_metrics(data["/mapping/fused_map"], data["/mapping/snapshot/lanes"],
+                                   data["/mapping/snapshot/occupancy"]))
             grids = data["/perception/occupancy_grid_map"]
             m["occupancy_grid_msgs"] = len(grids)
             if grids:

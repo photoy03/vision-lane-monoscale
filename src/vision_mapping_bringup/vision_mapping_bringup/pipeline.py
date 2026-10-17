@@ -32,7 +32,7 @@ LAUNCH_GROUPS = ('all', 'sensors', 'monoscale', 'lanes')
 def _category(package):
     if package in ('gscam', 'monoscale_ublox', 'tf2_ros'):
         return 'sensors'
-    if package in ('lane_detection', 'lane_map', 'rqt_image_view', 'rviz2'):
+    if package in ('lane_detection', 'lane_map', 'map_assembly', 'rqt_image_view', 'rviz2'):
         return 'lanes'
     return 'monoscale'
 

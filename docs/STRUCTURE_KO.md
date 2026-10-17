@@ -79,6 +79,23 @@ tracker·odometry는 넣지 않았다: 상류 MonoScale에서 벤치마크로 �
 점유지도 발행의 시각/내용 경합(시각을 먼저 읽고 격자를 나중에 복사하던 것)은 고쳤다. 기존 /perception/occupancy_grid_map의 header 시각도
 이제 내용과 같은 잠금에서 정한 content_max(ns 정수)다. 격자 값은 그대로다.
 
+## 통합 지도 (map_assembly, 2026-10-17 추가, 기본 꺼짐)
+
+패키지 src/mapping/map_assembly. launch 인수 `launch_fusion:=true`로 켠다(launch_occupancy·launch_lane_fusion 필요). 제어용 pose·TF는 거치지 않는다.
+
+- map_assembler: /mapping/snapshot/{lanes,occupancy} + /localization/kinematic_state → /mapping/fused_map(FusedMap), /mapping/fused_map/status(JSON), /pipeline/progress(node map_assembler, W = 마지막 T).
+  - 층마다 최근 history_sec(10 s, ROS 시계 기준 도착 시각) 동안의 valid 스냅샷만 보관한다. session/epoch가 바뀌면 그 층 이력을 비운다.
+  - 엄격(기본): 모든 (차선, 점유) 쌍 중 max(content_max) ≤ T ≤ min(complete_through, 최신 pose 시각)인 가장 늦은 T를 고른다. T는 증가할 때만 낸다.
+    쌍이 없으면 기다린다(아무것도 내지 않음).
+  - 장애 판정: 한 층의 complete_through가 stall_timeout_sec(5 s, ROS 시계) 동안 전진하지 않으면 stalled. 엄격 모드는 T를 동결하고 status에 stalled:<층>을 쓴다.
+    bag을 일시정지하면 ROS 시계도 멈추므로 장애로 보지 않는다.
+  - 불완전 모드(allow_incomplete:=true, 기본 false): 한 층만 멈췄을 때 다른 층만으로 T를 정하고, 멈춘 층의 최신 스냅샷을 붙여 complete=false, stale_layers로 표시한다.
+  - pose at T: 측정 pose 또는 T를 감싸는 두 측정 pose 사이 보간(간격 ≤ pose_max_gap_sec 0.25 s, 외삽 없음). 보간은 T 뒤의 pose를 쓴다.
+    못 구하면 pose_valid=false와 이유(pose_match)만 남기고 지도는 그대로 낸다. 사용한 두 pose 시각(pose_lower/upper)을 기록한다.
+- map_visualizer: /mapping/fused_map 한 메시지를 이미지 한 장(/mapping/fused_map/image)으로 그린다. 점유 격자(회색), 차선(하늘색), T 시각 차량 화살표(빨강), T·지연·층별 T−content_max·pose 상태 글자.
+  두 토픽을 따로 그리는 RViz와 달리 항상 같은 묶음이다. 위치·yaw 오차, 차선 중복은 그대로 보인다(고치지 않는다).
+- 보기: `ros2 run rqt_image_view rqt_image_view /mapping/fused_map/image`
+
 ## launch
 
 | 파일 | 범위 |

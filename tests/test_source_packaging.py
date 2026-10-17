@@ -16,7 +16,7 @@ import export_source_package
 def test_assets_and_packages():
     result = check_package.check_source(ROOT)
     assert result['errors'] == []
-    assert len(result['packages']) == 10
+    assert len(result['packages']) == 11
 
 
 def test_reject_path_escape(tmp_path):

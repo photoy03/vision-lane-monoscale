@@ -7,6 +7,7 @@ SOURCES = {
     'lane_detection': 'src/lane_mapping/lane_detection',
     'lane_map': 'src/lane_mapping/lane_map',
     'vision_lane_interfaces': 'src/interfaces/vision_lane_interfaces',
+    'map_assembly': 'src/mapping/map_assembly',
     'monoscale_ublox': 'src/sensors/monoscale_ublox',
     **{name: 'src/monoscale/' + name for name in
        ('monoscale_pose','monoscale_core','monoscale_tracker','monoscale_odometry','monoscale_occupancy_grid_map')},

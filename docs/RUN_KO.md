@@ -112,6 +112,10 @@ outputs_bag은 기본으로 rosbag2 zstd 파일 압축(`--outputs-compression zs
 `ros2 bag info`/`ros2 bag play`는 압축본을 그대로 다룬다. 압축을 아예 풀려면:
 `ros2 bag convert -i <run>/outputs_bag -o out.yaml`(out.yaml: `output_bags: [{uri: <새 폴더>, storage_id: sqlite3, all: true}]`)
 또는 sqlite 파일만 필요하면 `zstd -d <run>/outputs_bag/outputs_bag_0.db3.zstd -o /tmp/outputs_bag_0.db3`.
+지도 스냅샷과 통합 지도도 녹화한다(/mapping/snapshot/*, /mapping/fused_map[/status]). repeat_compare 지표:
+snapshot_<층>_*(valid 비율, content_ahead, late_changes = 0이어야 함), fusion_dry_run_*(녹화된 스냅샷으로 계산한 통합 모의 실행),
+fused_*(통합 노드를 켠 실행만: contract_violations·future_content·t_not_increasing·layers_not_published는 0이어야 함, lag p50/p90, 층 간 content 차이, pose_valid 비율).
+통합 노드는 `--launch-arg launch_fusion=true`로 켠다.
 marking_segments_total은 lane_mapping_owner에 따라 뜻이 다르다(detection: 월드 추적 결과, map: pose 없는 로컬 결과). 모드가 다른 실행끼리 비교하지 않는다.
 
 ## 검사

@@ -22,6 +22,8 @@ PACKAGE_DEFAULTS = {
     'lane_map_fusion': (('lane_map', 'config/map_fusion.yaml'),),
     'monoscale_occupancy_grid_map': (
         ('monoscale_occupancy_grid_map', 'config/occupancy.param.yaml'),),
+    'map_assembler': (('map_assembly', 'config/map_assembly.yaml'),),
+    'map_visualizer': (('map_assembly', 'config/map_assembly.yaml'),),
 }
 
 
