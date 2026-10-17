@@ -172,4 +172,82 @@ class ProvenanceBuffer {
   std::map<int64_t, Provenance> by_stamp_;
 };
 
+// Bounded wait for provenance that arrives after its pose. Nothing blocks:
+// a candidate whose pose samples lack provenance is held (T, pair and start
+// fixed at the first attempt) until both arrive, a newer T is publishable
+// (the held one is dropped as superseded), or the deadline on the ROS clock
+// passes (published as UNKNOWN, counted by which sample was missing).
+// A paused ROS clock pauses the deadline.
+template <class Payload>
+class ProvenanceGate {
+ public:
+  struct Counts {
+    uint64_t started{0}, attached_late{0}, expired_lower{0}, expired_upper{0}, expired_both{0};
+    uint64_t superseded{0}, reset_discarded{0};
+  };
+  struct Release {
+    Payload payload;
+    bool expired{false};
+  };
+
+  explicit ProvenanceGate(int64_t timeout_ns) : timeout_ns_(timeout_ns) {}
+
+  // Candidate T for the next choice: newer than both the last output and the held one.
+  int64_t floor(int64_t last_t) const { return pending_ ? std::max(last_t, pending_->t) : last_t; }
+  bool holding() const { return pending_.has_value(); }
+  const Counts &counts() const { return counts_; }
+
+  // needs_provenance: the pose at T is valid (lower/upper are its sample stamps).
+  // Returns true when the candidate is to be published now.
+  bool offer(int64_t t, bool needs_provenance, int64_t lower, int64_t upper, Payload payload,
+             int64_t now_ns, const ProvenanceBuffer &buffer) {
+    if (!needs_provenance || missing(buffer, lower, upper) == 0) {
+      if (pending_) {
+        ++counts_.superseded;
+        pending_.reset();
+      }
+      return true;
+    }
+    if (!pending_) {
+      pending_ = Pending{t, now_ns, lower, upper, std::move(payload)};
+      ++counts_.started;
+    }
+    return false;
+  }
+
+  // The held candidate, once its provenance is complete or its deadline passed.
+  std::optional<Release> poll(int64_t now_ns, const ProvenanceBuffer &buffer) {
+    if (!pending_) return std::nullopt;
+    const int mask = missing(buffer, pending_->lower, pending_->upper);
+    if (mask != 0 && now_ns - pending_->start_ns < timeout_ns_) return std::nullopt;
+    if (mask == 0) ++counts_.attached_late;
+    else if (mask == 3) ++counts_.expired_both;
+    else if (mask == 1) ++counts_.expired_lower;
+    else ++counts_.expired_upper;
+    Release release{std::move(pending_->payload), mask != 0};
+    pending_.reset();
+    return release;
+  }
+
+  // Time line reset (clock regression / generation change).
+  void reset() {
+    if (pending_) ++counts_.reset_discarded;
+    pending_.reset();
+  }
+
+ private:
+  struct Pending {
+    int64_t t, start_ns, lower, upper;
+    Payload payload;
+  };
+  // bit 0: lower sample has no provenance, bit 1: upper sample has none.
+  static int missing(const ProvenanceBuffer &buffer, int64_t lower, int64_t upper) {
+    return (buffer.find(lower) ? 0 : 1) | (buffer.find(upper) ? 0 : 2);
+  }
+
+  int64_t timeout_ns_;
+  std::optional<Pending> pending_;
+  Counts counts_;
+};
+
 }  // namespace map_assembly

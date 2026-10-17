@@ -257,7 +257,7 @@ def main() -> int:
         "lane_pending_commit_budget",
         "tracker_opencv_threads", "tracker_executor_threads", "odom_executor_threads",
         "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
-        "lane_mapping_owner", "launch_fusion",
+        "lane_mapping_owner", "launch_fusion", "fusion_provenance_topic",
     }
     launch_overrides: dict[str, str] = {}
     for item in args.launch_arg:
@@ -266,7 +266,8 @@ def main() -> int:
             raise SystemExit(f"invalid or unsupported --launch-arg: {item!r}")
         if name in launch_overrides:
             raise SystemExit(f"duplicate --launch-arg: {name}")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+        pattern = r"(/[A-Za-z0-9_]+)+" if name == "fusion_provenance_topic" else r"[A-Za-z0-9_.-]+"
+        if not re.fullmatch(pattern, value):
             raise SystemExit(f"invalid value for --launch-arg {name}: {value!r}")
         if name in {"launch_occupancy", "launch_lane_fusion", "tracker_motion_prediction", "tracker_motion_warp",
                     "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness"}:

@@ -9,3 +9,5 @@ launch_arguments:
   output_dir: ''
   # Time-matched map set + its image (map_assembly). Empty = off.
   launch_fusion: ''
+  # Test hook: provenance topic map_assembler reads (empty = <pose topic>/provenance).
+  fusion_provenance_topic: ''

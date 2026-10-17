@@ -202,6 +202,29 @@ def fused_metrics(fused: list, lanes: list, occupancy: list) -> dict[str, float]
     return m
 
 
+def pose_covariance_rules(poses: list, provenance: list) -> dict[str, float]:
+    """Join each pose with the provenance of the same stamp and check the covariance rule.
+
+    raw: upstream value, flag = usable; interpolated/fill: usable matrix and flag
+    true, or the zero matrix and flag false. Negative values never appear.
+    """
+    by_stamp = {_ns(msg.header.stamp): msg for _, msg in provenance}
+    unpaired = violations = 0
+    for _, pose in poses:
+        p = by_stamp.get(_ns(pose.header.stamp))
+        if p is None:
+            unpaired += 1
+            continue
+        cov = list(pose.pose.covariance)
+        if any(value < 0.0 for value in cov[0:36:7]):
+            violations += 1
+        elif p.kind != 1 and not p.covariance_valid and any(value != 0.0 for value in cov):
+            violations += 1
+        elif p.covariance_valid and not all(cov[i] > 0.0 for i in (0, 7, 35)):
+            violations += 1
+    return {"pose_provenance_unpaired": unpaired, "pose_covariance_rule_violations": violations}
+
+
 def read_bag(path: Path, topics: list[str]) -> dict[str, list] | None:
     """Return {topic: [(header_stamp_sec, msg)]}; None when ROS Python is unavailable."""
     try:
@@ -375,7 +398,8 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
         topics = ["/localization/monoscale_raw", "/localization/kinematic_state",
                   "/parking/cpp/marking_segments", "/parking/cpp/global_marking_segments_fused",
                   "/perception/occupancy_grid_map", "/parking/cpp/map_fusion/status",
-                  "/pipeline/progress", "/localization/kinematic_state/provenance", *SNAPSHOT_TOPICS]
+                  "/pipeline/progress", "/localization/kinematic_state/provenance",
+                  "/mapping/fused_map/status", *SNAPSHOT_TOPICS]
         data = read_bag(outputs, topics)
         if data is not None:
             skipped = data.pop(UNREADABLE, [])
@@ -438,6 +462,16 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                 for code, name in {0: "unknown", 1: "raw", 2: "interpolated", 3: "imu_fill", 4: "held"}.items():
                     m[f"pose_provenance_{name}"] = sum(msg.kind == code for _, msg in provenance)
                 m["pose_provenance_covariance_valid"] = sum(msg.covariance_valid for _, msg in provenance)
+                m.update(pose_covariance_rules(data["/localization/kinematic_state"], provenance))
+            status = data["/mapping/fused_map/status"]
+            if status:
+                # Late-provenance wait (map_assembler): counters from its last status.
+                for name in ("provenance_wait_started", "provenance_attached_late", "provenance_expired_lower",
+                             "provenance_expired_upper", "provenance_expired_both", "provenance_superseded",
+                             "provenance_reset_discarded", "provenance_missing"):
+                    found = re.search(rf'"{name}":(\d+)', status[-1][1].data)
+                    if found:
+                        m["fused_" + name] = int(found.group(1))
             m.update(fused_metrics(data["/mapping/fused_map"], data["/mapping/snapshot/lanes"],
                                    data["/mapping/snapshot/occupancy"]))
             grids = data["/perception/occupancy_grid_map"]

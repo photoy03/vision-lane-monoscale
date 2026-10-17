@@ -109,5 +109,83 @@ int main() {
     buffer.clear();                                       // time-line reset
     assert(buffer.size() == 0 && !buffer.find(12 * s));
   }
+  {  // Late provenance: the three arrival orders.
+    using map_assembly::PoseKind;
+    const int64_t wait = s / 2;
+    {  // provenance -> pose -> publish: out at once, nothing held
+      map_assembly::ProvenanceBuffer buffer;
+      map_assembly::ProvenanceGate<int> gate(wait);
+      buffer.add(10 * s, {PoseKind::kRaw, 10 * s, 10 * s});
+      assert(gate.offer(10 * s, true, 10 * s, 10 * s, 1, 100 * s, buffer));
+      assert(!gate.holding() && gate.counts().started == 0);
+    }
+    {  // pose -> provenance -> publish: same, the tick finds it present
+      map_assembly::ProvenanceBuffer buffer;
+      map_assembly::ProvenanceGate<int> gate(wait);
+      buffer.add(10 * s, {PoseKind::kImuFill, 9 * s, 11 * s});
+      buffer.add(11 * s, {PoseKind::kRaw, 11 * s, 11 * s});
+      assert(gate.offer(10 * s + s / 2, true, 10 * s, 11 * s, 1, 100 * s, buffer));
+    }
+    {  // pose -> publish -> provenance: held, released attached when it arrives
+      map_assembly::ProvenanceBuffer buffer;
+      map_assembly::ProvenanceGate<int> gate(wait);
+      buffer.add(10 * s, {PoseKind::kRaw, 10 * s, 10 * s});
+      assert(!gate.offer(10 * s + s / 2, true, 10 * s, 11 * s, 7, 100 * s, buffer));
+      assert(gate.holding() && gate.counts().started == 1);
+      assert(gate.floor(0) == 10 * s + s / 2 && gate.floor(20 * s) == 20 * s);
+      assert(!gate.poll(100 * s + s / 10, buffer));
+      buffer.add(11 * s, {PoseKind::kRaw, 11 * s, 11 * s});
+      const auto r = gate.poll(100 * s + s / 5, buffer);
+      assert(r && r->payload == 7 && !r->expired && gate.counts().attached_late == 1 && !gate.holding());
+    }
+    {  // no valid pose at T: nothing to wait for
+      map_assembly::ProvenanceBuffer buffer;
+      map_assembly::ProvenanceGate<int> gate(wait);
+      assert(gate.offer(10 * s, false, 0, 0, 1, 100 * s, buffer));
+    }
+  }
+  {  // Deadline: fixed at the first attempt, counted by the missing side, frozen with the ROS clock.
+    using map_assembly::PoseKind;
+    const int64_t wait = s / 2;
+    map_assembly::ProvenanceBuffer buffer;
+    map_assembly::ProvenanceGate<int> gate(wait);
+    assert(!gate.offer(10 * s, true, 9 * s, 11 * s, 1, 100 * s, buffer));
+    // The same T offered again later neither restarts nor extends the wait.
+    assert(!gate.offer(10 * s + 1, true, 9 * s, 11 * s, 2, 100 * s + 3 * s / 10, buffer));
+    assert(gate.counts().started == 1);
+    assert(!gate.poll(100 * s + 4 * s / 10, buffer));
+    assert(!gate.poll(100 * s + 4 * s / 10, buffer));      // paused clock: still waiting
+    auto r = gate.poll(100 * s + wait, buffer);
+    assert(r && r->payload == 1 && r->expired && gate.counts().expired_both == 1);
+
+    buffer.add(20 * s, {PoseKind::kRaw, 20 * s, 20 * s});  // lower present, upper never comes
+    assert(!gate.offer(20 * s + 1, true, 20 * s, 21 * s, 3, 200 * s, buffer));
+    r = gate.poll(200 * s + wait, buffer);
+    assert(r && r->expired && gate.counts().expired_upper == 1);
+    buffer.add(31 * s, {PoseKind::kRaw, 31 * s, 31 * s});  // upper present, lower never comes
+    assert(!gate.offer(30 * s + 1, true, 30 * s, 31 * s, 4, 300 * s, buffer));
+    r = gate.poll(300 * s + wait, buffer);
+    assert(r && r->expired && gate.counts().expired_lower == 1);
+  }
+  {  // Superseded: a newer T with its provenance goes out, the held one is dropped.
+    using map_assembly::PoseKind;
+    map_assembly::ProvenanceBuffer buffer;
+    map_assembly::ProvenanceGate<int> gate(s / 2);
+    assert(!gate.offer(10 * s, true, 9 * s, 11 * s, 1, 100 * s, buffer));
+    assert(!gate.offer(12 * s, true, 12 * s, 12 * s, 2, 100 * s + s / 10, buffer));  // newer, also unready
+    assert(gate.counts().started == 1 && gate.floor(0) == 10 * s);                     // the first one stays held
+    buffer.add(12 * s, {PoseKind::kRaw, 12 * s, 12 * s});
+    assert(gate.offer(12 * s, true, 12 * s, 12 * s, 2, 100 * s + s / 5, buffer));
+    assert(gate.counts().superseded == 1 && !gate.holding() && !gate.poll(200 * s, buffer));
+  }
+  {  // Time-line reset discards the held one.
+    map_assembly::ProvenanceBuffer buffer;
+    map_assembly::ProvenanceGate<int> gate(s / 2);
+    assert(!gate.offer(10 * s, true, 9 * s, 11 * s, 1, 100 * s, buffer));
+    gate.reset();
+    assert(!gate.holding() && gate.counts().reset_discarded == 1 && !gate.poll(200 * s, buffer));
+    gate.reset();
+    assert(gate.counts().reset_discarded == 1);
+  }
   return 0;
 }

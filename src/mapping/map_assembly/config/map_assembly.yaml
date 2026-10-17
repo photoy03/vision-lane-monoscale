@@ -6,6 +6,8 @@ map_assembler:
     allow_incomplete: false    # strict: freeze T when a layer stalls; true: publish with stale_layers
     pose_max_gap_sec: 0.25     # pose at T only from a measured pose or a bracket no wider than this
     tick_hz: 5.0
+    provenance_wait_sec: 0.5   # hold a fused map at most this long (ROS clock) for late pose provenance
+    provenance_topic: ''       # empty: <pose_topic>/provenance
 map_visualizer:
   ros__parameters:
     pixel_m: 0.05              # image resolution; the occupancy layer is 0.1 m, lanes 0.05 m

@@ -8,6 +8,6 @@ uint8 HELD=4           # last value held; no path produces it today (reserved)
 std_msgs/Header header
 uint8 kind
 string resample_kind               # the stabilizer's own name; "raw" for a passthrough
-bool covariance_valid              # false: the pose covariance is unknown (pose.covariance[0] = -1)
+bool covariance_valid              # the standard pose.covariance means something only when true (unknown: zero matrix)
 builtin_interfaces/Time raw_lower  # the raw measurements this pose was made from (equal for RAW)
 builtin_interfaces/Time raw_upper

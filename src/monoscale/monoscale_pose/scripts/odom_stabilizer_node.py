@@ -37,7 +37,6 @@ from monoscale_pose.odom_filter import (
     covariance_matrix_is_usable,
     interpolate_pose_covariance,
     pose_provenance_kind,
-    unknown_pose_covariance,
     wrap_pi,
 )
 
@@ -494,11 +493,10 @@ class OdomStabilizer(Node):
 
     def emit_odom(self, template, stamp_sec, pose, roll, pitch, provenance=("unknown", "", 0.0, 0.0)):
         out = copy.deepcopy(template)
-        # MonoScale leaves the covariance at all zeros when it has no estimate; that
-        # must not read as certainty downstream, so an unusable one is "unknown".
+        # The standard covariance is passed through unchanged (MonoScale leaves it
+        # all zero without an estimate); only PoseProvenance.covariance_valid says
+        # whether it means anything.
         covariance_valid = covariance_matrix_is_usable(out.pose.covariance)
-        if not covariance_valid:
-            out.pose.covariance = unknown_pose_covariance()
         out.header.stamp.sec = int(math.floor(stamp_sec))
         out.header.stamp.nanosec = int(round((stamp_sec - out.header.stamp.sec) * 1e9))
         if out.header.stamp.nanosec >= 1_000_000_000:
