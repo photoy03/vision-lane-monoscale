@@ -673,6 +673,9 @@ class GlobalMappingNode : public rclcpp::Node {
     pending_observation_unresolvable_grace_sec_=declare_parameter<double>("pending_observation_unresolvable_grace_sec",2.0);
     pending_commit_budget_=declare_parameter<int>("pending_commit_budget",2);
     pending_readiness_enabled_=declare_parameter<bool>("pending_readiness_enabled",false);
+    // Retire a head whose odometry bracket is complete but unusable at once,
+    // instead of letting it block the ordered queue until the TTL.
+    pending_drop_unresolvable_head_=declare_parameter<bool>("pending_drop_unresolvable_head",false);
     pending_blocked_head_grace_sec_=declare_parameter<double>("pending_blocked_head_grace_sec",4.0);
     clock_reset_threshold_sec_=declare_parameter<double>("clock_reset_threshold_sec",0.50);
     if(recovered_output_enabled_&&(!pending_observations_enabled_||recovery_session_id_.empty()||
@@ -687,8 +690,9 @@ class GlobalMappingNode : public rclcpp::Node {
     if(!std::isfinite(pending_blocked_head_grace_sec_)||pending_blocked_head_grace_sec_<=0.0||
        (pending_readiness_enabled_&&pending_blocked_head_grace_sec_>pending_observation_ttl_sec_))
       throw std::runtime_error("blocked head grace must be positive and no larger than TTL");
-    RCLCPP_INFO(get_logger(),"pending readiness=%s blocked_head_grace=%.3fs; ordered measured commits; no extra worker",
-      pending_readiness_enabled_?"enabled":"disabled",pending_blocked_head_grace_sec_);
+    RCLCPP_INFO(get_logger(),"pending readiness=%s blocked_head_grace=%.3fs drop_unresolvable_head=%s; ordered measured commits; no extra worker",
+      pending_readiness_enabled_?"enabled":"disabled",pending_blocked_head_grace_sec_,
+      pending_drop_unresolvable_head_?"on":"off");
     pending_observations_=vision_lane::PendingLaneObservationQueue<std::pair<std::vector<Observation>,uint64_t>>(
       static_cast<size_t>(pending_observation_max_count_));
     startup_warmup_frames_=declare_parameter<int>("startup_warmup_frames",0);
@@ -1373,7 +1377,9 @@ class GlobalMappingNode : public rclcpp::Node {
           lookup.kind==monoscale_pose::PoseMatchKind::stamp_before_oldest;
         const int64_t pending_age_ns=std::max<int64_t>(0,now_ns-front->arrival_steady_ns);
         const int64_t grace_ns=static_cast<int64_t>(pending_observation_unresolvable_grace_sec_*1e9);
-        if(pose_stamp_evicted_from_timeline&&pending_age_ns>=grace_ns){
+        const bool terminal_head=pending_drop_unresolvable_head_&&
+          vision_lane::head_is_terminally_unresolvable(lookup.kind);
+        if(terminal_head||(pose_stamp_evicted_from_timeline&&pending_age_ns>=grace_ns)){
           log_pending_oracle_event("POSE_GAP_DROP",front->epoch,front->payload.second,
             front->camera_id,front->stamp_ns,front->arrival_steady_ns,
             front->arrival_steady_ns+ttl_ns,&lookup,drain_cycle,processed);
@@ -1826,6 +1832,7 @@ class GlobalMappingNode : public rclcpp::Node {
   bool pending_observations_enabled_{false},pending_reset_tracker_before_next_{false};
   bool pending_oracle_enabled_{false};
   bool pending_readiness_enabled_{false},pending_readiness_dirty_{true};
+  bool pending_drop_unresolvable_head_{false};
   double pending_blocked_head_grace_sec_{4.0};
   uint64_t pending_blocked_head_dropped_{0},pending_readiness_scans_{0},pending_readiness_lookups_{0};
   vision_lane::PendingReadinessIndex pending_readiness_;

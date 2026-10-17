@@ -28,6 +28,13 @@ class PendingReadinessIndex {
   std::map<uint64_t, bool> states_;
 };
 
+// Odometry is only ever appended. Once both sides of a head's bracket have
+// arrived and the bracket is too wide or too old, no later sample can make it
+// resolvable, so waiting for the TTL only blocks every observation behind it.
+inline bool head_is_terminally_unresolvable(PoseMatchKind kind) {
+  return kind == PoseMatchKind::gap_too_large || kind == PoseMatchKind::bracket_too_far;
+}
+
 enum class PendingService { wait, commit, ttl_drop, evicted_drop, blocked_head_drop };
 
 // Grace is a latency/loss tradeoff, NOT a weaker pose quality threshold.

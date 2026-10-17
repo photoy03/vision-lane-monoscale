@@ -416,6 +416,7 @@ def _launch(context, group='all'):
                          ('lane_pending_commit_budget', 'pending_commit_budget', int),
                          ('lane_pending_readiness', 'pending_readiness_enabled', bool),
                          ('lane_pending_blocked_head_grace_sec', 'pending_blocked_head_grace_sec', float),
+                         ('lane_pending_drop_unresolvable', 'pending_drop_unresolvable_head', bool),
                          ('image_quality_min_sharpness', 'image_quality_min_sharpness', float))),
                      'pending_observations_enabled': flag('lane_pending_recovery'),
                      'recovered_output_enabled': flag('lane_pending_recovery'),

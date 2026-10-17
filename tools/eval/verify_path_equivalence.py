@@ -32,6 +32,8 @@ ADDED_EXPLICIT = {
         'min_blob_reference_pixels': 80, 'publish_rate_hz': 5.0, 'map_resolution_m': 0.1,
         'map_x_min_m': -30.0, 'map_x_max_m': 30.0, 'map_y_min_m': -30.0, 'map_y_max_m': 30.0,
     },
+    # Lane delay fix: intended behavior change (node default stays off).
+    'global_mapping_cpp': {'pending_drop_unresolvable_head': True},
     # Item 5: IMU-rate fill parameters. imu_fill_enabled=True is the one intended
     # behavior change (the node's own default stays False); the rest equal defaults.
     'lane_odom_stabilizer': {

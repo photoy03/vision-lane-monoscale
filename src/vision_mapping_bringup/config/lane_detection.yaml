@@ -25,6 +25,7 @@ launch_arguments:
   lane_pending_commit_budget: ''
   lane_pending_readiness: ''
   lane_pending_blocked_head_grace_sec: ''
+  lane_pending_drop_unresolvable: ''
   warmup_frames: ''
   image_quality_gate_mode: monitor
   image_quality_min_sharpness: ''

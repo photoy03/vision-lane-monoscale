@@ -121,3 +121,7 @@ global_mapping_cpp:
     temporal_anchor_offset_m: 0.4
     pending_readiness_enabled: false
     pending_blocked_head_grace_sec: 4.0
+    # Retire a head whose odometry bracket is complete but unusable instead of
+    # blocking the ordered queue until the TTL (2026-10-17 5-run compare:
+    # lane map input delay p50 12.2 s -> 1.4 s, map content unchanged).
+    pending_drop_unresolvable_head: true

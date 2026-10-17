@@ -242,7 +242,7 @@ def main() -> int:
         "tracker_imu_yaw_history_sec",
         "lane_pending_commit_budget",
         "tracker_opencv_threads", "tracker_executor_threads", "odom_executor_threads",
-        "pose_imu_fill",
+        "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
     }
     launch_overrides: dict[str, str] = {}
     for item in args.launch_arg:
@@ -254,7 +254,7 @@ def main() -> int:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
             raise SystemExit(f"invalid value for --launch-arg {name}: {value!r}")
         if name in {"launch_occupancy", "launch_lane_fusion", "tracker_motion_prediction", "tracker_motion_warp",
-                    "pose_imu_fill"}:
+                    "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness"}:
             if value.lower() not in {"true", "false"}:
                 raise SystemExit(f"{name} must be true or false")
             value = value.lower()
@@ -453,7 +453,17 @@ def main() -> int:
             dump_nodes.append("/lane_map_fusion")
         for node in dump_nodes:
             path = dump_dir / (node.strip("/").replace("/", "_") + ".yaml")
-            dump = run_capture(repo, ["ros2", "param", "dump", node], env, timeout=45.0)
+            # Node discovery through the CLI is occasionally late ("Node not
+            # found" or a timeout) right after launch; retry before giving up.
+            for attempt in range(3):
+                try:
+                    dump = run_capture(repo, ["ros2", "param", "dump", "--no-daemon", node], env, timeout=45.0)
+                except subprocess.TimeoutExpired:
+                    dump = subprocess.CompletedProcess([], 124, "param dump timed out\n")
+                if dump.returncode == 0:
+                    break
+                time.sleep(2.0)
+            manifest.setdefault("parameter_dump_attempts", {})[node] = attempt + 1
             path.write_text(dump.stdout, encoding="utf-8")
             manifest["parameter_dumps"][node] = {"exit_code": dump.returncode, "path": str(path)}
         expected = requested_parameters(

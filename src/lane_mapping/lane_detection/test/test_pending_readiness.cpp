@@ -21,6 +21,14 @@ int main() {
   // A freshly valid measured pose is served even at the TTL boundary.
   assert(pending_service(true,K::exact,true,12*second,2*second,4*second,true)==S::commit);
   assert(pending_service(true,K::interpolated,false,0,2*second,4*second,false)==S::commit);
+  // Only a complete-but-unusable bracket is terminal; a missing right bracket
+  // (stamp_after_latest) or an empty buffer may still resolve.
+  assert(head_is_terminally_unresolvable(K::gap_too_large));
+  assert(head_is_terminally_unresolvable(K::bracket_too_far));
+  assert(!head_is_terminally_unresolvable(K::stamp_after_latest));
+  assert(!head_is_terminally_unresolvable(K::buffer_empty));
+  assert(!head_is_terminally_unresolvable(K::stamp_before_oldest));
+  assert(!head_is_terminally_unresolvable(K::interpolated));
   index.erase(2); assert(!index.any_other_ready(1)); index.clear(); assert(index.size()==0);
   PendingLaneObservationQueue<int> queue(3);
   queue.push({1,"front",200,10,2}); queue.push({1,"front",100,10,1});

@@ -152,6 +152,14 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
             m[f"pending_{key}"] = float(summary.get(key, 0))
         if summary.get("queued"):
             m["pending_resolved_ratio"] = summary["resolved"] / summary["queued"]
+    results_path = run / "registered_keyframes.jsonl.recovery_results.jsonl"
+    if results_path.is_file():
+        results = [json.loads(line) for line in results_path.read_text().splitlines() if line.strip()]
+        if results:
+            m["fusion_results"] = len(results)
+            m["fusion_no_association_ratio"] = sum(
+                r.get("reason") == "NO_LANDMARK_ASSOCIATION" for r in results) / len(results)
+            m["fusion_applied"] = sum(r.get("event") == "APPLIED" for r in results)
     keyframes_path = run / "registered_keyframes.jsonl"
     keyframes = []
     if keyframes_path.is_file():
@@ -174,7 +182,7 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
     if outputs.is_dir():
         topics = ["/localization/monoscale_raw", "/localization/kinematic_state",
                   "/parking/cpp/marking_segments", "/parking/cpp/global_marking_segments_fused",
-                  "/perception/occupancy_grid_map"]
+                  "/perception/occupancy_grid_map", "/parking/cpp/map_fusion/status"]
         data = read_bag(outputs, topics)
         if data is not None:
             m.update(rate_stats([t for t, _ in data["/localization/monoscale_raw"]], "raw_odom"))
@@ -193,6 +201,17 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
             m["fused_msgs"] = len(fused)
             if fused:
                 m["fused_segments_final"] = len(fused[-1][1].segments)
+            # Lane-map latency: how old (capture time) each input was when
+            # lane_map_fusion received it, from its status JSON.
+            delays = []
+            for _, msg in data["/parking/cpp/map_fusion/status"]:
+                found = re.search(r'"last_input_delay_ms":([-\d.eE+]+)', msg.data)
+                if found and float(found.group(1)) > 0.0:
+                    delays.append(float(found.group(1)))
+            if delays:
+                delays.sort()
+                m["lane_map_input_delay_p50_ms"] = delays[len(delays) // 2]
+                m["lane_map_input_delay_p90_ms"] = delays[int(0.9 * (len(delays) - 1))]
             grids = data["/perception/occupancy_grid_map"]
             m["occupancy_grid_msgs"] = len(grids)
             if grids:
