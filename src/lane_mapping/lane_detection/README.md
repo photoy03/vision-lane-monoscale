@@ -137,9 +137,8 @@ busy/quiet scenes. Replay the same bag twice, one implementation at a time.
 Do not run both simultaneously. Keep debug-map publication and UI disabled.
 
 The Python v5.2 reference wrapper (python_v52_benchmark_node.py) and its
-reference copy of the v5.2 script were moved out of this package to
-`/home/jaehun/vision_support_ws_archive_20261017/item8_legacy_lane_benchmark/`
-(see the README there to restore them for a new comparison).
+reference copy of the v5.2 script are no longer part of this repository, so
+only the C++ side of the comparison is shown below.
 
 C++ reference:
 

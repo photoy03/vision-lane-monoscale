@@ -182,6 +182,4 @@ rear_calibration 빈 인수는 기존처럼 전방 값을 재사용한다. rig.y
 qos.yaml은 replay, recording_qos.yaml은 기록 override다. tests/fixtures/carla는 시험 YAML 두 개이지 simulator가 아니다.
 
 lane_detection 단독 launch: global_mapping_cpp.launch.py는 기본값 + 정적 pose 데모 설정, global_mapping_v4l2*.launch.py는
-기본값 + global_mapping_v4l2.yaml(장치·캡처 overlay)을 쓴다. 이 정리로 단독 실행 값이 실차 검증값으로 바뀌었다(목록은 검증 보고서).
-
-이전 자료는 /home/jaehun/vision_support_ws_archive_20261017에 보관한다.
+기본값 + global_mapping_v4l2.yaml(장치·캡처 overlay)을 쓴다. 이 정리로 단독 실행 값이 실차 검증값으로 바뀌었다.

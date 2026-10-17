@@ -30,3 +30,10 @@ docs/evaluation_runs/
 *.swp
 *~
 .DS_Store
+
+# 성능 평가·검증 보고서와 설계 측정 문서 (공개 저장소에 올리지 않음)
+docs/LAYOUT_VALIDATION_*.md
+docs/design/
+docs/reports/
+*_REPORT.md
+*_REPORT_*.md
