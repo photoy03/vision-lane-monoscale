@@ -102,7 +102,9 @@ python3 tools/eval/repeat_compare.py --group before=<run1>,<run2>,<run3> \
 ```
 
 지표: 차선 keyframe/landmark, occupancy 셀, pending resolved 비율, 차선 프레임 중 pose 없음 비율,
-raw odom·pose Hz/gap, bag에 녹화된 /localization/kinematic_state 대비 경로 오차. 정답(ground truth) 정확도 평가는 아니다.
+raw odom·pose Hz/gap, bag에 녹화된 /localization/kinematic_state 대비 경로 오차, 차선 지도 지연(lane_map_input_delay),
+연결 실패율. 정답(ground truth) 정확도 평가는 아니다.
+marking_segments_total은 lane_mapping_owner에 따라 뜻이 다르다(detection: 월드 추적 결과, map: pose 없는 로컬 결과). 모드가 다른 실행끼리 비교하지 않는다.
 
 ## 검사
 

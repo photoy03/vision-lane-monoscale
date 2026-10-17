@@ -5,9 +5,11 @@
 - monoscale/core·tracker·odometry·occupancy: 기존 C++ 알고리즘 그대로.
 - monoscale_pose: bringup의 odom_filter.py와 odom_stabilizer_node.py를 이동한 실제 ROS package.
   기존 map→base_link 단일 TF 발행 원칙 유지. 새 추정·보간 알고리즘을 구현한 것은 아니다.
-- lane_detection: 기존 검출·영상시각 pose 매칭·전역 투영이 아직 함께 있다.
+- lane_detection: 영상 → 차선 검출(로컬 선분 + 촬영 시각). 기본(lane_mapping_owner:=map)에서는 검출만 하고 /parking/cpp/lane_observations로 낸다.
+  lane_mapping_owner:=detection이면 예전처럼 pose 매칭·월드 추적·자체 디버그 지도(/parking/cpp/global_marking_map)까지 한다.
   폴더 이름처럼 로컬 검출 전용으로 내부 리팩토링까지 완료한 것은 아니다.
-- lane_map: 기존 차선 병합·누적.
+- lane_map: 차선 지도의 유일한 주인(기본). pose 시각 매칭(공용 pose_timeline), pending 대기열, 월드 추적기, 병합·누적, 지도 출력.
+  공용 헤더 lane_map/include/lane_map/{lane_tracker,lane_mapper,pending_*}.hpp. map 모드에서 /parking/cpp/marking_segments는 pose 없는 로컬 결과다.
 - sensors/monoscale_ublox: 기존 F9R. 카메라는 시스템 gscam. 빈 영상 전처리 예약 폴더는 보관본으로 이동.
 - bringup: 실차 설정·구성 생성·기록 helper. 공통 지도 backend는 다음 작업이다.
 

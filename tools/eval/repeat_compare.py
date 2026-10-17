@@ -194,6 +194,9 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                 if reference:
                     end = pose[-1]
                     m["pose_end_yaw_error_deg"] = angle_deg(end[3], reference[-1][3])
+            # Mode-dependent: with lane_mapping_owner=detection these are world-tracker
+            # projections; with map (default) they are lane_detection's pose-free
+            # local tracks. Do not compare this metric across modes.
             segments = data["/parking/cpp/marking_segments"]
             m["marking_segment_msgs"] = len(segments)
             m["marking_segments_total"] = sum(len(msg.segments) for _, msg in segments)

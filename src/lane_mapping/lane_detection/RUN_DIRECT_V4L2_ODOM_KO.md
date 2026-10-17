@@ -98,7 +98,8 @@ odom 노드는 별도로 `/parking/odom`을 `nav_msgs/msg/Odometry` 형식으로
 ros2 topic echo /parking/odom --once
 ros2 topic echo /parking/cpp/status
 ros2 topic hz /parking/cpp/marking_segments
-rqt_image_view /parking/cpp/global_marking_map
+rqt_image_view /parking/cpp/global_marking_map        # standalone / lane_mapping_owner:=detection only
+rqt_image_view /parking/cpp/global_marking_map_fused  # vision_mapping_bringup default (lane_map owns the map)
 ```
 
 상태 JSON에서 확인할 핵심 필드는 `preprocess_backend`, `pose_valid`,

@@ -117,7 +117,8 @@ Runtime inspection:
 ros2 topic hz /parking/cpp/marking_segments
 ros2 topic echo /parking/cpp/status
 ros2 topic echo /parking/odom --once
-rqt_image_view /parking/cpp/global_marking_map
+rqt_image_view /parking/cpp/global_marking_map        # standalone / lane_mapping_owner:=detection only
+rqt_image_view /parking/cpp/global_marking_map_fused  # vision_mapping_bringup default (lane_map owns the map)
 ```
 
 `/parking/cpp/status` reports pose freshness/interpolation, movement gate deltas,

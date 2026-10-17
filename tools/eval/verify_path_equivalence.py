@@ -55,12 +55,17 @@ def without_added(nodes):
     return result
 
 
+# Launch defaults intentionally changed against the reference (new, non-empty).
+INTENDED_LAUNCH_DEFAULTS = {'lane_mapping_owner': 'map'}
+
+
 def launch_defaults_compatible(reference, current):
     # An empty default now means "use the package default"; the effective
     # graph comparison proves the resulting values did not change.
     # New arguments are allowed only with an empty (package-default) value.
     return reference.keys() <= current.keys() and all(
-        reference.get(key, '') == current[key] or current[key] == '' for key in current)
+        reference.get(key, '') == current[key] or current[key] == '' or
+        INTENDED_LAUNCH_DEFAULTS.get(key) == current[key] for key in current)
 
 
 class Action:
@@ -132,7 +137,9 @@ def main():
     for dual in (False,True):
         for mode in ('legacy','continuation','compare'):
             # Device paths have no default any more; use the reference's former defaults.
-            case={'device':'/dev/video2','imu_device':'/dev/ttyACM0',
+            # OLD has no lane mapper: compare the selectable previous path
+            # (lane_mapping_owner:=detection); the map default is checked below.
+            case={'lane_mapping_owner':'detection','device':'/dev/video2','imu_device':'/dev/ttyACM0',
                   'rear_enabled':str(dual).lower(),'rear_device':'/dev/video4' if dual else '',
                   'launch_occupancy':'true','launch_rviz':'true','launch_viewer':'false','map_fusion_mode':mode}
             for shadow in (('false',) if dual else ('false','true')):
@@ -148,6 +155,12 @@ def main():
                 signature=lambda item:json.dumps(item,sort_keys=True)
                 assert sorted(map(signature,parts))==sorted(map(signature,gb)), 'Group union changed'
                 cases.append(dict(case=dict(case),nodes=len(gb),passed=True))
+    # The default (no override) must be the lane_map-owned mapping path.
+    _,default_graph=graph(NEW,LAYOUT,{'device':'/dev/video2','imu_device':'/dev/ttyACM0'})
+    lane_maps=[n for n in default_graph if n.get('name')=='lane_map_fusion']
+    assert lane_maps and lane_maps[0]['parameters'].get('mapper_enabled') is True, 'lane_mapping_owner default is not map'
+    detectors=[n for n in default_graph if n.get('name')=='global_mapping_cpp']
+    assert detectors[0]['parameters'].get('mapping_owner')=='map', 'lane_detection is not in detection-only mode'
     result=dict(status='PASS_EFFECTIVE_GRAPH_NOT_LIVE_ACCURACY',reference=str(old),workspace=str(NEW),cases=cases)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(result,indent=2)+'\n')
