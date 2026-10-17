@@ -5,7 +5,7 @@
   <version>0.0.1</version>
   <description>Plane-sweep occupancy mapping, ported from the upstream MonoScale tools/plane_sweep.py.</description>
   <maintainer email="ujin@tukorea.ac.kr">ujin</maintainer>
-  <license>proprietary</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

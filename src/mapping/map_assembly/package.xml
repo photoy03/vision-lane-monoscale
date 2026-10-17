@@ -4,7 +4,7 @@
   <version>0.1.0</version>
   <description>Time-matched map set: lane map + occupancy grid exact at one capture time T, and its one-image view.</description>
   <maintainer email="ujin@tukorea.ac.kr">photoy03</maintainer>
-  <license>Proprietary</license>
+  <license>MIT</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
