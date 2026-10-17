@@ -197,6 +197,10 @@ class LaneMapper {
 
   const MapperCounters &counters() const { return counters_; }
   size_t pending() const { return queue_.size(); }
+  // Capture time of the oldest observation still waiting for a pose (0 when none).
+  int64_t oldest_pending_stamp_ns() const {
+    return queue_.empty() ? 0 : queue_.front()->stamp_ns;
+  }
   int64_t oldest_arrival_steady_ns() const {
     return queue_.empty() ? 0 : queue_.front()->arrival_steady_ns;
   }

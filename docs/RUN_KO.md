@@ -104,6 +104,9 @@ python3 tools/eval/repeat_compare.py --group before=<run1>,<run2>,<run3> \
 지표: 차선 keyframe/landmark, occupancy 셀, pending resolved 비율, 차선 프레임 중 pose 없음 비율,
 raw odom·pose Hz/gap, bag에 녹화된 /localization/kinematic_state 대비 경로 오차, 차선 지도 지연(lane_map_input_delay),
 연결 실패율. 정답(ground truth) 정확도 평가는 아니다.
+`--record-outputs on`으로 기록한 실행은 /pipeline/progress도 녹화하고, repeat_compare가 노드별 watermark 지연 p50/p90(watermark_<node>_lag_*),
+발행값 역행 수(watermark_<node>_published_backwards, 항상 0이어야 함), 붙잡은 역행 수(watermark_<node>_held_regressions)를 낸다.
+이 토픽이 없는 옛 실행은 해당 행만 비어 있다.
 marking_segments_total은 lane_mapping_owner에 따라 뜻이 다르다(detection: 월드 추적 결과, map: pose 없는 로컬 결과). 모드가 다른 실행끼리 비교하지 않는다.
 
 ## 검사

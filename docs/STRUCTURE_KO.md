@@ -17,6 +17,31 @@
   odom_stabilizer는 raw visual odom 사이(0.25 s 초과, 3 s 이하 간격)를 F9R yaw 모양 + visual 끝점으로 20 Hz로 채워 발행한다
   (imu_fill_enabled, 기본 on, launch 인수 pose_imu_fill:=false로 끔). 끝점 뒤로 예측하지 않으며 yaw 정책과 단일 TF 권한은 그대로다.
 
+## 진행 상태 (/pipeline/progress, 2026-10-17 추가)
+
+공통 형식: vision_lane_interfaces/msg/PipelineProgress.msg. C++는 vision_lane_interfaces/pipeline_progress.hpp,
+Python은 monoscale_pose/progress.py가 같은 규칙으로 채운다. 각 노드가 0.2 s(5 Hz)마다 한 방향으로 낸다(reliable, depth 50).
+누구도 이 토픽을 기다리지 않는다. 기존 JSON status 토픽은 그대로다.
+
+- watermark W: 촬영 시각(capture time)이 W 이하인 입력은 그 노드에서 모두 끝났다(출력·병합 또는 버림). W 이하 시각의 결과는 output_topic에 더 나오지 않는다.
+- 각 메시지의 header.stamp(그 데이터의 촬영 시각)와는 다르다. W는 "어디까지 끝났나"를 말하는 노드 상태다.
+- 규칙(공통): `min(가장 오래된 대기 입력 시각 − 1 ns, 받은 입력 중 가장 새 시각)`, 대기가 없으면 `받은 입력 중 가장 새 시각`.
+  입력이 여럿(전·후방 카메라)이면 "가장 새 시각"은 모든 입력이 도달한 시각(카메라별 최신값의 최소)이다.
+- W는 뒤로 가지 않는다. 새로 계산한 값이 이미 낸 W보다 작으면 W를 그대로 두고 watermark_regressions를 센다.
+  0이 아니면 "끝났다고 한 시각보다 오래된 입력이 나중에 나타났다"는 뜻이다.
+- latency_ms = 보낸 시각(노드 시계, 재생에서는 sim time) − W.
+
+| node (output_topic) | 대기(미완료)로 치는 것 | "받은 가장 새 시각" (W의 상한, 대기가 없으면 W) |
+|---|---|---|
+| lane_detection (/parking/cpp/lane_observations, detection 모드는 recovered 선분) | odom 짝을 기다리는 영상(sync 대기열). detection 모드면 pose를 기다리는 pending 관측도 | 받은 영상 중 가장 새 시각(대기열 끝 또는 마지막 처리 영상) |
+| lane_map_fusion (/parking/cpp/global_marking_segments_fused) | map 모드: pose를 기다리는 관측(LaneMapper pending, TTL·terminal drop 포함) | 받은 관측 중 가장 새 시각. detection 모드·일반 입력은 도착 즉시 처리하므로 받은 가장 새 시각 |
+| occupancy (/perception/occupancy_grid_map) | pose 짝을 기다리는 보류 영상, 대기·처리 중인 keyframe 작업(기준 영상 시각) | 카메라별 가장 새 영상 시각 중 가장 작은 값(모든 카메라가 거기까지 들어와야 확정) |
+| pose (/localization/kinematic_state) | 없음(발행 순서가 곧 시각 순서) | 마지막으로 발행한 pose의 시각. 보간·IMU 채움 pose도 시각이 증가하는 순서로만 낸다 |
+
+queue_size는 위 대기 수, processed_total은 출력에 반영된 수(lane_detection: 처리 프레임, lane_map: resolve된 관측, occupancy: keyframe, pose: 수락한 raw odom),
+dropped_total은 영구히 버린 수다.
+tracker·odometry는 넣지 않았다: 상류 MonoScale에서 벤치마크로 맞춘 코드이고, 그 결과는 pose 노드 W가 이미 상한을 준다.
+
 ## launch
 
 | 파일 | 범위 |

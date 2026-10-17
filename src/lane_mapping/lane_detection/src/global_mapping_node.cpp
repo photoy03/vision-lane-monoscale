@@ -51,6 +51,7 @@
 #include <vision_lane_interfaces/msg/recovered_marking_segment_array.hpp>
 #include "monoscale_pose/pose_timeline.hpp"
 #include "lane_map/lane_tracker.hpp"
+#include "vision_lane_interfaces/pipeline_progress.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include "lane_map/pending_lane_observations.hpp"
 #include "lane_map/pending_readiness.hpp"
@@ -721,6 +722,9 @@ class GlobalMappingNode : public rclcpp::Node {
       recovered_pub_=create_publisher<vision_lane_interfaces::msg::RecoveredMarkingSegmentArray>(recovered_topic_,rclcpp::QoS(10).reliable());
     map_pub_=create_publisher<sensor_msgs::msg::Image>(map_topic_,2);
     profile_pub_=create_publisher<std_msgs::msg::String>("/parking/cpp/profile",10);
+    progress_pub_=create_publisher<vision_lane_interfaces::msg::PipelineProgress>(
+      pipeline_progress::kTopic,rclcpp::QoS(50).reliable());
+    progress_timer_=create_wall_timer(std::chrono::milliseconds(200),std::bind(&GlobalMappingNode::publish_progress,this));
     status_pub_=create_publisher<std_msgs::msg::String>(status_topic_,10);
     sync_status_pub_=create_publisher<std_msgs::msg::String>(status_topic_+"/sync",10);
     if(publish_vectors_debug_){
@@ -1687,6 +1691,29 @@ class GlobalMappingNode : public rclcpp::Node {
     recovery_event_csv_<<event<<','<<recovery_session_id_<<','<<epoch<<','<<observation_id<<','<<camera<<','<<stamp_ns<<','<<pose_match<<'\n';
     if(++recovery_event_count_%32==0)recovery_event_csv_.flush();
   }
+  // Watermark (see PipelineProgress.msg): images are handled in capture order.
+  // Unfinished = images waiting for an odom bracket (sync queue) and, when this
+  // node owns mapping, observations waiting in the pending queue; otherwise the
+  // newest processed image. Output: lane_observations (map) or the recovered
+  // world-tracked lines (detection).
+  void publish_progress(){
+    int64_t oldest=0,newest=last_processed_stamp_ns_;
+    if(!pending_images_.empty()){
+      oldest=pipeline_progress::oldest_of(oldest,rclcpp::Time(pending_images_.front().header.stamp).nanoseconds());
+      newest=std::max(newest,rclcpp::Time(pending_images_.back().header.stamp).nanoseconds());
+    }
+    if(pending_observations_enabled_&&!pending_observations_.empty())
+      oldest=pipeline_progress::oldest_of(oldest,pending_observations_.front()->stamp_ns);
+    const int64_t watermark=watermark_.update(
+      pipeline_progress::watermark_from(oldest,newest));
+    const uint32_t queue=static_cast<uint32_t>(pending_images_.size()+
+      (pending_observations_enabled_?pending_observations_.size():0));
+    const uint64_t dropped=sync_dropped_+quality_rejected_frames_+pending_ttl_dropped_+
+      pending_unresolvable_dropped_+pending_overflow_dropped_+pending_nonmonotonic_dropped_;
+    progress_pub_->publish(pipeline_progress::make_progress(now().nanoseconds(),"lane_detection",
+      owner_map_?observation_topic_:(recovered_output_enabled_?recovered_topic_:output_topic_),
+      watermark,queue,static_cast<uint64_t>(frame_),dropped,watermark_.regressions()));
+  }
   void publish_observations(const rclcpp::Time&stamp,const std::vector<Observation>&obs){
     vision_lane_interfaces::msg::RecoveredMarkingSegmentArray out;
     out.header.stamp=stamp;
@@ -1910,6 +1937,9 @@ class GlobalMappingNode : public rclcpp::Node {
   rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_image_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Publisher<vision_lane_interfaces::msg::RecoveredMarkingSegmentArray>::SharedPtr observation_pub_;
+  rclcpp::Publisher<vision_lane_interfaces::msg::PipelineProgress>::SharedPtr progress_pub_;
+  rclcpp::TimerBase::SharedPtr progress_timer_;
+  pipeline_progress::MonotonicWatermark watermark_;
   std::string mapping_owner_{"detection"},observation_topic_;
   bool owner_map_{false};
   rclcpp::Publisher<vision_lane_interfaces::msg::RecoveredMarkingSegmentArray>::SharedPtr recovered_pub_;

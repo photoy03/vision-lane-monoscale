@@ -14,6 +14,9 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float64MultiArray, String
 from tf2_ros import TransformBroadcaster
+from vision_lane_interfaces.msg import PipelineProgress
+
+from monoscale_pose import progress
 
 from monoscale_pose.odom_filter import (
     LaneOdomFilter,
@@ -204,6 +207,8 @@ class OdomStabilizer(Node):
             raise ValueError("invalid stationary resample limits")
         self.pub = self.create_publisher(Odometry, self.output_topic, 30)
         self.status_pub = self.create_publisher(String, "/localization/odom_filter_status", 10)
+        self.progress_pub = self.create_publisher(PipelineProgress, progress.TOPIC, 50)
+        self.watermark = progress.MonotonicWatermark()
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
         self.sub = self.create_subscription(
             Odometry, self.input_topic, self.on_odom, qos_profile_sensor_data
@@ -238,6 +243,8 @@ class OdomStabilizer(Node):
         self.imu_fill_published = 0
         self.last_raw_span_ms = 0.0
         self.last_output_delay_ms = 0.0
+        self.last_emitted_stamp_ns = 0
+        self.progress_timer = self.create_timer(0.2, self.publish_progress)
         self.get_logger().info(
             "lane odom filter: %s(%s) -> %s(%s), child=%s, filtered TF=%s, "
             "vision_yaw=%s sign=%+.0f resample=%s imu_fill=%s(%.0fHz, <=%.1fs)"
@@ -514,6 +521,7 @@ class OdomStabilizer(Node):
             float(self.get_clock().now().nanoseconds) * 1e-9 - stamp_sec
         )
         self.pub.publish(out)
+        self.last_emitted_stamp_ns = out.header.stamp.sec * 1_000_000_000 + out.header.stamp.nanosec
 
         if self.tf_broadcaster is not None:
             transform = TransformStamped()
@@ -524,6 +532,15 @@ class OdomStabilizer(Node):
             transform.transform.translation.z = out.pose.pose.position.z
             transform.transform.rotation = out.pose.pose.orientation
             self.tf_broadcaster.sendTransform(transform)
+
+    def publish_progress(self):
+        # Watermark: the newest pose published. Poses are emitted in increasing
+        # capture time and never revised, so everything at or before it is final.
+        watermark = self.watermark.update(self.last_emitted_stamp_ns)
+        self.progress_pub.publish(progress.make_progress(
+            PipelineProgress, self.get_clock().now().nanoseconds, 'pose', self.output_topic,
+            watermark, len(self.pending_vision_stamps), self.accepted, self.rejected,
+            self.watermark.regressions))
 
     def publish_status(self, result, correction):
         status = String()

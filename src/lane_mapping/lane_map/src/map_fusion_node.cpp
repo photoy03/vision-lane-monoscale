@@ -32,6 +32,7 @@ using Recovered = vision_lane_interfaces::msg::RecoveredMarkingSegmentArray;
 #include "lane_map/registration.hpp"
 #include "lane_map/recovery_identity.hpp"
 #include "lane_map/lane_mapper.hpp"
+#include "vision_lane_interfaces/pipeline_progress.hpp"
 
 using Array = vision_lane_interfaces::msg::MarkingSegmentArray;
 using Steady = std::chrono::steady_clock;
@@ -127,6 +128,10 @@ class MapFusionNode : public rclcpp::Node {
     occupancy_subscription_=create_subscription<nav_msgs::msg::OccupancyGrid>(
       occupancy_topic,map_qos,[this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr m){on_occupancy(*m);});
     timer_=create_wall_timer(std::chrono::duration<double>(1./hz),[this]{publish_map();});
+    output_vector_topic_=vector_topic;
+    progress_pub_=create_publisher<vision_lane_interfaces::msg::PipelineProgress>(
+      pipeline_progress::kTopic,rclcpp::QoS(50).reliable());
+    progress_timer_=create_wall_timer(std::chrono::milliseconds(200),[this]{publish_progress();});
     RCLCPP_INFO(get_logger(),"CPU line map: mode=%s frame=%s registration=%s, no odom/TF writes; "
       "confirm=%d keyframes, angle=%.1fdeg offset=%.3fm rolling_range=%.1fm continuation_gap=%.2fm, "
       "extent=%s, occupancy_filter=%s (%d maps, threshold=%d, inflation=%.2fm).",
@@ -177,6 +182,25 @@ class MapFusionNode : public rclcpp::Node {
       throw std::invalid_argument("invalid lane mapper parameters");
     return m;
   }
+  // Watermark (see PipelineProgress.msg): with the mapper, just before the
+  // oldest observation still waiting for a pose, else the newest observation
+  // received; otherwise inputs are handled on arrival, so the newest one.
+  void publish_progress() {
+    int64_t candidate=0;uint64_t processed=0,dropped=0;uint32_t queue=0;
+    if(mapper_enabled_){
+      candidate=pipeline_progress::watermark_from(mapper_.oldest_pending_stamp_ns(),newest_input_stamp_);
+      const auto& c=mapper_.counters();
+      processed=c.resolved;queue=static_cast<uint32_t>(mapper_.pending());
+      dropped=c.ttl_drop+c.unresolvable_drop+c.overflow_drop+c.invalid_drop+c.nonmonotonic_drop+mapper_invalid_+mapper_epoch_drops_;
+    }else{
+      candidate=newest_input_stamp_;
+      processed=recovered_input_enabled_?recovery_accepted_:received_;
+      dropped=recovered_input_enabled_?(recovery_metadata_rejected_+recovery_duplicates_+recovery_order_rejected_):(bad_pose_+bad_stamp_);
+    }
+    const int64_t watermark=watermark_.update(candidate);
+    progress_pub_->publish(pipeline_progress::make_progress(now().nanoseconds(),get_name(),
+      output_vector_topic_,watermark,queue,processed,dropped,watermark_.regressions()));
+  }
   void start_mapper() {
     observation_topic_=declare_parameter<std::string>("observation_topic","/parking/cpp/lane_observations");
     odom_topic_=declare_parameter<std::string>("odom_topic","/localization/kinematic_state");
@@ -225,6 +249,7 @@ class MapFusionNode : public rclcpp::Node {
       o.family=s.family;o.span=s.span_m;o.width=s.mean_width_m;o.confidence=s.confidence;
       observations.push_back(o);
     }
+    newest_input_stamp_=std::max(newest_input_stamp_,stamp);
     mapper_.add_observation(msg.epoch,msg.observation_id,msg.camera_id,stamp,steady_now_ns(),
       std::move(observations),&events);
     write_mapper_events(events);
@@ -425,6 +450,7 @@ class MapFusionNode : public rclcpp::Node {
   void on_recovered(const Recovered& recovered) {
     ++recovery_received_;
     const int64_t stamp=ns(recovered.header.stamp);
+    if(!mapper_enabled_) newest_input_stamp_=std::max(newest_input_stamp_,stamp);
     const int64_t arrival_steady_ns=steady_now_ns();
     const auto reject=[&](const char* reason) {
       ++recovery_metadata_rejected_;
@@ -510,6 +536,7 @@ class MapFusionNode : public rclcpp::Node {
     process.input_segments=static_cast<int>(m.segments.size());
     const auto& pose=m.observer_pose;
     const int64_t stamp=ns(m.header.stamp);
+    if(!recovered&&!mapper_enabled_) newest_input_stamp_=std::max(newest_input_stamp_,stamp);
     if(stamp<=last_received_stamp_||stamp<=0) {++bad_stamp_;process.outcome="REJECTED";process.reason="INVALID_OR_NONMONOTONIC_STAMP";return process;}
     if(m.header.frame_id!=input_frame_||std::find(cameras_.begin(),cameras_.end(),m.camera_id)==cameras_.end()||!m.pose_valid||
        !std::isfinite(pose.x)||!std::isfinite(pose.y)||!std::isfinite(pose.theta)) {++bad_pose_;process.outcome="REJECTED";process.reason="POSE_OR_FRAME_INVALID";return process;}
@@ -681,6 +708,11 @@ class MapFusionNode : public rclcpp::Node {
   }
   lane_fusion::RegisteredBank bank_;
   lane_mapping::LaneMapper mapper_;
+  pipeline_progress::MonotonicWatermark watermark_;
+  int64_t newest_input_stamp_{0};
+  std::string output_vector_topic_;
+  rclcpp::Publisher<vision_lane_interfaces::msg::PipelineProgress>::SharedPtr progress_pub_;
+  rclcpp::TimerBase::SharedPtr progress_timer_;
   bool mapper_enabled_{false};
   std::string observation_topic_,odom_topic_,mapper_summary_path_;
   std::ofstream mapper_ledger_;

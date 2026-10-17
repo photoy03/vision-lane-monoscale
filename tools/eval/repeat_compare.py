@@ -182,7 +182,8 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
     if outputs.is_dir():
         topics = ["/localization/monoscale_raw", "/localization/kinematic_state",
                   "/parking/cpp/marking_segments", "/parking/cpp/global_marking_segments_fused",
-                  "/perception/occupancy_grid_map", "/parking/cpp/map_fusion/status"]
+                  "/perception/occupancy_grid_map", "/parking/cpp/map_fusion/status",
+                  "/pipeline/progress"]
         data = read_bag(outputs, topics)
         if data is not None:
             m.update(rate_stats([t for t, _ in data["/localization/monoscale_raw"]], "raw_odom"))
@@ -215,6 +216,22 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                 delays.sort()
                 m["lane_map_input_delay_p50_ms"] = delays[len(delays) // 2]
                 m["lane_map_input_delay_p90_ms"] = delays[int(0.9 * (len(delays) - 1))]
+            # Per-stage watermark lag (node clock - watermark) and monotonicity
+            # from /pipeline/progress (absent in runs recorded before it existed).
+            by_node = {}
+            for _, msg in data["/pipeline/progress"]:
+                by_node.setdefault(msg.node, []).append(msg)
+            for node, messages in sorted(by_node.items()):
+                valid = [msg for msg in messages if msg.watermark_valid]
+                marks = [msg.watermark.sec * 1_000_000_000 + msg.watermark.nanosec for msg in valid]
+                lags = sorted(msg.latency_ms for msg in valid)
+                # Published values going backwards (must be 0) and candidates the
+                # node itself had to hold back (an input arrived after its time was final).
+                m[f"watermark_{node}_published_backwards"] = sum(b < a for a, b in zip(marks, marks[1:]))
+                m[f"watermark_{node}_held_regressions"] = messages[-1].watermark_regressions
+                if lags:
+                    m[f"watermark_{node}_lag_p50_ms"] = lags[len(lags) // 2]
+                    m[f"watermark_{node}_lag_p90_ms"] = lags[int(0.9 * (len(lags) - 1))]
             grids = data["/perception/occupancy_grid_map"]
             m["occupancy_grid_msgs"] = len(grids)
             if grids:

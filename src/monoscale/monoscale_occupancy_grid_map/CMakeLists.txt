@@ -34,6 +34,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(monoscale_pose REQUIRED)
+find_package(vision_lane_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 
@@ -77,7 +78,7 @@ target_link_libraries(sweep_offline monoscale_occupancy_core ${OpenCV_LIBS} ${SW
 add_executable(sweep_node src/sweep_node.cpp)
 target_link_libraries(sweep_node monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART})
 ament_target_dependencies(sweep_node
-  rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose)
+  rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
 
 install(TARGETS monoscale_occupancy_core sweep_offline sweep_node
   ARCHIVE DESTINATION lib

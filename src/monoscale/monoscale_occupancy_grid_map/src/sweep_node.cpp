@@ -32,6 +32,7 @@
 
 #include "monoscale_occupancy_grid_map/pose_interpolation.hpp"
 #include "monoscale_pose/pose_timeline.hpp"
+#include "vision_lane_interfaces/pipeline_progress.hpp"
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
 namespace
@@ -49,6 +50,7 @@ double yaw_of(const geometry_msgs::msg::Quaternion & q)
 struct Frame
 {
   double stamp = 0.0;
+  int64_t stamp_ns = 0;
   cv::Mat gray;      // CV_32F at processing width
   monoscale_occupancy::Pose5 pose;
   double travelled = 0.0;
@@ -60,6 +62,7 @@ struct KeyframeJob
   cv::Mat reference_gray;
   monoscale_occupancy::Pose5 reference_pose;
   double stamp = 0.0;
+  int64_t stamp_ns = 0;
   std::vector<cv::Mat> source_grays;
   std::vector<monoscale_occupancy::Pose5> source_poses;
   monoscale_occupancy::Lens lens;
@@ -283,6 +286,9 @@ public:
       std::chrono::duration<double>(1.0 / std::max(rate, 0.1)),
       [this]() {publish();});
     report_ = create_wall_timer(std::chrono::seconds(2), [this]() {report();});
+    progress_pub_ = create_publisher<vision_lane_interfaces::msg::PipelineProgress>(
+      pipeline_progress::kTopic, rclcpp::QoS(50).reliable());
+    progress_timer_ = create_wall_timer(std::chrono::milliseconds(200), [this]() {publish_progress();});
   }
 
   ~SweepNode() override
@@ -441,6 +447,8 @@ private:
     resized.convertTo(gray32, CV_32F);
 
     std::lock_guard<std::mutex> guard(mutex_);
+    auto & newest = newest_image_ns_[name];
+    newest = std::max(newest, rclcpp::Time(message.header.stamp).nanoseconds());
     // Hold the frame rather than resolving its pose now. The odometry is
     // solved from these very images, so its stamps can never lead them: at
     // arrival every frame is newer than the newest pose, `pose_at` returns
@@ -482,13 +490,13 @@ private:
         }
         return;  // Newer than the newest pose. Wait for the odometry.
       }
-      admit(name, held.stamp, held.gray, *pose);
+      admit(name, held.stamp, held.stamp_ns, held.gray, *pose);
       queue.pop_front();
     }
   }
 
   void admit(
-    const std::string & name, const double stamp, const cv::Mat & gray,
+    const std::string & name, const double stamp, const int64_t stamp_ns, const cv::Mat & gray,
     const monoscale_occupancy::Pose5 & pose)
   {
     auto & ring = rings_[name];
@@ -500,6 +508,7 @@ private:
     }
     Frame frame;
     frame.stamp = stamp;
+    frame.stamp_ns = stamp_ns;
     frame.gray = gray;
     frame.pose = pose;
     frame.travelled = travelled;
@@ -558,6 +567,7 @@ private:
     job.reference_gray = reference.gray;
     job.reference_pose = reference.pose;
     job.stamp = reference.stamp;
+    job.stamp_ns = reference.stamp_ns;
     job.lens = scaled_lens(name);
     for (double offset : settings_.source_offsets) {
       const double want = reference.travelled + offset;
@@ -596,6 +606,7 @@ private:
         job = std::move(jobs_.front());
         jobs_.pop_front();
         worker_busy_ = true;
+        inflight_stamp_ns_ = job.stamp_ns;
       }
       const auto sweep_start = std::chrono::steady_clock::now();
       int64_t pruned = 0;
@@ -641,8 +652,50 @@ private:
       {
         std::lock_guard<std::mutex> guard(job_mutex_);
         worker_busy_ = false;
+        inflight_stamp_ns_ = 0;
       }
     }
+  }
+
+  // Watermark (see PipelineProgress.msg): every keyframe whose reference image
+  // was captured at or before it is in the grid. Unfinished = frames held for a
+  // pose bracket, keyframe jobs queued or running; otherwise each camera has
+  // delivered up to its newest image, so the slowest camera bounds it.
+  void publish_progress()
+  {
+    int64_t oldest = 0;
+    int64_t newest = 0;
+    uint32_t queue = 0;
+    uint64_t processed = 0;
+    uint64_t dropped = 0;
+    {
+      std::lock_guard<std::mutex> guard(mutex_);
+      for (const auto & name : cameras_) {
+        const auto held = pending_.find(name);
+        if (held != pending_.end() && !held->second.empty()) {
+          oldest = pipeline_progress::oldest_of(oldest, held->second.front().stamp_ns);
+          queue += static_cast<uint32_t>(held->second.size());
+        }
+        const auto seen = newest_image_ns_.find(name);
+        const int64_t camera_newest = seen == newest_image_ns_.end() ? 0 : seen->second;
+        // Every configured camera must have delivered before anything is final.
+        newest = (name == cameras_.front()) ? camera_newest : std::min(newest, camera_newest);
+      }
+      processed = static_cast<uint64_t>(keyframes_);
+      dropped = static_cast<uint64_t>(pending_gap_dropped_ + pending_expired_dropped_ +
+        pending_overflow_dropped_ + blur_rejected_);
+    }
+    {
+      std::lock_guard<std::mutex> guard(job_mutex_);
+      for (const auto & job : jobs_) {oldest = pipeline_progress::oldest_of(oldest, job.stamp_ns);}
+      oldest = pipeline_progress::oldest_of(oldest, inflight_stamp_ns_);
+      queue += static_cast<uint32_t>(jobs_.size()) + (worker_busy_ ? 1U : 0U);
+      dropped += static_cast<uint64_t>(jobs_dropped_);
+    }
+    const int64_t watermark = watermark_.update(pipeline_progress::watermark_from(oldest, newest));
+    progress_pub_->publish(pipeline_progress::make_progress(
+      now().nanoseconds(), "occupancy", grid_topic_, watermark, queue, processed, dropped,
+      watermark_.regressions()));
   }
 
   void publish()
@@ -803,6 +856,11 @@ private:
   std::mutex job_mutex_;
   std::condition_variable job_ready_;
   std::deque<KeyframeJob> jobs_;
+  int64_t inflight_stamp_ns_ = 0;
+  std::map<std::string, int64_t> newest_image_ns_;
+  pipeline_progress::MonotonicWatermark watermark_;
+  rclcpp::Publisher<vision_lane_interfaces::msg::PipelineProgress>::SharedPtr progress_pub_;
+  rclcpp::TimerBase::SharedPtr progress_timer_;
   std::thread worker_;
   bool stop_worker_ = false;
   bool worker_busy_ = false;
