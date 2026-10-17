@@ -35,6 +35,11 @@ CPU-only: tools/build/build.sh cpu. ROS와 pip opencv/numpy를 혼용하지 않�
 | `scripts/test_v4.sh` | `tools/eval/test_lane_registration.sh` |
 | `scripts/rebuild_v4.py`, `scripts/replay_v4.py` | `tools/experiments/rebuild_lane_map.py`, `tools/experiments/replay_lane_registration.py` |
 | `tests/test_launch_v4.py` | `tests/test_launch_pipeline.py` |
+| `tests/test_pose_timeline.cpp` | `src/monoscale/monoscale_pose/test/test_pose_timeline_lookup.cpp` (colcon test) |
+| `tests/gyro_rotation_test.cpp` (빌드 안 되던 파일) | `src/monoscale/monoscale_tracker/test/test_gyro_rotation.cpp` (colcon test) |
+| `tests/test_registration.cpp` | `src/lane_mapping/lane_map/test/test_registration.cpp` (colcon test) |
+| `tests/rebuild_lines.cpp`, `tests/replay_registration.cpp` | `tools/experiments/` (오프라인 도구 본체) |
+| `tests/test_odom_policy.cpp` (빌드 불가 legacy) | 보관 폴더 `item3_legacy_tests/` |
 | `python_v52_benchmark_node.py` (lane) | 보관 폴더 `item8_legacy_lane_benchmark/` |
 
 노드 이름·토픽·메시지 패키지(vision_lane_interfaces)는 그대로다. 호환용 launch(single_camera_lane, vision_support)는 유지한다.
@@ -102,6 +107,7 @@ raw odom·pose Hz/gap, bag에 녹화된 /localization/kinematic_state 대비 경
 ## 검사
 
 ```bash
+# C++ 시험은 모두 각 패키지 test/에 있고 colcon test로 돈다. 루트 tests/는 workspace 단위 Python 시험·integration·fixtures만 둔다.
 colcon test --base-paths src --event-handlers console_direct+
 colcon test-result --all
 PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m pytest -q tests --ignore=tests/test_launch_pipeline.py

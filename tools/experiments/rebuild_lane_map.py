@@ -19,6 +19,6 @@ for line in a.journal.read_text().splitlines():
 root=Path(__file__).resolve().parents[2]
 with tempfile.TemporaryDirectory() as t:
  binary=Path(t)/'rebuild'
- subprocess.run(['g++','-std=c++17','-O2','-I'+str(root/'src/lane_mapping/lane_map/include'),str(root/'tests/rebuild_lines.cpp'),'-o',str(binary)],check=True)
+ subprocess.run(['g++','-std=c++17','-O2','-I'+str(root/'src/lane_mapping/lane_map/include'),str(root/'tools/experiments/rebuild_lines.cpp'),'-o',str(binary)],check=True)
  with a.output_csv.open('x') as f:
   subprocess.run([str(binary)],input='\n'.join(rows)+'\n',text=True,stdout=f,check=True)

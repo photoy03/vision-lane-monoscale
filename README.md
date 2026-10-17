@@ -18,7 +18,7 @@ tools/
   run/                       재생 runner·실행 helper
   eval/                      반복 비교·평가·오프라인 시험
   experiments/               IMU shake 등 일회성 실험 도구
-tests/                       단위시험·integration·fixtures
+tests/                       workspace 단위 Python 시험·integration·fixtures (C++ 시험은 각 패키지 test/)
 docs/                        현재 구조·실행·검증 설명
 third_party/                 출처·라이선스
 ```

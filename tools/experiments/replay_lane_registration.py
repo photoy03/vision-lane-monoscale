@@ -17,5 +17,5 @@ for line in a.journal.read_text().splitlines():
 with tempfile.TemporaryDirectory() as t:
     binary=Path(t)/'replay'
     subprocess.run(['g++','-std=c++17','-O2','-I'+str(root/'src/lane_mapping/lane_map/include'),
-                    str(root/'tests/replay_registration.cpp'),'-o',str(binary)],check=True)
+                    str(root/'tools/experiments/replay_registration.cpp'),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],input='\n'.join(rows)+'\n',text=True,check=True)

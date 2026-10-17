@@ -45,4 +45,13 @@ endif()
 target_compile_options(feature_tracker PRIVATE -O3)
 
 install(TARGETS feature_tracker DESTINATION lib/${PROJECT_NAME})
+
+if(BUILD_TESTING)
+  # Assert-based; keep asserts active in Release.
+  add_executable(test_gyro_rotation test/test_gyro_rotation.cpp)
+  target_include_directories(test_gyro_rotation PRIVATE include ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(test_gyro_rotation ${OpenCV_LIBS})
+  target_compile_options(test_gyro_rotation PRIVATE -UNDEBUG)
+  add_test(NAME test_gyro_rotation COMMAND test_gyro_rotation)
+endif()
 ament_package()
