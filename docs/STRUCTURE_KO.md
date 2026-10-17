@@ -76,6 +76,9 @@ tracker·odometry는 넣지 않았다: 상류 MonoScale에서 벤치마크로 �
 
 벽시계는 폐기 판단(차선 pending TTL·유예)에만 쓰인다. 차선 mapper 타이머(5 ms drain)가 관측을 반영할 때도 붙는 시각은 그 관측의 촬영 시각이다.
 발행 타이머(차선·점유)는 읽기만 한다.
+점유 스냅샷은 complete_through 시점의 정확한 지도다: 카메라마다 격자가 따로라서, 각 카메라의 "그 시각 이전 마지막 keyframe 직후 격자"(keyframe마다 깊은 복사로 보관,
+complete_through 이전 것은 1개만 남기고 정리)를 모아 조립한다. 한 카메라가 앞서 반영된 순간에도 스냅샷은 valid다.
+기존 /perception/occupancy_grid_map은 지금처럼 가장 최신 격자를 낸다. 격자 계산(keyframe, sweep, 반영 순서, 버림 규칙)은 바뀌지 않는다.
 점유지도 발행의 시각/내용 경합(시각을 먼저 읽고 격자를 나중에 복사하던 것)은 고쳤다. 기존 /perception/occupancy_grid_map의 header 시각도
 이제 내용과 같은 잠금에서 정한 content_max(ns 정수)다. 격자 값은 그대로다.
 

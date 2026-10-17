@@ -7,7 +7,11 @@
 // does no estimation and holds no transform tree, which is the seam that let
 // the whole thing be debugged offline (the node design note).
 
+#include <execinfo.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <csignal>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -57,6 +61,31 @@ struct Frame
   monoscale_occupancy::Pose5 pose;
   double travelled = 0.0;
 };
+
+// One camera's grid as it stood right after one of its keyframes. Each camera
+// has its own grid, so a map that is exact at time T can be assembled from the
+// version of every camera at T, even while one camera has already swept past T.
+// Deep copies: a later keyframe writes into the tile matrices in place.
+struct GridVersion
+{
+  int64_t stamp_ns = 0;     // the keyframe's capture time; 0 = the empty grid
+  uint64_t ordinal = 0;     // how many keyframes of this camera it holds
+  std::shared_ptr<monoscale_occupancy::CameraGrid> grid;
+};
+
+std::shared_ptr<monoscale_occupancy::CameraGrid> clone_grid(const monoscale_occupancy::CameraGrid & grid)
+{
+  auto out = std::make_shared<monoscale_occupancy::CameraGrid>();
+  out->tiles.reserve(grid.tiles.size());
+  for (const auto & [key, tile] : grid.tiles) {
+    auto & copy = out->tiles[key];
+    copy.log_odds = tile.log_odds.clone();
+    copy.observed = tile.observed.clone();
+    copy.slab_free[0] = tile.slab_free[0].clone();
+    copy.slab_free[1] = tile.slab_free[1].clone();
+  }
+  return out;
+}
 
 struct KeyframeJob
 {
@@ -243,6 +272,7 @@ public:
     settings_ = settings;
     for (const auto & name : cameras_) {
       grids_[name].reset(settings_);
+      versions_[name].push_back({0, 0, clone_grid(grids_[name])});
     }
 
 #ifdef MONOSCALE_OCCUPANCY_HAS_CUDA
@@ -638,6 +668,7 @@ private:
         }
         // Content time moves with the content, under the same lock.
         contract_.changed(job.stamp_ns);
+        keep_version(job.camera, job.stamp_ns);
       }
       const double elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - sweep_start).count();
@@ -662,6 +693,27 @@ private:
         worker_busy_ = false;
         inflight_stamp_ns_ = 0;
       }
+    }
+  }
+
+  // Keep this camera's grid as it stands after the keyframe at stamp_ns.
+  // Caller holds map_mutex_.
+  void keep_version(const std::string & name, int64_t stamp_ns)
+  {
+    auto & held = versions_[name];
+    held.push_back({stamp_ns, held.back().ordinal + 1, clone_grid(grids_[name])});
+  }
+
+  // Drop versions no snapshot can ask for any more: complete_through only moves
+  // forward, so per camera the last version at or before it and everything
+  // after it are all that can still be chosen. Caller holds map_mutex_.
+  void trim_versions()
+  {
+    const int64_t complete = contract_.published_complete();
+    for (auto & [name, held] : versions_) {
+      while (held.size() > 1 && held[1].stamp_ns <= complete) {held.pop_front();}
+      // Backstop against an unbounded queue if completion ever stalled.
+      while (held.size() > kMaxGridVersions) {held.pop_front();}
     }
   }
 
@@ -746,6 +798,10 @@ private:
     // the vehicle.
     monoscale_occupancy::Published published;
     vision_lane_interfaces::msg::OccupancySnapshot snapshot;
+    std::vector<std::shared_ptr<monoscale_occupancy::CameraGrid>> exact;  // empty: use `published`
+    int64_t exact_content_max = 0;
+    uint64_t exact_version = 0;
+    bool exact_available = true;
     {
       std::lock_guard<std::mutex> guard(map_mutex_);
       published = settings_.fixed_extent ?
@@ -753,10 +809,34 @@ private:
           settings_, grids, monoscale_occupancy::legacy_window(settings_)) :
         monoscale_occupancy::publish(settings_, grids);
       if (published.window.empty()) {return;}
+      // The snapshot is the map exact at complete_through: every camera's grid
+      // as of its last keyframe at or before it. When no camera has swept past
+      // it, that is exactly the grid just published.
+      bool all_latest = true;
+      for (const auto & name : cameras_) {
+        const auto & held = versions_[name];
+        const GridVersion * at = nullptr;
+        for (const auto & version : held) {
+          if (version.stamp_ns <= done.watermark) {at = &version;}
+        }
+        if (!at) {exact_available = false; break;}
+        all_latest = all_latest && at == &held.back();
+        exact.push_back(at->grid);
+        exact_content_max = std::max(exact_content_max, at->stamp_ns);
+        exact_version += at->ordinal;
+      }
+      if (!exact_available || all_latest) {exact.clear();}
+      if (!exact_available) {
+        // History trimmed past complete_through (should not happen): fall back
+        // to the newest grid, which then carries its own (invalid) times.
+        exact_content_max = contract_.content_max();
+        ++snapshot_fallbacks_;
+      }
       const uint64_t sequence = contract_.published(done.watermark);
       snapshot.meta = map_snapshot::fill_meta(
-        "occupancy", snapshot_session_, contract_.epoch(), contract_.content_version(), sequence,
-        contract_.content_max(), done.watermark, done.discards, contract_.late_changes());
+        "occupancy", snapshot_session_, contract_.epoch(), exact_version, sequence,
+        exact_content_max, done.watermark, done.discards, contract_.late_changes());
+      trim_versions();
     }
     const cv::Mat & values = published.values;
 
@@ -779,8 +859,30 @@ private:
       else {++other;}
     }
     grid_pub_->publish(message);
-    snapshot.header = message.header;
-    snapshot.grid = std::move(message);
+    if (exact.empty()) {
+      snapshot.grid = std::move(message);
+    } else {
+      // Older versions of at least one camera: assemble them outside the map
+      // lock (versions are never written after they are kept).
+      std::vector<monoscale_occupancy::CameraGrid *> held;
+      for (const auto & grid : exact) {held.push_back(grid.get());}
+      const auto older = settings_.fixed_extent ?
+        monoscale_occupancy::publish(settings_, held, monoscale_occupancy::legacy_window(settings_)) :
+        monoscale_occupancy::publish(settings_, held);
+      snapshot.grid.header = message.header;
+      snapshot.grid.info = message.info;
+      snapshot.grid.info.width = static_cast<uint32_t>(older.window.width);
+      snapshot.grid.info.height = static_cast<uint32_t>(older.window.height);
+      snapshot.grid.info.origin.position.x = older.window.origin_x;
+      snapshot.grid.info.origin.position.y = older.window.origin_y;
+      snapshot.grid.data.resize(static_cast<size_t>(older.values.total()));
+      if (!older.values.empty()) {
+        std::memcpy(snapshot.grid.data.data(), older.values.data, older.values.total());
+      }
+      ++older_snapshots_;
+    }
+    snapshot.grid.header.stamp = snapshot.meta.content_max;
+    snapshot.header = snapshot.grid.header;
     snapshot_pub_->publish(snapshot);
     {
       std::lock_guard<std::mutex> guard(mutex_);
@@ -823,7 +925,8 @@ private:
       "free_gate[textured=%d finite=%d unique=%d cost=%d margin=%d road=%d] "
       "free_cost_cdf[120=%d 250=%d 500=%d 1000=%d 2000=%d 5000=%d 10000=%d] "
       "reject[odom_frame=%ld odom_stamp=%ld odom_value=%ld pose_gap=%ld pose_move=%ld pose_yaw=%ld pose_invalid=%ld image=%ld blur=%ld] "
-      "pending_drop[gap=%ld expired=%ld overflow=%ld] stamp_regressions=%ld tiles_pruned=%ld",
+      "pending_drop[gap=%ld expired=%ld overflow=%ld] stamp_regressions=%ld tiles_pruned=%ld "
+      "exact_snapshot[older_versions=%lu fallback=%lu]",
       keyframes_, placed_, held, ringed, odometry_.size(), queued,
       max_pending_keyframes_, busy ? 1 : 0, dropped, published_,occupied_cells_,free_cells_,
       unknown_cells_,other_cells_,last_sweep_ms_,last_sharpness_,
@@ -839,7 +942,8 @@ private:
       odom_stamp_rejected_,odom_value_rejected_,pose_gap_rejected_,pose_motion_rejected_,
       pose_yaw_rejected_,pose_invalid_rejected_,image_frame_rejected_,
       blur_rejected_,pending_gap_dropped_,pending_expired_dropped_,
-      pending_overflow_dropped_,stamp_regressions_,pruned_tiles_);
+      pending_overflow_dropped_,stamp_regressions_,pruned_tiles_,
+      static_cast<unsigned long>(older_snapshots_), static_cast<unsigned long>(snapshot_fallbacks_));
   }
 
   std::vector<std::string> cameras_;
@@ -901,6 +1005,9 @@ private:
   std::map<std::string, int64_t> newest_image_ns_;
   pipeline_progress::MonotonicWatermark watermark_;
   map_snapshot::Contract contract_;  // guarded by map_mutex_
+  static constexpr size_t kMaxGridVersions = 64;
+  std::map<std::string, std::deque<GridVersion>> versions_;  // guarded by map_mutex_
+  uint64_t older_snapshots_ = 0, snapshot_fallbacks_ = 0;  // publisher thread only
   rclcpp::Publisher<vision_lane_interfaces::msg::OccupancySnapshot>::SharedPtr snapshot_pub_;
   std::string snapshot_session_;
   rclcpp::Publisher<vision_lane_interfaces::msg::PipelineProgress>::SharedPtr progress_pub_;
@@ -943,8 +1050,23 @@ private:
   int64_t blur_rejected_ = 0;
 };
 
+// Diagnosis of the intermittent exit -11 at shutdown (2 of 7 replays, never
+// under gdb): print where it happened, then die the way it would have.
+void on_fatal_signal(int signal_number)
+{
+  void * frames[64];
+  const int count = backtrace(frames, 64);
+  const char header[] = "sweep_node: fatal signal, backtrace:\n";
+  (void)!write(STDERR_FILENO, header, sizeof(header) - 1);
+  backtrace_symbols_fd(frames, count, STDERR_FILENO);
+  std::signal(signal_number, SIG_DFL);
+  std::raise(signal_number);
+}
+
 int main(int argc, char ** argv)
 {
+  std::signal(SIGSEGV, on_fatal_signal);
+  std::signal(SIGABRT, on_fatal_signal);
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<SweepNode>());
   rclcpp::shutdown();
