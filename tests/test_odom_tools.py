@@ -152,7 +152,8 @@ class OdomTests(unittest.TestCase):
                         self.assertTrue(all(isinstance(p, dict) for p in odoms[1]['parameters']))
 
     def test_registration_comparison_is_separate_from_shared_map(self):
-        text = (ROOT / 'src/vision_mapping_bringup/vision_mapping_bringup/pipeline.py').read_text()
+        package = ROOT / 'src/vision_mapping_bringup/vision_mapping_bringup'
+        text = '\n'.join(path.read_text() for path in sorted(package.rglob('*.py')))
         self.assertIn("'enable_pose_registration': False", text)
         self.assertIn("'enable_pose_registration': True", text)
         self.assertIn('/parking/cpp/global_marking_map_registered_compare', text)
