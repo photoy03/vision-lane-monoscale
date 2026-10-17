@@ -204,6 +204,10 @@ def main() -> int:
     parser.add_argument("--instrumentation", choices=("on", "off"), default="on")
     parser.add_argument("--record-outputs", choices=("on", "off"), default="off",
                         help="record pipeline output topics into <run>/outputs_bag")
+    parser.add_argument("--outputs-compression", choices=("zstd", "none"), default="zstd",
+                        help="zstd: compress outputs_bag per file when it closes (a full "
+                             "occupancy-grid stream is ~350 MB raw, a few MB compressed); "
+                             "none: plain sqlite3 like runs before 2026-10-17")
     parser.add_argument("--sample-plan", type=Path, help="frozen sample_manifest.json")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -347,6 +351,8 @@ def main() -> int:
     if args.record_outputs == "on":
         commands["recorder"] = ros_command(repo, [
             "ros2", "bag", "record", "--use-sim-time", "-s", "sqlite3",
+            *(["--compression-mode", "file", "--compression-format", "zstd"]
+              if args.outputs_compression == "zstd" else []),
             "-o", str(output / "outputs_bag"), *OUTPUT_TOPICS])
     if sample_plan:
         commands["sampler"] = ros_command(repo, [
@@ -362,6 +368,7 @@ def main() -> int:
         "bag_info": info.stdout, "bag_topics": sorted(available_topics),
         "replayed_topics": list(TOPICS),
         "recorded_output_topics": list(OUTPUT_TOPICS) if args.record_outputs == "on" else [],
+        "outputs_compression": args.outputs_compression if args.record_outputs == "on" else None,
         "ros_domain_id": args.domain_id,
         "output_dir": str(output), "free_disk_gib_at_start": round(free_gib, 3),
         "config_hashes": {str(p): sha256(p) for p in (calibration, rig, rear_rig)},

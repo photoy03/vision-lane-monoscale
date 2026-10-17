@@ -23,6 +23,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 
 TOOLS = Path(__file__).resolve().parents[1]
 REFERENCE_ODOM = "/localization/kinematic_state"
@@ -52,11 +53,25 @@ def read_bag(path: Path, topics: list[str]) -> dict[str, list] | None:
     """Return {topic: [(header_stamp_sec, msg)]}; None when ROS Python is unavailable."""
     try:
         import rosbag2_py
-        from rclpy.serialization import deserialize_message
-        from rosidl_runtime_py.utilities import get_message
+        import rclpy.serialization  # noqa: F401  (availability check)
+        import rosidl_runtime_py.utilities  # noqa: F401
     except ImportError:
         return None
-    reader = rosbag2_py.SequentialReader()
+    if any(path.glob("*.zstd")):
+        # Compressed per file (runner default, or converted later). The reader
+        # decompresses next to the bag and leaves the copy behind, so read a
+        # temporary copy instead of inflating the run folder.
+        with tempfile.TemporaryDirectory(prefix="outputs_bag_") as temp:
+            copy = Path(temp) / path.name
+            shutil.copytree(path, copy)
+            return _read_bag(rosbag2_py.SequentialCompressionReader(), copy, topics)
+    return _read_bag(rosbag2_py.SequentialReader(), path, topics)
+
+
+def _read_bag(reader, path: Path, topics: list[str]) -> dict[str, list]:
+    import rosbag2_py
+    from rclpy.serialization import deserialize_message
+    from rosidl_runtime_py.utilities import get_message
     reader.open(rosbag2_py.StorageOptions(uri=str(path), storage_id="sqlite3"),
                 rosbag2_py.ConverterOptions("cdr", "cdr"))
     types = {item.name: item.type for item in reader.get_all_topics_and_types()}

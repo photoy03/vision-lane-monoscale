@@ -107,6 +107,11 @@ raw odom·pose Hz/gap, bag에 녹화된 /localization/kinematic_state 대비 경
 `--record-outputs on`으로 기록한 실행은 /pipeline/progress도 녹화하고, repeat_compare가 노드별 watermark 지연 p50/p90(watermark_<node>_lag_*),
 발행값 역행 수(watermark_<node>_published_backwards, 항상 0이어야 함), 붙잡은 역행 수(watermark_<node>_held_regressions)를 낸다.
 이 토픽이 없는 옛 실행은 해당 행만 비어 있다.
+outputs_bag은 기본으로 rosbag2 zstd 파일 압축(`--outputs-compression zstd`)으로 저장한다. 점유지도 격자 전체 흐름까지 그대로 남기며 실행당 약 2 MB다(압축 전 약 350 MB).
+예전 방식(압축 없음)은 `--outputs-compression none`. repeat_compare는 두 형식을 모두 읽는다(압축본은 임시 복사본에서 풀어 읽고 실행 폴더는 건드리지 않는다).
+`ros2 bag info`/`ros2 bag play`는 압축본을 그대로 다룬다. 압축을 아예 풀려면:
+`ros2 bag convert -i <run>/outputs_bag -o out.yaml`(out.yaml: `output_bags: [{uri: <새 폴더>, storage_id: sqlite3, all: true}]`)
+또는 sqlite 파일만 필요하면 `zstd -d <run>/outputs_bag/outputs_bag_0.db3.zstd -o /tmp/outputs_bag_0.db3`.
 marking_segments_total은 lane_mapping_owner에 따라 뜻이 다르다(detection: 월드 추적 결과, map: pose 없는 로컬 결과). 모드가 다른 실행끼리 비교하지 않는다.
 
 ## 검사
