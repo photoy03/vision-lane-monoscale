@@ -33,6 +33,8 @@ using Recovered = vision_lane_interfaces::msg::RecoveredMarkingSegmentArray;
 #include "lane_map/recovery_identity.hpp"
 #include "lane_map/lane_mapper.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
+#include "vision_lane_interfaces/map_snapshot.hpp"
+#include <vision_lane_interfaces/msg/lane_map_snapshot.hpp>
 
 using Array = vision_lane_interfaces::msg::MarkingSegmentArray;
 using Steady = std::chrono::steady_clock;
@@ -132,6 +134,10 @@ class MapFusionNode : public rclcpp::Node {
     progress_pub_=create_publisher<vision_lane_interfaces::msg::PipelineProgress>(
       pipeline_progress::kTopic,rclcpp::QoS(50).reliable());
     progress_timer_=create_wall_timer(std::chrono::milliseconds(200),[this]{publish_progress();});
+    snapshot_pub_=create_publisher<vision_lane_interfaces::msg::LaneMapSnapshot>(
+      map_snapshot::kLaneTopic,rclcpp::QoS(5).reliable());
+    snapshot_session_=std::string(get_name())+"-"+std::to_string(
+      std::chrono::system_clock::now().time_since_epoch().count());
     RCLCPP_INFO(get_logger(),"CPU line map: mode=%s frame=%s registration=%s, no odom/TF writes; "
       "confirm=%d keyframes, angle=%.1fdeg offset=%.3fm rolling_range=%.1fm continuation_gap=%.2fm, "
       "extent=%s, occupancy_filter=%s (%d maps, threshold=%d, inflation=%.2fm).",
@@ -182,22 +188,26 @@ class MapFusionNode : public rclcpp::Node {
       throw std::invalid_argument("invalid lane mapper parameters");
     return m;
   }
-  // Watermark (see PipelineProgress.msg): with the mapper, just before the
-  // oldest observation still waiting for a pose, else the newest observation
-  // received; otherwise inputs are handled on arrival, so the newest one.
+  // Watermark = snapshot complete_through (see PipelineProgress.msg): with the
+  // mapper, just before the oldest observation still waiting for a pose, else
+  // the newest observation received; otherwise inputs are handled on arrival,
+  // so the newest one.
+  int64_t complete_through() {
+    const int64_t candidate=mapper_enabled_?
+      pipeline_progress::watermark_from(mapper_.oldest_pending_stamp_ns(),newest_input_stamp_):newest_input_stamp_;
+    return watermark_.update(candidate);
+  }
   void publish_progress() {
-    int64_t candidate=0;uint64_t processed=0,dropped=0;uint32_t queue=0;
+    uint64_t processed=0,dropped=0;uint32_t queue=0;
     if(mapper_enabled_){
-      candidate=pipeline_progress::watermark_from(mapper_.oldest_pending_stamp_ns(),newest_input_stamp_);
       const auto& c=mapper_.counters();
       processed=c.resolved;queue=static_cast<uint32_t>(mapper_.pending());
       dropped=c.ttl_drop+c.unresolvable_drop+c.overflow_drop+c.invalid_drop+c.nonmonotonic_drop+mapper_invalid_+mapper_epoch_drops_;
     }else{
-      candidate=newest_input_stamp_;
       processed=recovered_input_enabled_?recovery_accepted_:received_;
       dropped=recovered_input_enabled_?(recovery_metadata_rejected_+recovery_duplicates_+recovery_order_rejected_):(bad_pose_+bad_stamp_);
     }
-    const int64_t watermark=watermark_.update(candidate);
+    const int64_t watermark=complete_through();
     progress_pub_->publish(pipeline_progress::make_progress(now().nanoseconds(),get_name(),
       output_vector_topic_,watermark,queue,processed,dropped,watermark_.regressions()));
   }
@@ -469,7 +479,11 @@ class MapFusionNode : public rclcpp::Node {
       reject("STALE_EPOCH");return;
     }
     if(recovery_session_.empty()||recovery_session_!=recovered.session_id||recovery_epoch_!=recovered.epoch) {
-      if(!recovery_session_.empty())++recovery_epoch_resets_;
+      if(!recovery_session_.empty()) {
+        ++recovery_epoch_resets_;
+        // A new epoch is a new time line: content and completion start over.
+        contract_.reset();watermark_=pipeline_progress::MonotonicWatermark{};
+      }
       bank_.reset();last_pose_.reset();last_received_stamp_=0;last_occupancy_stamp_=0;
       recovery_identities_.clear();
       recovery_session_=recovered.session_id;recovery_epoch_=recovered.epoch;
@@ -521,6 +535,11 @@ class MapFusionNode : public rclcpp::Node {
       return false;
     };
     const auto removed=bank_.prune_occupied(occupied,occupancy_confirm_updates_);
+    if(removed.landmarks+removed.support_bins>0) {
+      // Lane content now depends on this occupancy snapshot's time, not a lane input.
+      contract_.touched();depends_on_occupancy_=true;
+      occupancy_content_max_used_=std::max(occupancy_content_max_used_,stamp);
+    }
     occupancy_maps_++;
     occupancy_pruned_landmarks_+=removed.landmarks;
     occupancy_pruned_support_bins_+=removed.support_bins;
@@ -555,6 +574,7 @@ class MapFusionNode : public rclcpp::Node {
       bank_.prune({pose.x,pose.y},rolling_distance_);
     process.pruned=static_cast<int>(pruned.landmarks+pruned.support_bins);
     process.bank_mutated=process.pruned>0;
+    if(process.bank_mutated) contract_.changed(stamp);
     pruned_landmarks_+=pruned.landmarks;
     pruned_support_bins_+=pruned.support_bins;
     if(last_pose_) {
@@ -582,6 +602,7 @@ class MapFusionNode : public rclcpp::Node {
     ambiguous_+=update.ambiguous;invalid_+=update.invalid;capacity_+=update.capacity;
     process.created=update.created;process.merged=update.merged;process.continued=update.continued;
     process.bank_mutated=process.bank_mutated||update.created>0||update.merged>0||bank_.landmarks().size()!=landmark_count_before;
+    if(process.bank_mutated||update.continued>0||update.duplicate>0) contract_.changed(stamp);
     if(update.merged+update.created==0) {
       process.reason=process.bank_mutated?"PRUNE_OR_EXPIRY_ONLY":"NO_LANDMARK_ASSOCIATION";
       process.outcome=process.bank_mutated?"APPLIED":"SKIPPED";
@@ -616,6 +637,8 @@ class MapFusionNode : public rclcpp::Node {
   }
   void publish_map() {
     const auto start=Steady::now();
+    // Single-threaded node: completion and content are read in the same callback.
+    const int64_t complete=complete_through();
     const auto rendered=bank_.render();
     const auto& segments=rendered.segments;
     cv::Mat canvas=cv::Mat::zeros(height_,width_,CV_8UC3);
@@ -643,6 +666,7 @@ class MapFusionNode : public rclcpp::Node {
     image.step=static_cast<uint32_t>(width_*3);image.is_bigendian=false;
     image.data.assign(canvas.data,canvas.data+canvas.total()*canvas.elemSize());
     image_->publish(image);vectors_->publish(output);
+    publish_snapshot(output,complete);
     visualization_msgs::msg::MarkerArray marker_array;
     visualization_msgs::msg::Marker clear;
     clear.header=output.header;clear.ns="lane_map";clear.id=0;
@@ -706,8 +730,33 @@ class MapFusionNode : public rclcpp::Node {
       keyframes_,bank_.landmarks().size(),segments.size(),merged_,ambiguous_,bad_pose_,bad_stamp_,
       pruned_landmarks_,pruned_support_bins_,occupancy_pruned_landmarks_,occupancy_pruned_support_bins_);
   }
+  void publish_snapshot(const Array& lanes,int64_t complete) {
+    std::vector<std::pair<std::string,uint64_t>> discards;
+    if(mapper_enabled_) {
+      const auto& c=mapper_.counters();
+      discards={{"pending_ttl",c.ttl_drop},{"pose_gap",c.unresolvable_drop},{"overflow",c.overflow_drop},
+        {"invalid",c.invalid_drop+mapper_invalid_},{"nonmonotonic",c.nonmonotonic_drop},
+        {"duplicate",c.duplicate_drop},{"epoch_reset",mapper_epoch_drops_}};
+    }
+    discards.insert(discards.end(),{{"bad_stamp",bad_stamp_},{"bad_pose",bad_pose_},
+      {"metadata",recovery_metadata_rejected_},{"duplicate_identity",recovery_duplicates_}});
+    vision_lane_interfaces::msg::LaneMapSnapshot out;
+    const uint64_t sequence=contract_.published(complete);
+    out.meta=map_snapshot::fill_meta("lane",snapshot_session_,contract_.epoch(),contract_.content_version(),
+      sequence,contract_.content_max(),complete,discards,contract_.late_changes());
+    out.meta.depends_on_occupancy=depends_on_occupancy_;
+    out.meta.occupancy_content_max_used=pipeline_progress::to_time(occupancy_content_max_used_);
+    out.header.frame_id=map_frame_;out.header.stamp=out.meta.content_max;
+    out.lanes=lanes;
+    snapshot_pub_->publish(out);
+  }
   lane_fusion::RegisteredBank bank_;
   lane_mapping::LaneMapper mapper_;
+  map_snapshot::Contract contract_;
+  rclcpp::Publisher<vision_lane_interfaces::msg::LaneMapSnapshot>::SharedPtr snapshot_pub_;
+  std::string snapshot_session_;
+  bool depends_on_occupancy_{false};
+  int64_t occupancy_content_max_used_{0};
   pipeline_progress::MonotonicWatermark watermark_;
   int64_t newest_input_stamp_{0};
   std::string output_vector_topic_;

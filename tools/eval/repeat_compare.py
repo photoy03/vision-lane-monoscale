@@ -49,6 +49,75 @@ def angle_deg(a: float, b: float) -> float:
     return abs(math.degrees(math.atan2(math.sin(a - b), math.cos(a - b))))
 
 
+SNAPSHOT_TOPICS = ("/mapping/snapshot/lanes", "/mapping/snapshot/occupancy")
+
+
+def _ns(t) -> int:
+    return t.sec * 1_000_000_000 + t.nanosec
+
+
+def snapshot_metrics(lanes: list, occupancy: list, history_sec: float = 10.0) -> dict[str, float]:
+    """Check the map snapshot contract (msg/MapSnapshotMeta.msg) from recorded snapshots.
+
+    Per layer: how often a snapshot is exact (content_max <= complete_through) and
+    whether any change broke an already published complete_through (late_changes).
+    Fusion dry run: at every snapshot arrival, look for a lane/occupancy pair
+    received within history_sec whose exact intervals overlap,
+    max(content_max) <= T <= min(complete_through), and take the latest such T.
+    """
+    m: dict[str, float] = {}
+    layers = {"lane": lanes, "occupancy": occupancy}
+    for name, items in layers.items():
+        if not items:
+            continue
+        metas = [msg.meta for _, msg in items]
+        m[f"snapshot_{name}_count"] = len(metas)
+        m[f"snapshot_{name}_valid_ratio"] = sum(meta.valid for meta in metas) / len(metas)
+        m[f"snapshot_{name}_content_ahead"] = sum(
+            _ns(meta.content_max) > _ns(meta.complete_through) > 0 for meta in metas)
+        m[f"snapshot_{name}_late_changes"] = metas[-1].late_changes
+        m[f"snapshot_{name}_content_versions"] = metas[-1].content_version
+        m[f"snapshot_{name}_epochs"] = len({meta.epoch for meta in metas})
+        backwards = sum(_ns(b.complete_through) < _ns(a.complete_through) for a, b in zip(metas, metas[1:])
+                        if a.epoch == b.epoch)
+        m[f"snapshot_{name}_complete_backwards"] = backwards
+    if not lanes or not occupancy:
+        return m
+    events = sorted([(t, "lane", msg.meta) for t, msg in lanes] + [(t, "occupancy", msg.meta) for t, msg in occupancy],
+                    key=lambda item: item[0])
+    recent: dict[str, list] = {"lane": [], "occupancy": []}
+    ticks = found = 0
+    lags = []
+    last_t = 0
+    for t, layer, meta in events:
+        if meta.valid:
+            recent[layer].append((t, meta))
+        for key in recent:
+            recent[key] = [(rt, rm) for rt, rm in recent[key] if t - rt <= history_sec]
+        if not recent["lane"] or not recent["occupancy"]:
+            continue
+        ticks += 1
+        best = None
+        for _, a in recent["lane"]:
+            for _, b in recent["occupancy"]:
+                lo = max(_ns(a.content_max), _ns(b.content_max))
+                hi = min(_ns(a.complete_through), _ns(b.complete_through))
+                if lo <= hi and (best is None or hi > best):
+                    best = hi
+        if best is None:
+            continue
+        found += 1
+        last_t = max(last_t, best)
+        lags.append(t - last_t * 1e-9)
+    if ticks:
+        m["fusion_dry_run_pair_ratio"] = found / ticks
+    if lags:
+        lags.sort()
+        m["fusion_dry_run_lag_p50_ms"] = 1000.0 * lags[len(lags) // 2]
+        m["fusion_dry_run_lag_p90_ms"] = 1000.0 * lags[int(0.9 * (len(lags) - 1))]
+    return m
+
+
 def read_bag(path: Path, topics: list[str]) -> dict[str, list] | None:
     """Return {topic: [(header_stamp_sec, msg)]}; None when ROS Python is unavailable."""
     try:
@@ -86,6 +155,8 @@ def _read_bag(reader, path: Path, topics: list[str]) -> dict[str, list]:
         msg = deserialize_message(data, classes[topic])
         header = getattr(msg, "header", None)
         stamp = header.stamp.sec + header.stamp.nanosec * 1e-9 if header else receive_ns * 1e-9
+        if topic in SNAPSHOT_TOPICS:  # their time lives in msg.meta; keep when they arrived
+            stamp = receive_ns * 1e-9
         out[topic].append((stamp, msg))
     return out
 
@@ -198,7 +269,7 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
         topics = ["/localization/monoscale_raw", "/localization/kinematic_state",
                   "/parking/cpp/marking_segments", "/parking/cpp/global_marking_segments_fused",
                   "/perception/occupancy_grid_map", "/parking/cpp/map_fusion/status",
-                  "/pipeline/progress"]
+                  "/pipeline/progress", *SNAPSHOT_TOPICS]
         data = read_bag(outputs, topics)
         if data is not None:
             m.update(rate_stats([t for t, _ in data["/localization/monoscale_raw"]], "raw_odom"))
@@ -247,6 +318,7 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                 if lags:
                     m[f"watermark_{node}_lag_p50_ms"] = lags[len(lags) // 2]
                     m[f"watermark_{node}_lag_p90_ms"] = lags[int(0.9 * (len(lags) - 1))]
+            m.update(snapshot_metrics(data["/mapping/snapshot/lanes"], data["/mapping/snapshot/occupancy"]))
             grids = data["/perception/occupancy_grid_map"]
             m["occupancy_grid_msgs"] = len(grids)
             if grids:

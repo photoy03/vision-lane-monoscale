@@ -42,6 +42,43 @@ queue_size는 위 대기 수, processed_total은 출력에 반영된 수(lane_de
 dropped_total은 영구히 버린 수다.
 tracker·odometry는 넣지 않았다: 상류 MonoScale에서 벤치마크로 맞춘 코드이고, 그 결과는 pose 노드 W가 이미 상한을 준다.
 
+## 지도 스냅샷 (/mapping/snapshot/{lanes,occupancy}, 2026-10-17 추가)
+
+통합 노드가 "같은 시각 T의 지도"를 고를 수 있게, 차선지도와 점유지도가 내용과 시각 약속을 한 번에 묶어 5 Hz로 낸다.
+메시지: LaneMapSnapshot / OccupancySnapshot(+ 공통 MapSnapshotMeta). 규칙: vision_lane_interfaces/map_snapshot.hpp.
+기존 토픽(/parking/cpp/global_marking_segments_fused, /perception/occupancy_grid_map)은 그대로 낸다.
+
+- content_max: 이 내용을 바꾼 입력 중 가장 새 촬영 시각(추가·병합·정리·만료 모두 포함).
+- complete_through: 이 시각 이하로 찍힌 입력은 반영됐거나 규칙에 따라 최종 폐기됐다(= 그 노드의 watermark). 폐기 수는 이유별 누적(discard_reasons/counts).
+- valid = complete_through > 0 이고 content_max ≤ complete_through. 이때 이 스냅샷은 [content_max, complete_through] 안의 모든 T에서 정확한 상태다.
+  valid=false 스냅샷은 진단용이며 통합에 쓰지 않는다.
+- 두 층을 합칠 때는 max(content_max) ≤ T ≤ min(complete_through)인 교집합이 있어야 한다. 없으면 기다리거나 이전 스냅샷 쌍을 쓴다(이력 보관 필요).
+- content_version은 내용이 바뀔 수 있을 때만, snapshot_sequence는 발행마다 증가한다. 내용은 그대로이고 complete_through만 전진해도 다시 낸다.
+- epoch는 지도 리셋(시계 역행에 따른 새 epoch)마다 증가한다. epoch가 다른 스냅샷은 섞지 않는다. session_id는 노드 실행 단위다.
+- late_changes: 이미 발행한 complete_through 이하 시각의 입력으로 내용이 바뀐 횟수. 0이어야 하며, 0이 아니면 약속 위반이다(실시간 자가 검사).
+- 순서 규칙: complete_through를 먼저 정하고 내용을 나중에 복사한다. 복사 뒤에 끝난 것을 완결로 적지 않기 위해서다.
+- 층 의존: 차선의 점유 기반 정리(occupancy_filter_enabled, 기본 false)가 실제로 지운 경우 depends_on_occupancy=true와 사용한 점유 시각을 남긴다.
+
+내용이 바뀌는 경로와 붙는 시각(전수 조사):
+
+| 층 | 경로 (코드) | 붙는 시각 |
+|---|---|---|
+| 차선 | 선분 생성·병합·연장·중복 흡수 (map_fusion_node on_vectors → bank_.update) | 그 관측의 촬영 시각 |
+| 차선 | 오래된 선분 만료 (bank_.update 안, 관측 시각 기준 TTL) | 만료를 일으킨 관측의 촬영 시각 |
+| 차선 | 범위 정리 (github_fixed: prune_box, rolling: 차량 위치 반경) | 그 관측의 촬영 시각 |
+| 차선 | 점유 기반 정리 (on_occupancy, 기본 꺼짐) | 차선 시각 없음 → content_version만 증가 + 사용한 점유 시각 기록 |
+| 차선 | 새 session/epoch 리셋 | epoch 증가, content_max·완결 초기화 |
+| 차선 | 렌더링(render, 중복 표시 억제) | 내용 변경 아님(const, 읽기만) |
+| 점유 | keyframe sweep 반영 (worker, map_mutex_) | 그 keyframe 기준 영상의 촬영 시각 |
+| 점유 | rolling 모드 타일 정리 (같은 worker 블록) | 같은 keyframe의 촬영 시각 |
+| 점유 | 발행용 격자 계산(publish(), slab·erode) | 내용 변경 아님(저장된 격자에서 매번 계산) |
+| 점유 | 초기화(시작 시 grids_ reset) | 시작 시 1회 |
+
+벽시계는 폐기 판단(차선 pending TTL·유예)에만 쓰인다. 차선 mapper 타이머(5 ms drain)가 관측을 반영할 때도 붙는 시각은 그 관측의 촬영 시각이다.
+발행 타이머(차선·점유)는 읽기만 한다.
+점유지도 발행의 시각/내용 경합(시각을 먼저 읽고 격자를 나중에 복사하던 것)은 고쳤다. 기존 /perception/occupancy_grid_map의 header 시각도
+이제 내용과 같은 잠금에서 정한 content_max(ns 정수)다. 격자 값은 그대로다.
+
 ## launch
 
 | 파일 | 범위 |

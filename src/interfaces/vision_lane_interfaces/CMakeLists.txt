@@ -14,11 +14,14 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RecoveredMarkingSegmentArray.msg"
   "msg/LocalOccupancyGrid.msg"
   "msg/PipelineProgress.msg"
+  "msg/MapSnapshotMeta.msg"
+  "msg/LaneMapSnapshot.msg"
+  "msg/OccupancySnapshot.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs std_msgs
 )
 
 ament_export_dependencies(rosidl_default_runtime)
-# Header-only helpers for /pipeline/progress (watermark rules + message filling),
+# Header-only helpers for /pipeline/progress and map snapshots (time rules + message filling),
 # installed next to the generated msg headers so the exported targets carry them.
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 ament_package()

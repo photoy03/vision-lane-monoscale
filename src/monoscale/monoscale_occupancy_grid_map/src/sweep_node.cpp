@@ -33,6 +33,8 @@
 #include "monoscale_occupancy_grid_map/pose_interpolation.hpp"
 #include "monoscale_pose/pose_timeline.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
+#include "vision_lane_interfaces/map_snapshot.hpp"
+#include "vision_lane_interfaces/msg/occupancy_snapshot.hpp"
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
 namespace
@@ -289,6 +291,10 @@ public:
     progress_pub_ = create_publisher<vision_lane_interfaces::msg::PipelineProgress>(
       pipeline_progress::kTopic, rclcpp::QoS(50).reliable());
     progress_timer_ = create_wall_timer(std::chrono::milliseconds(200), [this]() {publish_progress();});
+    snapshot_pub_ = create_publisher<vision_lane_interfaces::msg::OccupancySnapshot>(
+      map_snapshot::kOccupancyTopic, rclcpp::QoS(5).reliable());
+    snapshot_session_ = std::string(get_name()) + "-" + std::to_string(
+      std::chrono::system_clock::now().time_since_epoch().count());
   }
 
   ~SweepNode() override
@@ -630,6 +636,8 @@ private:
             settings_, job.reference_pose.x, job.reference_pose.y,
             settings_.rolling_radius);
         }
+        // Content time moves with the content, under the same lock.
+        contract_.changed(job.stamp_ns);
       }
       const double elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - sweep_start).count();
@@ -657,73 +665,103 @@ private:
     }
   }
 
-  // Watermark (see PipelineProgress.msg): every keyframe whose reference image
-  // was captured at or before it is in the grid. Unfinished = frames held for a
-  // pose bracket, keyframe jobs queued or running; otherwise each camera has
-  // delivered up to its newest image, so the slowest camera bounds it.
-  void publish_progress()
+  struct Completion
   {
-    int64_t oldest = 0;
-    int64_t newest = 0;
+    int64_t watermark = 0;
     uint32_t queue = 0;
     uint64_t processed = 0;
-    uint64_t dropped = 0;
+    std::vector<std::pair<std::string, uint64_t>> discards;
+    uint64_t dropped() const
+    {
+      uint64_t total = 0;
+      for (const auto & item : discards) {total += item.second;}
+      return total;
+    }
+  };
+
+  // Watermark = snapshot complete_through (see PipelineProgress.msg): every
+  // keyframe whose reference image was captured at or before it is in the grid
+  // or finally dropped. Unfinished = frames held for a pose bracket, keyframe
+  // jobs queued or running; otherwise each camera has delivered up to its
+  // newest image, so the slowest camera bounds it.
+  Completion completion()
+  {
+    Completion out;
+    int64_t oldest = 0;
+    int64_t newest = 0;
     {
       std::lock_guard<std::mutex> guard(mutex_);
       for (const auto & name : cameras_) {
         const auto held = pending_.find(name);
         if (held != pending_.end() && !held->second.empty()) {
           oldest = pipeline_progress::oldest_of(oldest, held->second.front().stamp_ns);
-          queue += static_cast<uint32_t>(held->second.size());
+          out.queue += static_cast<uint32_t>(held->second.size());
         }
         const auto seen = newest_image_ns_.find(name);
         const int64_t camera_newest = seen == newest_image_ns_.end() ? 0 : seen->second;
         // Every configured camera must have delivered before anything is final.
         newest = (name == cameras_.front()) ? camera_newest : std::min(newest, camera_newest);
       }
-      processed = static_cast<uint64_t>(keyframes_);
-      dropped = static_cast<uint64_t>(pending_gap_dropped_ + pending_expired_dropped_ +
-        pending_overflow_dropped_ + blur_rejected_);
+      out.processed = static_cast<uint64_t>(keyframes_);
+      out.discards = {
+        {"pose_gap", static_cast<uint64_t>(pending_gap_dropped_)},
+        {"pose_expired", static_cast<uint64_t>(pending_expired_dropped_)},
+        {"overflow", static_cast<uint64_t>(pending_overflow_dropped_)},
+        {"blur", static_cast<uint64_t>(blur_rejected_)}};
     }
     {
       std::lock_guard<std::mutex> guard(job_mutex_);
       for (const auto & job : jobs_) {oldest = pipeline_progress::oldest_of(oldest, job.stamp_ns);}
       oldest = pipeline_progress::oldest_of(oldest, inflight_stamp_ns_);
-      queue += static_cast<uint32_t>(jobs_.size()) + (worker_busy_ ? 1U : 0U);
-      dropped += static_cast<uint64_t>(jobs_dropped_);
+      out.queue += static_cast<uint32_t>(jobs_.size()) + (worker_busy_ ? 1U : 0U);
+      out.discards.push_back({"job_dropped", static_cast<uint64_t>(jobs_dropped_)});
     }
-    const int64_t watermark = watermark_.update(pipeline_progress::watermark_from(oldest, newest));
+    out.watermark = watermark_.update(pipeline_progress::watermark_from(oldest, newest));
+    return out;
+  }
+
+  void publish_progress()
+  {
+    const auto done = completion();
     progress_pub_->publish(pipeline_progress::make_progress(
-      now().nanoseconds(), "occupancy", grid_topic_, watermark, queue, processed, dropped,
-      watermark_.regressions()));
+      now().nanoseconds(), "occupancy", grid_topic_, done.watermark, done.queue, done.processed,
+      done.dropped(), watermark_.regressions()));
   }
 
   void publish()
   {
-    double stamp = 0.0;
     {
       std::lock_guard<std::mutex> guard(mutex_);
       if (!have_stamp_) {return;}
-      stamp = last_stamp_;
     }
+    // Fix completion BEFORE copying the content: a keyframe finished after the
+    // copy must not be claimed. The header stamp is taken with the content
+    // (it used to be read before the copy, so a keyframe landing in between
+    // went out under an older stamp).
+    const auto done = completion();
     std::vector<monoscale_occupancy::CameraGrid *> grids;
     for (const auto & name : cameras_) {grids.push_back(&grids_[name]);}
     // github_fixed publishes the repository's documented/scored 600x600
     // lattice. rolling publishes only the sparse tiles still retained around
     // the vehicle.
     monoscale_occupancy::Published published;
+    vision_lane_interfaces::msg::OccupancySnapshot snapshot;
     {
       std::lock_guard<std::mutex> guard(map_mutex_);
       published = settings_.fixed_extent ?
         monoscale_occupancy::publish(
           settings_, grids, monoscale_occupancy::legacy_window(settings_)) :
         monoscale_occupancy::publish(settings_, grids);
+      if (published.window.empty()) {return;}
+      const uint64_t sequence = contract_.published(done.watermark);
+      snapshot.meta = map_snapshot::fill_meta(
+        "occupancy", snapshot_session_, contract_.epoch(), contract_.content_version(), sequence,
+        contract_.content_max(), done.watermark, done.discards, contract_.late_changes());
     }
-    if (published.window.empty()) {return;}
     const cv::Mat & values = published.values;
 
     nav_msgs::msg::OccupancyGrid message;
-    message.header.stamp = rclcpp::Time(static_cast<int64_t>(stamp * 1e9));
+    message.header.stamp = snapshot.meta.content_max;
     message.header.frame_id = map_frame_;
     message.info.resolution = static_cast<float>(settings_.resolution);
     message.info.width = static_cast<uint32_t>(published.window.width);
@@ -741,6 +779,9 @@ private:
       else {++other;}
     }
     grid_pub_->publish(message);
+    snapshot.header = message.header;
+    snapshot.grid = std::move(message);
+    snapshot_pub_->publish(snapshot);
     {
       std::lock_guard<std::mutex> guard(mutex_);
       occupied_cells_ = occupied;
@@ -859,6 +900,9 @@ private:
   int64_t inflight_stamp_ns_ = 0;
   std::map<std::string, int64_t> newest_image_ns_;
   pipeline_progress::MonotonicWatermark watermark_;
+  map_snapshot::Contract contract_;  // guarded by map_mutex_
+  rclcpp::Publisher<vision_lane_interfaces::msg::OccupancySnapshot>::SharedPtr snapshot_pub_;
+  std::string snapshot_session_;
   rclcpp::Publisher<vision_lane_interfaces::msg::PipelineProgress>::SharedPtr progress_pub_;
   rclcpp::TimerBase::SharedPtr progress_timer_;
   std::thread worker_;

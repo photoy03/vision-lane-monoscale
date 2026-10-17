@@ -41,6 +41,8 @@ OUTPUT_TOPICS = (
     "/parking/cpp/map_fusion/status",
     "/perception/occupancy_grid_map",
     "/pipeline/progress",
+    "/mapping/snapshot/lanes",
+    "/mapping/snapshot/occupancy",
 )
 READY_BASE = ("tracking front on", "v5.2 C++ node:", "CPU line map:",
               "lane odom filter:")
