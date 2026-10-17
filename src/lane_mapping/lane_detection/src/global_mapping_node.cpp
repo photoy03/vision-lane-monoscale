@@ -732,7 +732,9 @@ class GlobalMappingNode : public rclcpp::Node {
       observation_pub_=create_publisher<vision_lane_interfaces::msg::RecoveredMarkingSegmentArray>(
         observation_topic_,rclcpp::QoS(200).reliable());
     else
-      odom_sub_=create_subscription<nav_msgs::msg::Odometry>(odom_topic_,rclcpp::SensorDataQoS(),std::bind(&GlobalMappingNode::on_odom,this,std::placeholders::_1));
+      // Reliable with a deep queue: the pose authority publishes IMU-fill poses
+      // in bursts, and a best-effort depth-5 queue dropped about a third of them.
+      odom_sub_=create_subscription<nav_msgs::msg::Odometry>(odom_topic_,rclcpp::QoS(200).reliable(),std::bind(&GlobalMappingNode::on_odom,this,std::placeholders::_1));
 
     if(!profile_path_.empty()){
       csv_.open(profile_path_);
