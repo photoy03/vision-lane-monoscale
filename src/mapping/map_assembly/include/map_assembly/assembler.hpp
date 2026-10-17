@@ -4,8 +4,8 @@
 // snapshots and picks the latest capture time T at which one snapshot of each
 // layer is exact (map_snapshot.hpp contract) and a pose exists.
 //
-//   strict:     max(content_max) <= T <= min(complete_through), T <= newest pose,
-//               T strictly increasing. Nothing else is ever published.
+//   strict:     same clock generation, max(content_max) <= T <= min(complete_through),
+//               T <= newest pose, T strictly increasing. Nothing else is ever published.
 //   incomplete: only when explicitly enabled and a layer has made no progress
 //               for stall_timeout: the healthy layer alone decides T and the
 //               stalled layer's latest snapshot is attached and named stale.
@@ -25,6 +25,7 @@ namespace map_assembly {
 struct Meta {
   std::string session;
   uint64_t epoch{0}, sequence{0};
+  uint64_t clock_generation{1};  // time line; layers combine only within one
   int64_t content_max{0}, complete_through{0};
   bool valid{false};
 };
@@ -38,11 +39,13 @@ class LayerHistory {
     std::shared_ptr<const Payload> payload;
   };
 
-  // Returns false when the snapshot starts a new time line (other session or
-  // epoch): the old history is dropped because it can never combine with it.
+  // Returns false when the snapshot starts a new time line (other session,
+  // epoch or clock generation): the old history is dropped because it can
+  // never combine with it.
   bool add(int64_t received_ns, const Meta &meta, std::shared_ptr<const Payload> payload) {
     bool same_line = true;
-    if (have_any_ && (meta.session != session_ || meta.epoch != epoch_)) {
+    if (have_any_ && (meta.session != session_ || meta.epoch != epoch_ ||
+                      meta.clock_generation != generation_)) {
       entries_.clear();
       last_complete_ = 0;
       same_line = false;
@@ -51,6 +54,7 @@ class LayerHistory {
     have_any_ = true;
     session_ = meta.session;
     epoch_ = meta.epoch;
+    generation_ = meta.clock_generation;
     if (meta.complete_through > last_complete_) {
       last_complete_ = meta.complete_through;
       last_advance_ns_ = received_ns;
@@ -83,7 +87,7 @@ class LayerHistory {
   std::optional<Entry> latest_;
   bool have_any_{false};
   std::string session_;
-  uint64_t epoch_{0};
+  uint64_t epoch_{0}, generation_{0};
   int64_t last_complete_{0}, last_advance_ns_{0};
   uint64_t invalid_{0}, timeline_resets_{0};
 };
@@ -103,6 +107,8 @@ std::optional<Choice> choose_strict(const LayerHistory<Lane> &lanes, const Layer
   const auto &b = occupancy.entries();
   for (size_t i = 0; i < a.size(); ++i) {
     for (size_t j = 0; j < b.size(); ++j) {
+      // Two time lines never make one map, whatever their intervals say.
+      if (a[i].meta.clock_generation != b[j].meta.clock_generation) continue;
       const int64_t lo = std::max(a[i].meta.content_max, b[j].meta.content_max);
       const int64_t hi = std::min({a[i].meta.complete_through, b[j].meta.complete_through, newest_pose_ns});
       if (lo > hi || hi <= last_t) continue;

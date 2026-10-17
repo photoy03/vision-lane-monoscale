@@ -2,6 +2,7 @@
 # (docs/STRUCTURE_KO.md "통합 지도"). Published only when T moves forward.
 std_msgs/Header header                 # stamp: T; frame: map frame
 uint64 sequence
+uint64 clock_generation                 # time line of T; both layers carry the same one
 # true (strict): every layer satisfies content_max <= T <= complete_through.
 # false only in the explicit incomplete mode; stale_layers names the layers
 # whose latest snapshot is used although it is not exact at T.

@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <csignal>
+#include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -38,6 +40,7 @@
 #include "monoscale_pose/pose_timeline.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
 #include "vision_lane_interfaces/map_snapshot.hpp"
+#include "vision_lane_interfaces/clock_generation.hpp"
 #include "vision_lane_interfaces/msg/occupancy_snapshot.hpp"
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
@@ -94,6 +97,7 @@ struct KeyframeJob
   monoscale_occupancy::Pose5 reference_pose;
   double stamp = 0.0;
   int64_t stamp_ns = 0;
+  uint64_t time_line = 1;   // clock generation it was made in
   std::vector<cv::Mat> source_grays;
   std::vector<monoscale_occupancy::Pose5> source_poses;
   monoscale_occupancy::Lens lens;
@@ -300,7 +304,7 @@ public:
       const std::string name = cameras_[i];
       image_subs_.push_back(create_subscription<sensor_msgs::msg::Image>(
         image_topics_[i], sensor,
-        [this, name](sensor_msgs::msg::Image::ConstSharedPtr m) {on_image(name, *m);}));
+        [this, name](sensor_msgs::msg::Image::ConstSharedPtr m) {check_time_line(); on_image(name, *m);}));
       info_subs_.push_back(create_subscription<sensor_msgs::msg::CameraInfo>(
         info_topics_[i], sensor,
         [this, name](sensor_msgs::msg::CameraInfo::ConstSharedPtr m) {on_info(name, *m);}));
@@ -309,25 +313,29 @@ public:
     reliable.reliable();
     odometry_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       odometry_topic_, reliable,
-      [this](nav_msgs::msg::Odometry::ConstSharedPtr m) {on_odometry(*m);});
+      [this](nav_msgs::msg::Odometry::ConstSharedPtr m) {check_time_line(); on_odometry(*m);});
 
     rclcpp::QoS latched(1);
     latched.reliable().transient_local();
     grid_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(grid_topic_, latched);
     timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / std::max(rate, 0.1)),
-      [this]() {publish();});
+      [this]() {check_time_line(); publish();});
     report_ = create_wall_timer(std::chrono::seconds(2), [this]() {report();});
     progress_pub_ = create_publisher<vision_lane_interfaces::msg::PipelineProgress>(
       pipeline_progress::kTopic, rclcpp::QoS(50).reliable());
-    progress_timer_ = create_wall_timer(std::chrono::milliseconds(200), [this]() {publish_progress();});
+    progress_timer_ = create_wall_timer(std::chrono::milliseconds(200), [this]() {check_time_line(); publish_progress();});
+    clock_generation_.attach(*this);
     snapshot_pub_ = create_publisher<vision_lane_interfaces::msg::OccupancySnapshot>(
       map_snapshot::kOccupancyTopic, rclcpp::QoS(5).reliable());
     snapshot_session_ = std::string(get_name()) + "-" + std::to_string(
       std::chrono::system_clock::now().time_since_epoch().count());
   }
 
-  ~SweepNode() override
+  ~SweepNode() override {stop();}
+
+  // Let the worker finish the keyframe it holds and end.
+  void stop()
   {
     {
       std::lock_guard<std::mutex> guard(job_mutex_);
@@ -362,6 +370,10 @@ private:
   {
     std::lock_guard<std::mutex> guard(mutex_);
     const int64_t stamp_ns = rclcpp::Time(message.header.stamp).nanoseconds();
+    if (clock_generation_.stale(stamp_ns, now().nanoseconds())) {
+      ++time_line_drops_;
+      return;
+    }
     if (message.header.frame_id != map_frame_ || message.child_frame_id != base_frame_) {
       ++odom_frame_rejected_;
       RCLCPP_WARN_THROTTLE(
@@ -441,6 +453,11 @@ private:
 
   void on_image(const std::string & name, const sensor_msgs::msg::Image & message)
   {
+    if (clock_generation_.stale(rclcpp::Time(message.header.stamp).nanoseconds(), now().nanoseconds())) {
+      std::lock_guard<std::mutex> guard(mutex_);
+      ++time_line_drops_;  // still in flight from before the clock jumped back
+      return;
+    }
     const double stamp = rclcpp::Time(message.header.stamp).seconds();
     const auto expected = camera_frames_.find(name);
     if (!std::isfinite(stamp) || stamp <= 0.0 ||
@@ -604,6 +621,7 @@ private:
     job.reference_pose = reference.pose;
     job.stamp = reference.stamp;
     job.stamp_ns = reference.stamp_ns;
+    job.time_line = time_line_;
     job.lens = scaled_lens(name);
     for (double offset : settings_.source_offsets) {
       const double want = reference.travelled + offset;
@@ -646,12 +664,15 @@ private:
       }
       const auto sweep_start = std::chrono::steady_clock::now();
       int64_t pruned = 0;
+      bool stale = false;  // made before the clock jumped back: not for this map
       monoscale_occupancy::SweepDiagnostics diagnostics;
       {
         // The worker is the only writer. Publishing takes this short-lived
         // map lock but image and odom callbacks never do, so a 300 ms GPU/CPU
         // sweep cannot make their queues spiral into a multi-second batch.
         std::lock_guard<std::mutex> guard(map_mutex_);
+        stale = job.time_line != time_line_;
+        if (!stale) {
         if (!sweeps_.count(job.camera)) {
           sweeps_.emplace(
             job.camera,
@@ -669,11 +690,15 @@ private:
         // Content time moves with the content, under the same lock.
         contract_.changed(job.stamp_ns);
         keep_version(job.camera, job.stamp_ns);
+        }
       }
       const double elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - sweep_start).count();
       {
         std::lock_guard<std::mutex> guard(mutex_);
+        if (stale || job.time_line != time_line_) {
+          ++time_line_drops_;
+        } else {
         pruned_tiles_ += pruned;
         last_sweep_ms_ = elapsed;
         last_judgeable_pixels_ = diagnostics.judgeable_pixels;
@@ -687,6 +712,7 @@ private:
         last_stamp_ = monoscale_occupancy::monotonic_evidence_stamp(
           last_stamp_, job.stamp);
         have_stamp_ = true;
+        }
       }
       {
         std::lock_guard<std::mutex> guard(job_mutex_);
@@ -694,6 +720,33 @@ private:
         inflight_stamp_ns_ = 0;
       }
     }
+  }
+
+  // The ROS clock jumped back (bag played again): start an empty map on the new
+  // time line. Normal runs never get here.
+  void check_time_line()
+  {
+    if (!clock_generation_.take_reset()) {return;}
+    std::scoped_lock all(mutex_, job_mutex_, map_mutex_);
+    time_line_ = clock_generation_.value();
+    pending_.clear();
+    rings_.clear();
+    next_at_.clear();
+    odometry_ = monoscale_pose::PoseTimeline{1.0e6, 4000};
+    jobs_.clear();
+    newest_image_ns_.clear();
+    versions_.clear();
+    for (const auto & name : cameras_) {
+      grids_[name].reset(settings_);
+      versions_[name].push_back({0, 0, clone_grid(grids_[name])});
+    }
+    watermark_ = pipeline_progress::MonotonicWatermark{};
+    contract_.reset();
+    have_stamp_ = false;
+    last_stamp_ = 0.0;
+    ++time_line_resets_;
+    RCLCPP_WARN(get_logger(), "ROS clock jumped back: occupancy map cleared, clock generation %lu",
+      static_cast<unsigned long>(time_line_));
   }
 
   // Keep this camera's grid as it stands after the keyframe at stamp_ns.
@@ -799,7 +852,7 @@ private:
     monoscale_occupancy::Published published;
     vision_lane_interfaces::msg::OccupancySnapshot snapshot;
     std::vector<std::shared_ptr<monoscale_occupancy::CameraGrid>> exact;  // empty: use `published`
-    int64_t exact_content_max = 0;
+    int64_t exact_content_max = 0, latest_content_max = 0;
     uint64_t exact_version = 0;
     bool exact_available = true;
     {
@@ -809,6 +862,8 @@ private:
           settings_, grids, monoscale_occupancy::legacy_window(settings_)) :
         monoscale_occupancy::publish(settings_, grids);
       if (published.window.empty()) {return;}
+      // The grid just computed holds every keyframe so far: its own time.
+      latest_content_max = contract_.content_max();
       // The snapshot is the map exact at complete_through: every camera's grid
       // as of its last keyframe at or before it. When no camera has swept past
       // it, that is exactly the grid just published.
@@ -834,14 +889,16 @@ private:
       }
       const uint64_t sequence = contract_.published(done.watermark);
       snapshot.meta = map_snapshot::fill_meta(
-        "occupancy", snapshot_session_, contract_.epoch(), exact_version, sequence,
+        "occupancy", snapshot_session_, time_line_, contract_.epoch(), exact_version, sequence,
         exact_content_max, done.watermark, done.discards, contract_.late_changes());
       trim_versions();
     }
     const cv::Mat & values = published.values;
 
     nav_msgs::msg::OccupancyGrid message;
-    message.header.stamp = snapshot.meta.content_max;
+    // The newest grid carries the newest content time; the snapshot, which may
+    // be assembled from older per-camera versions, carries its own below.
+    message.header.stamp = pipeline_progress::to_time(latest_content_max);
     message.header.frame_id = map_frame_;
     message.info.resolution = static_cast<float>(settings_.resolution);
     message.info.width = static_cast<uint32_t>(published.window.width);
@@ -926,7 +983,7 @@ private:
       "free_cost_cdf[120=%d 250=%d 500=%d 1000=%d 2000=%d 5000=%d 10000=%d] "
       "reject[odom_frame=%ld odom_stamp=%ld odom_value=%ld pose_gap=%ld pose_move=%ld pose_yaw=%ld pose_invalid=%ld image=%ld blur=%ld] "
       "pending_drop[gap=%ld expired=%ld overflow=%ld] stamp_regressions=%ld tiles_pruned=%ld "
-      "exact_snapshot[older_versions=%lu fallback=%lu]",
+      "exact_snapshot[older_versions=%lu fallback=%lu] time_line[generation=%lu resets=%ld drops=%ld]",
       keyframes_, placed_, held, ringed, odometry_.size(), queued,
       max_pending_keyframes_, busy ? 1 : 0, dropped, published_,occupied_cells_,free_cells_,
       unknown_cells_,other_cells_,last_sweep_ms_,last_sharpness_,
@@ -943,7 +1000,8 @@ private:
       pose_yaw_rejected_,pose_invalid_rejected_,image_frame_rejected_,
       blur_rejected_,pending_gap_dropped_,pending_expired_dropped_,
       pending_overflow_dropped_,stamp_regressions_,pruned_tiles_,
-      static_cast<unsigned long>(older_snapshots_), static_cast<unsigned long>(snapshot_fallbacks_));
+      static_cast<unsigned long>(older_snapshots_), static_cast<unsigned long>(snapshot_fallbacks_),
+      static_cast<unsigned long>(time_line_), time_line_resets_, time_line_drops_);
   }
 
   std::vector<std::string> cameras_;
@@ -1005,6 +1063,9 @@ private:
   std::map<std::string, int64_t> newest_image_ns_;
   pipeline_progress::MonotonicWatermark watermark_;
   map_snapshot::Contract contract_;  // guarded by map_mutex_
+  clock_generation::Tracker clock_generation_;
+  uint64_t time_line_ = 1;  // written under mutex_ + job_mutex_ + map_mutex_
+  int64_t time_line_resets_ = 0, time_line_drops_ = 0;  // under mutex_
   static constexpr size_t kMaxGridVersions = 64;
   std::map<std::string, std::deque<GridVersion>> versions_;  // guarded by map_mutex_
   uint64_t older_snapshots_ = 0, snapshot_fallbacks_ = 0;  // publisher thread only
@@ -1068,7 +1129,14 @@ int main(int argc, char ** argv)
   std::signal(SIGSEGV, on_fatal_signal);
   std::signal(SIGABRT, on_fatal_signal);
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<SweepNode>());
+  auto node = std::make_shared<SweepNode>();
+  rclcpp::spin(node);
+  // The exit -11 at shutdown (caught twice by the handler above) is in Fast DDS
+  // 2.6's discovery thread, EDP::unpairWriterProxy, while this node deletes its
+  // readers as the other nodes leave at the same moment. The node writes no
+  // files, so stop the worker and leave without tearing the DDS entities down.
+  node->stop();
   rclcpp::shutdown();
-  return 0;
+  std::fflush(nullptr);
+  std::_Exit(0);
 }

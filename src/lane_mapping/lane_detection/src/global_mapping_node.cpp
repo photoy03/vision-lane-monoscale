@@ -1027,6 +1027,7 @@ class GlobalMappingNode : public rclcpp::Node {
     last_odom_header_stamp_ns_=0;
     last_odom_arrival_steady_ns_=0;
     pending_last_map_stamp_ns_=0;
+    watermark_=pipeline_progress::MonotonicWatermark{};  // progress starts over on the new time line
     RCLCPP_WARN(get_logger(),"timestamp epoch reset (%s), epoch=%lu; old map cleared",reason,run_epoch_);
   }
 
@@ -1060,6 +1061,15 @@ class GlobalMappingNode : public rclcpp::Node {
         sync_queue_high_water_=std::max<uint64_t>(sync_queue_high_water_,pending_images_.size());
         return;
       }
+    }else if(owner_map_){
+      // Detection only (mapping_owner=map): no queue to reorder, but a clock that
+      // jumps back (bag played again) still starts a new epoch, so the lane map
+      // can tell the new time line from observations still in flight.
+      const int64_t stamp=rclcpp::Time(header.stamp).nanoseconds();
+      if(last_received_image_ns_>0&&
+         last_received_image_ns_-stamp>static_cast<int64_t>(clock_reset_threshold_sec_*1e9))
+        reset_time_epoch("image clock regression");
+      last_received_image_ns_=std::max(last_received_image_ns_,stamp);
     }
     if(message)process_image_message(message);
     else process_compressed_image(compressed_message);

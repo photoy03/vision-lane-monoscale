@@ -1,12 +1,20 @@
 # vision_support_ws
 
-기존 알고리즘·수치 설정을 유지한 기능별 소스 구성. 공통 매칭 backend는 아직 구현하지 않았다.
-workspace 이름은 유지했다.
+기존 알고리즘·수치 설정을 유지한 기능별 소스 구성. workspace 이름은 유지했다.
+
+시간 정합 백엔드가 있다(2026-10-17):
+- 각 노드가 진행 시각(/pipeline/progress)을 내고, 차선·점유지도가 시각 약속이 붙은 스냅샷(/mapping/snapshot/*)을 낸다.
+- 통합 노드 map_assembly가 두 지도가 모두 정확한 같은 시각 T의 묶음(/mapping/fused_map)과 그 그림을 낸다. `launch_fusion:=true`로 켜며, 기본은 꺼짐이다.
+- 각 노드 내부의 매칭·누적(차선 pose 매칭, 점유 sweep 등)은 여전히 각 노드가 한다. 백엔드는 그 결과의 시각을 맞춰 묶을 뿐이다.
+- 시간 정합이 맞다는 것은 지도 자체의 정확도와는 별개다.
+- ROS 시계가 되돌아가면(bag을 처음부터 다시 재생 등) clock_guard가 파이프라인 전체를 내린다.
+  `tools/run/supervise_launch.sh`로 실행하면 깨끗하게 다시 시작한다(docs/STRUCTURE_KO.md "시간 역행").
 
 ```text
 src/
   monoscale/                 core / tracker / odometry / pose / occupancy
   lane_mapping/              lane_detection / lane_map
+  mapping/                   map_assembly (통합 지도 + 그림)
   interfaces/                vision_lane_interfaces
   sensors/                   monoscale_ublox
   vision_mapping_bringup/

@@ -16,6 +16,7 @@
 
 #include "map_assembly/assembler.hpp"
 #include "monoscale_pose/pose_timeline.hpp"
+#include "vision_lane_interfaces/clock_generation.hpp"
 #include "vision_lane_interfaces/map_snapshot.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
 
@@ -27,7 +28,8 @@ using FusedMap = vision_lane_interfaces::msg::FusedMap;
 int64_t ns(const builtin_interfaces::msg::Time &t) { return int64_t(t.sec) * 1000000000LL + t.nanosec; }
 
 map_assembly::Meta meta_of(const vision_lane_interfaces::msg::MapSnapshotMeta &m) {
-  return {m.session_id, m.epoch, m.snapshot_sequence, ns(m.content_max), ns(m.complete_through), m.valid};
+  return {m.session_id, m.epoch, m.snapshot_sequence, m.clock_generation, ns(m.content_max),
+          ns(m.complete_through), m.valid};
 }
 }  // namespace
 
@@ -48,19 +50,25 @@ class MapAssembler : public rclcpp::Node {
     const auto snapshots = rclcpp::QoS(20).reliable();
     lane_sub_ = create_subscription<LaneSnapshot>(map_snapshot::kLaneTopic, snapshots,
       [this](LaneSnapshot::ConstSharedPtr m) {
-        lanes_.add(now().nanoseconds(), meta_of(m->meta), m);
+        check_time_line();
+        if (current(m->meta)) lanes_.add(now().nanoseconds(), meta_of(m->meta), m);
       });
     occupancy_sub_ = create_subscription<OccupancySnapshot>(map_snapshot::kOccupancyTopic, snapshots,
       [this](OccupancySnapshot::ConstSharedPtr m) {
-        occupancy_.add(now().nanoseconds(), meta_of(m->meta), m);
+        check_time_line();
+        if (current(m->meta)) occupancy_.add(now().nanoseconds(), meta_of(m->meta), m);
       });
     pose_sub_ = create_subscription<nav_msgs::msg::Odometry>(pose_topic, rclcpp::QoS(200).reliable(),
-      [this](nav_msgs::msg::Odometry::ConstSharedPtr m) { on_pose(*m); });
+      [this](nav_msgs::msg::Odometry::ConstSharedPtr m) { check_time_line(); on_pose(*m); });
     fused_pub_ = create_publisher<FusedMap>(output_topic, rclcpp::QoS(5).reliable());
     status_pub_ = create_publisher<std_msgs::msg::String>(output_topic + "/status", 10);
     progress_pub_ = create_publisher<vision_lane_interfaces::msg::PipelineProgress>(
       pipeline_progress::kTopic, rclcpp::QoS(50).reliable());
-    timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / tick_hz), [this] { tick(); });
+    timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / tick_hz), [this] {
+      check_time_line();
+      tick();
+    });
+    clock_generation_.attach(*this);
     RCLCPP_INFO(get_logger(), "map assembler: %s + %s + %s -> %s (history %.1fs, stall %.1fs, %s)",
       map_snapshot::kLaneTopic, map_snapshot::kOccupancyTopic, pose_topic.c_str(), output_topic.c_str(),
       history_ns_ * 1e-9, stall_ns_ * 1e-9, allow_incomplete_ ? "incomplete allowed" : "strict");
@@ -69,7 +77,31 @@ class MapAssembler : public rclcpp::Node {
  private:
   static int64_t seconds_ns(double s) { return std::isfinite(s) ? static_cast<int64_t>(s * 1e9) : -1; }
 
+  // Only snapshots of this node's time line enter the histories.
+  bool current(const vision_lane_interfaces::msg::MapSnapshotMeta &m) {
+    if (m.clock_generation == clock_generation_.value()) return true;
+    ++generation_mismatch_;
+    return false;
+  }
+
+  // The ROS clock jumped back (bag played again): the old time line's
+  // histories, poses and T go; the new one starts from nothing.
+  void check_time_line() {
+    if (!clock_generation_.take_reset()) return;
+    lanes_ = {};
+    occupancy_ = {};
+    poses_ = monoscale_pose::PoseTimeline{30.0};
+    last_t_ = 0;
+    ++time_line_resets_;
+    RCLCPP_WARN(get_logger(), "ROS clock jumped back: fused map restarts on clock generation %lu",
+      static_cast<unsigned long>(clock_generation_.value()));
+  }
+
   void on_pose(const nav_msgs::msg::Odometry &m) {
+    if (clock_generation_.stale(ns(m.header.stamp), now().nanoseconds())) {
+      ++pose_stale_;
+      return;
+    }
     const auto &q = m.pose.pose.orientation;
     const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
     if (!poses_.insert({ns(m.header.stamp), m.pose.pose.position.x, m.pose.pose.position.y, yaw}))
@@ -122,6 +154,7 @@ class MapAssembler : public rclcpp::Node {
     out.header.frame_id = lane.payload->header.frame_id;
     out.header.stamp = pipeline_progress::to_time(t);
     out.sequence = ++published_;
+    out.clock_generation = clock_generation_.value();
     out.complete = stale.empty();
     out.stale_layers = stale;
     out.lanes = *lane.payload;
@@ -152,6 +185,9 @@ class MapAssembler : public rclcpp::Node {
       << ",\"lane_history\":" << lanes_.entries().size() << ",\"occupancy_history\":" << occupancy_.entries().size()
       << ",\"lane_invalid\":" << lanes_.invalid() << ",\"occupancy_invalid\":" << occupancy_.invalid()
       << ",\"lane_complete_ns\":" << lanes_.last_complete() << ",\"occupancy_complete_ns\":" << occupancy_.last_complete()
+      << ",\"clock_generation\":" << clock_generation_.value()
+      << ",\"time_line_resets\":" << time_line_resets_ << ",\"generation_mismatch\":" << generation_mismatch_
+      << ",\"pose_stale\":" << pose_stale_
       << ",\"lane_timeline_resets\":" << lanes_.timeline_resets()
       << ",\"occupancy_timeline_resets\":" << occupancy_.timeline_resets()
       << ",\"newest_pose_ns\":" << newest_pose << ",\"pose_missing\":" << pose_missing_
@@ -169,6 +205,8 @@ class MapAssembler : public rclcpp::Node {
   double pose_max_gap_{0.25}, last_lane_age_ms_{0.0}, last_occupancy_age_ms_{0.0};
   bool allow_incomplete_{false};
   uint64_t published_{0}, pose_missing_{0}, pose_rejected_{0}, frame_mismatch_{0};
+  uint64_t time_line_resets_{0}, generation_mismatch_{0}, pose_stale_{0};
+  clock_generation::Tracker clock_generation_;
   std::string output_topic_;
   rclcpp::Subscription<LaneSnapshot>::SharedPtr lane_sub_;
   rclcpp::Subscription<OccupancySnapshot>::SharedPtr occupancy_sub_;

@@ -4,7 +4,11 @@
 # Snapshots with valid == false are for diagnosis only and must not be fused.
 string layer                              # "lane" | "occupancy"
 string session_id                         # producer instance; differs after a node restart
-uint64 epoch                              # map reset generation; never combine across epochs
+uint64 epoch                              # producer's own map reset count (diagnostic)
+# Backward jumps of the ROS clock seen by the producer (bag restart = +1). The
+# same /clock drives every node, so layers of one time line share this number;
+# never combine snapshots whose clock_generation differs.
+uint64 clock_generation
 uint64 content_version                    # +1 whenever the content may have changed (add, merge, prune, expire, reset)
 uint64 snapshot_sequence                  # +1 on every publish, also when only complete_through moved
 builtin_interfaces/Time content_max       # newest capture time of any input that changed this content

@@ -44,9 +44,16 @@ ADDED_EXPLICIT = {
 }
 
 
+# Nodes the reference never had. clock_guard only acts when the ROS clock jumps
+# back (it then stops the pipeline for a clean restart); it changes nothing else.
+ADDED_NODES = {'clock_guard'}
+
+
 def without_added(nodes):
     result = []
     for node in nodes:
+        if node.get('name') in ADDED_NODES:
+            continue
         node = dict(node)
         added = ADDED_EXPLICIT.get(node.get('name'), {})
         if isinstance(node.get('parameters'), dict) and added:

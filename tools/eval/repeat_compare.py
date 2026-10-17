@@ -139,10 +139,18 @@ def fused_metrics(fused: list, lanes: list, occupancy: list) -> dict[str, float]
 
     lane_keys = {key(msg.meta, lane_bytes(msg)) for _, msg in lanes}
     occupancy_keys = {key(msg.meta, bytes(msg.grid.data)) for _, msg in occupancy}
-    stamps = [_ns(msg.header.stamp) for _, msg in fused]
     m["fused_count"] = len(fused)
     m["fused_complete_ratio"] = sum(msg.complete for _, msg in fused) / len(fused)
-    m["fused_t_not_increasing"] = sum(b <= a for a, b in zip(stamps, stamps[1:]))
+    # T increases within one time line (producer session + clock generation); a
+    # bag played again starts a new one, and the bag stores both interleaved by
+    # arrival time.
+    by_line: dict[tuple, list] = {}
+    for _, msg in fused:
+        # A restarted pipeline starts generation 1 again; its producers are new sessions.
+        line = (msg.lanes.meta.session_id, getattr(msg, "clock_generation", 1))
+        by_line.setdefault(line, []).append(_ns(msg.header.stamp))
+    m["fused_t_not_increasing"] = sum(b <= a for line in by_line.values() for a, b in zip(line, line[1:]))
+    m["fused_clock_generations"] = len(by_line)
     violations = 0
     for _, msg in fused:
         t = _ns(msg.header.stamp)
@@ -151,6 +159,10 @@ def fused_metrics(fused: list, lanes: list, occupancy: list) -> dict[str, float]
             violations += any(not meta.valid or not (_ns(meta.content_max) <= t <= _ns(meta.complete_through))
                               for meta in layers)
     m["fused_contract_violations"] = violations
+    # Layers and the set must come from one time line (clock generation).
+    m["fused_generation_mismatch"] = sum(
+        len({getattr(msg, "clock_generation", 1), getattr(msg.lanes.meta, "clock_generation", 1),
+             getattr(msg.occupancy.meta, "clock_generation", 1)}) > 1 for _, msg in fused)
     m["fused_future_content"] = sum(
         any(_ns(meta.content_max) > _ns(msg.header.stamp) for meta in (msg.lanes.meta, msg.occupancy.meta))
         for _, msg in fused if msg.complete)
@@ -202,9 +214,18 @@ def _read_bag(reader, path: Path, topics: list[str]) -> dict[str, list]:
         return out
     reader.set_filter(rosbag2_py.StorageFilter(topics=wanted))
     classes = {topic: get_message(types[topic]) for topic in wanted}
+    unreadable: set[str] = set()
     while reader.has_next():
         topic, data, receive_ns = reader.read_next()
-        msg = deserialize_message(data, classes[topic])
+        if topic in unreadable:
+            continue
+        try:
+            msg = deserialize_message(data, classes[topic])
+        except Exception:  # recorded with an older message layout (Humble bags keep no definitions)
+            unreadable.add(topic)
+            out[topic] = []
+            print(f"note: {path}: {topic} has an older message layout; skipped", file=sys.stderr)
+            continue
         header = getattr(msg, "header", None)
         stamp = header.stamp.sec + header.stamp.nanosec * 1e-9 if header else receive_ns * 1e-9
         if topic in SNAPSHOT_TOPICS:  # their time lives in msg.meta; keep when they arrived
@@ -375,6 +396,22 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                                    data["/mapping/snapshot/occupancy"]))
             grids = data["/perception/occupancy_grid_map"]
             m["occupancy_grid_msgs"] = len(grids)
+            # The newest grid carries the newest content time, so its header never
+            # goes back (it did when it borrowed an older snapshot's time).
+            grid_stamps = [stamp for stamp, _ in grids]
+            m["occupancy_topic_stamp_backwards"] = sum(b < a for a, b in zip(grid_stamps, grid_stamps[1:]))
+            # A grid labelled with the time of an occupancy snapshot must hold that
+            # snapshot's map. The newest grid labelled with an older snapshot's time
+            # (newer content, older stamp) breaks this.
+            import hashlib
+            by_time: dict[int, set] = {}
+            for _, snap in data["/mapping/snapshot/occupancy"]:
+                by_time.setdefault(_ns(snap.meta.content_max), set()).add(hashlib.sha1(bytes(snap.grid.data)).hexdigest())
+            if by_time:
+                m["occupancy_topic_stamp_mislabeled"] = sum(
+                    _ns(msg.header.stamp) in by_time and
+                    hashlib.sha1(bytes(msg.data)).hexdigest() not in by_time[_ns(msg.header.stamp)]
+                    for _, msg in grids)
             if grids:
                 cells = grids[-1][1].data
                 m["grid_final_occupied_cells"] = sum(v >= 65 for v in cells)

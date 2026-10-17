@@ -99,6 +99,36 @@ complete_through 이전 것은 1개만 남기고 정리)를 모아 조립한다.
   두 토픽을 따로 그리는 RViz와 달리 항상 같은 묶음이다. 위치·yaw 오차, 차선 중복은 그대로 보인다(고치지 않는다).
 - 보기: `ros2 run rqt_image_view rqt_image_view /mapping/fused_map/image`
 
+## 시간 역행 (bag을 다시 재생, sim time 되감기)
+
+clock generation = 노드가 본 ROS 시계의 뒤로 점프(1 s 이상) 횟수 + 1(vision_lane_interfaces/clock_generation.hpp).
+모든 노드가 같은 /clock을 보므로 같은 시간축의 노드는 같은 번호를 갖는다. 정상 실행(시계가 뒤로 가지 않음)에서는 아무것도 바뀌지 않는다.
+
+| 노드 | 점프 뒤 동작 |
+|---|---|
+| lane_detection (map 모드) | 영상 시각이 clock_reset_threshold_sec(0.5 s) 넘게 되돌아가면 epoch +1, 내부 추적·지도 초기화(detection 모드는 원래부터 함) |
+| lane_map_fusion | 지도·mapper·완결 시각 초기화, epoch ≤ 이전 epoch인 관측과 시계보다 1 s 넘게 미래 시각의 입력은 버림(옛 시간축에서 날아오던 것) |
+| occupancy (sweep_node) | 보류 영상·ring·작업·격자·버전·pose 기록·완결 시각 초기화. 점프 전에 만든 keyframe 작업은 반영하지 않음. 미래 시각 입력 버림 |
+| map_assembler | 이력·pose·T 초기화. 자기 clock generation과 같은 스냅샷만 받고, 층끼리도 같은 generation만 묶음 |
+| feature_tracker, monoscale_odometry | 처리하지 않음(상류 코드). odometry는 이전 추정 상태를 이어 간다 |
+| odom_stabilizer | 처리하지 않음. 새 raw odom을 이전 마지막 시각을 넘을 때까지 nonincreasing_stamp로 거부하고, 그 뒤 위치 불연속을 translation_jump로 거부한다 |
+
+재생 시험(timeline_restart_2: 110 s 재생 → 처음부터 다시 150 s):
+- 지도 노드 4개가 모두 초기화됐다.
+- 두 번째 시간축에서 통합 지도가 다시 나왔다(40개, 위반·세대 섞임 0).
+- 다만 pose 경로가 위처럼 막혀서, 이전 재생이 멈춘 시각을 지난 뒤에야 다시 나왔다.
+- 그래서 결정(2026-10-18): 시계 역행 = 파이프라인 전체 재시작.
+  - clock_guard 노드(vision_mapping_bringup/scripts/clock_guard.py, 항상 실행)가 ROS 시계가 1 s 넘게 뒤로 가면 종료 코드 3으로 끝낸다.
+  - 기존 "노드 하나가 끝나면 전체 종료" 가드가 파이프라인을 내린다.
+  - 다시 띄우는 것은 실행한 쪽이 맡는다: `bash tools/run/supervise_launch.sh <launch 파일> <인수...>`(Ctrl-C로 끝냄), systemd, 사람.
+  - 확인 검사는 steady 타이머로 한다. ROS 시간 타이머는 시계가 이전 위치를 따라잡을 때까지 다시 울리지 않기 때문이다.
+  - 지도 노드의 자체 초기화(위 표)는 재시작 전 짧은 순간에 섞임을 막는 이중 안전장치로 남긴다.
+
+## sweep_node 종료
+
+- 종료 시 가끔 나던 exit −11은 Fast DDS 2.6.12(Humble 최신)의 탐색 스레드(EDP::unpairWriterProxy)에서 났다. sweep_node가 구독을 지우는 순간 다른 노드들도 동시에 빠질 때의 경합이다(backtrace 처리기로 2회 포착).
+- sweep_node는 종료 파일을 쓰지 않으므로, 작업 스레드만 끝내고 DDS 객체 정리 없이 나간다(std::_Exit). 종료 동작 말고는 바뀌는 것이 없다.
+
 ## launch
 
 | 파일 | 범위 |

@@ -104,6 +104,10 @@ def _launch(context, group='all'):
     if ctx.shadow:
         nodes.append(monoscale.shadow_odometry(ctx))
     nodes += fusion.nodes(ctx)
+    # A clock that jumps back (bag played again) cannot be continued by the pose
+    # path, so the pipeline stops and is started again clean (guards below).
+    nodes.append(make_node(package='vision_mapping_bringup', executable='clock_guard.py', name='clock_guard',
+                           output='screen', parameters=[{'use_sim_time': ctx.sim_time}]))
 
     nodes = [node for node in nodes if group == 'all' or selected[id(node)] == group]
     # Do not keep accumulating against a restarted pose authority or dead input.

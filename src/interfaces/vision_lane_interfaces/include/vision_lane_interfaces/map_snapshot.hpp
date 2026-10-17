@@ -79,13 +79,15 @@ class Contract {
 };
 
 inline vision_lane_interfaces::msg::MapSnapshotMeta fill_meta(
-    const std::string &layer, const std::string &session_id, uint64_t epoch, uint64_t content_version,
+    const std::string &layer, const std::string &session_id, uint64_t clock_generation, uint64_t epoch,
+    uint64_t content_version,
     uint64_t sequence, int64_t content_max_ns, int64_t complete_through_ns,
     const std::vector<std::pair<std::string, uint64_t>> &discards, uint64_t late_changes) {
   vision_lane_interfaces::msg::MapSnapshotMeta meta;
   meta.layer = layer;
   meta.session_id = session_id;
   meta.epoch = epoch;
+  meta.clock_generation = clock_generation;
   meta.content_version = content_version;
   meta.snapshot_sequence = sequence;
   meta.content_max = pipeline_progress::to_time(std::max<int64_t>(content_max_ns, 0));

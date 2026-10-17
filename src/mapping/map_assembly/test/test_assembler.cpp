@@ -8,8 +8,9 @@ using map_assembly::Meta;
 
 namespace {
 constexpr int64_t s = 1'000'000'000;
-Meta meta(int64_t content_max, int64_t complete, uint64_t epoch = 1, const char *session = "a") {
-  return {session, epoch, 0, content_max, complete, complete > 0 && content_max <= complete};
+Meta meta(int64_t content_max, int64_t complete, uint64_t epoch = 1, const char *session = "a",
+          uint64_t generation = 1) {
+  return {session, epoch, 0, generation, content_max, complete, complete > 0 && content_max <= complete};
 }
 auto payload(int v) { return std::make_shared<const int>(v); }
 }  // namespace
@@ -59,6 +60,22 @@ int main() {
     assert(!lanes.stalled(16 * s, 5 * s));
     // A paused bag stops the ROS clock: no time passes, so no stall.
     assert(!lanes.stalled(16 * s, 5 * s));
+  }
+  {  // Layers of two time lines (clock generations) never pair, even when their intervals overlap.
+    LayerHistory<int> lanes, occupancy;
+    lanes.add(12 * s, meta(10 * s, 11 * s, 1, "a", 2), payload(1));
+    occupancy.add(12 * s, meta(10 * s, 11 * s, 1, "b", 1), payload(2));
+    assert(!map_assembly::choose_strict(lanes, occupancy, 20 * s, 0));
+    occupancy.add(12 * s, meta(10 * s, 11 * s, 1, "b", 2), payload(3));   // same line now
+    assert(occupancy.timeline_resets() == 1);
+    assert(map_assembly::choose_strict(lanes, occupancy, 20 * s, 0));
+  }
+  {  // After a reset (a fresh history and last_t 0) an earlier time line is accepted again.
+    LayerHistory<int> lanes, occupancy;
+    lanes.add(1 * s, meta(1 * s, 2 * s, 1, "a", 2), payload(1));
+    occupancy.add(1 * s, meta(1 * s, 2 * s, 1, "b", 2), payload(2));
+    const auto c = map_assembly::choose_strict(lanes, occupancy, 3 * s, 0);
+    assert(c && c->t == 2 * s);
   }
   {  // Incomplete mode helper: one layer alone, still exact for that layer and bounded by pose.
     LayerHistory<int> lanes;

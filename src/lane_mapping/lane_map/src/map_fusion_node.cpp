@@ -34,6 +34,7 @@ using Recovered = vision_lane_interfaces::msg::RecoveredMarkingSegmentArray;
 #include "lane_map/lane_mapper.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
 #include "vision_lane_interfaces/map_snapshot.hpp"
+#include "vision_lane_interfaces/clock_generation.hpp"
 #include <vision_lane_interfaces/msg/lane_map_snapshot.hpp>
 
 using Array = vision_lane_interfaces::msg::MarkingSegmentArray;
@@ -120,20 +121,21 @@ class MapFusionNode : public rclcpp::Node {
         throw std::invalid_argument("recovered input requires session, calibration, and source-frame IDs");
       if(mapper_enabled_) start_mapper();
       else recovered_subscription_=create_subscription<Recovered>(recovered_topic_,rclcpp::QoS(10).reliable(),
-        [this](Recovered::ConstSharedPtr m){on_recovered(*m);});
+        [this](Recovered::ConstSharedPtr m){check_time_line();on_recovered(*m);});
     }else{
-      subscription_=create_subscription<Array>(input_topic,rclcpp::SensorDataQoS(),[this](Array::ConstSharedPtr m){on_vectors(*m);});
+      subscription_=create_subscription<Array>(input_topic,rclcpp::SensorDataQoS(),[this](Array::ConstSharedPtr m){check_time_line();on_vectors(*m);});
     }
     const auto occupancy_topic=declare_parameter<std::string>(
       "occupancy_topic","/perception/occupancy_grid_map");
     auto map_qos=rclcpp::QoS(1).reliable().transient_local();
     occupancy_subscription_=create_subscription<nav_msgs::msg::OccupancyGrid>(
-      occupancy_topic,map_qos,[this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr m){on_occupancy(*m);});
-    timer_=create_wall_timer(std::chrono::duration<double>(1./hz),[this]{publish_map();});
+      occupancy_topic,map_qos,[this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr m){check_time_line();on_occupancy(*m);});
+    timer_=create_wall_timer(std::chrono::duration<double>(1./hz),[this]{check_time_line();publish_map();});
     output_vector_topic_=vector_topic;
     progress_pub_=create_publisher<vision_lane_interfaces::msg::PipelineProgress>(
       pipeline_progress::kTopic,rclcpp::QoS(50).reliable());
-    progress_timer_=create_wall_timer(std::chrono::milliseconds(200),[this]{publish_progress();});
+    progress_timer_=create_wall_timer(std::chrono::milliseconds(200),[this]{check_time_line();publish_progress();});
+    clock_generation_.attach(*this);
     snapshot_pub_=create_publisher<vision_lane_interfaces::msg::LaneMapSnapshot>(
       map_snapshot::kLaneTopic,rclcpp::QoS(5).reliable());
     snapshot_session_=std::string(get_name())+"-"+std::to_string(
@@ -224,16 +226,20 @@ class MapFusionNode : public rclcpp::Node {
       if(std::filesystem::exists(mapper_summary_path_)) throw std::runtime_error("refusing to overwrite pending summary");
     }
     observation_subscription_=create_subscription<Recovered>(observation_topic_,rclcpp::QoS(200).reliable(),
-      [this](Recovered::ConstSharedPtr m){on_observation(*m);});
+      [this](Recovered::ConstSharedPtr m){check_time_line();on_observation(*m);});
     odom_subscription_=create_subscription<nav_msgs::msg::Odometry>(odom_topic_,rclcpp::QoS(200).reliable(),
-      [this](nav_msgs::msg::Odometry::ConstSharedPtr m){on_odom(*m);});
-    mapper_timer_=create_wall_timer(std::chrono::milliseconds(5),[this]{drain_mapper();});
+      [this](nav_msgs::msg::Odometry::ConstSharedPtr m){check_time_line();on_odom(*m);});
+    mapper_timer_=create_wall_timer(std::chrono::milliseconds(5),[this]{check_time_line();drain_mapper();});
     RCLCPP_INFO(get_logger(),"lane mapper owns pose matching and world tracking: %s + %s",
       observation_topic_.c_str(),odom_topic_.c_str());
   }
   void on_observation(const Recovered& msg) {
     std::vector<lane_mapping::MapperEvent> events;
     const int64_t stamp=ns(msg.header.stamp);
+    if((stale_epoch_>0&&msg.epoch<=stale_epoch_)||clock_generation_.stale(stamp,now().nanoseconds())) {
+      ++time_line_drops_;  // still in flight from the time line before the clock jumped back
+      return;
+    }
     if(msg.session_id!=expected_session_id_||msg.epoch==0||msg.observation_id==0||
        msg.source_frame!=expected_source_frame_||msg.calibration_id!=expected_calibration_id_||
        msg.header.frame_id!=input_frame_||stamp<=0||
@@ -273,6 +279,7 @@ class MapFusionNode : public rclcpp::Node {
        !std::isfinite(norm)||norm<1e-9||!std::isfinite(msg.pose.pose.position.x)||
        !std::isfinite(msg.pose.pose.position.y)) {++mapper_odom_rejected_;return;}
     const double x=q.x/norm,y=q.y/norm,z=q.z/norm,w=q.w/norm;
+    if(clock_generation_.stale(stamp,now().nanoseconds())) {++time_line_drops_;return;}
     const double yaw=std::atan2(2*(w*z+x*y),1-2*(y*y+z*z));
     const double c=std::cos(yaw),s=std::sin(yaw);
     const auto safe=[](double v){return std::isfinite(v)&&v>0.0?v:0.0;};
@@ -478,6 +485,7 @@ class MapFusionNode : public rclcpp::Node {
     if(!recovery_session_.empty()&&recovery_session_==recovered.session_id&&recovered.epoch<recovery_epoch_) {
       reject("STALE_EPOCH");return;
     }
+    if(stale_epoch_>0&&recovered.epoch<=stale_epoch_) {++time_line_drops_;reject("STALE_TIME_LINE");return;}
     if(recovery_session_.empty()||recovery_session_!=recovered.session_id||recovery_epoch_!=recovered.epoch) {
       if(!recovery_session_.empty()) {
         ++recovery_epoch_resets_;
@@ -512,6 +520,7 @@ class MapFusionNode : public rclcpp::Node {
   void on_occupancy(const nav_msgs::msg::OccupancyGrid& grid) {
     if(!occupancy_filter_enabled_) return;
     const int64_t stamp=ns(grid.header.stamp);
+    if(clock_generation_.stale(stamp,now().nanoseconds())) {++time_line_drops_;return;}
     if(stamp<=last_occupancy_stamp_||grid.header.frame_id!=map_frame_) {
       if(grid.header.frame_id!=map_frame_) ++occupancy_frame_rejected_;
       return;
@@ -555,6 +564,7 @@ class MapFusionNode : public rclcpp::Node {
     process.input_segments=static_cast<int>(m.segments.size());
     const auto& pose=m.observer_pose;
     const int64_t stamp=ns(m.header.stamp);
+    if(!recovered&&clock_generation_.stale(stamp,now().nanoseconds())) {++time_line_drops_;process.outcome="REJECTED";process.reason="STALE_TIME_LINE";return process;}
     if(!recovered&&!mapper_enabled_) newest_input_stamp_=std::max(newest_input_stamp_,stamp);
     if(stamp<=last_received_stamp_||stamp<=0) {++bad_stamp_;process.outcome="REJECTED";process.reason="INVALID_OR_NONMONOTONIC_STAMP";return process;}
     if(m.header.frame_id!=input_frame_||std::find(cameras_.begin(),cameras_.end(),m.camera_id)==cameras_.end()||!m.pose_valid||
@@ -717,6 +727,7 @@ class MapFusionNode : public rclcpp::Node {
       <<",\"occupancy_pruned_landmarks\":"<<occupancy_pruned_landmarks_
       <<",\"occupancy_pruned_support_bins\":"<<occupancy_pruned_support_bins_
       <<",\"occupancy_frame_rejected\":"<<occupancy_frame_rejected_
+      <<",\"time_line_resets\":"<<time_line_resets_<<",\"time_line_drops\":"<<time_line_drops_
       <<",\"last_map_stamp_ns\":"<<ns(last_header_.stamp)<<",\"fusion_last_ms\":"<<fusion_ms_
       <<",\"render_publish_last_ms\":"<<render_ms
       <<",\"render_suppressed_duplicates\":"<<rendered.suppressed_duplicates
@@ -730,6 +741,19 @@ class MapFusionNode : public rclcpp::Node {
       keyframes_,bank_.landmarks().size(),segments.size(),merged_,ambiguous_,bad_pose_,bad_stamp_,
       pruned_landmarks_,pruned_support_bins_,occupancy_pruned_landmarks_,occupancy_pruned_support_bins_);
   }
+  // The ROS clock jumped back (bag played again): everything on the old time
+  // line goes, and inputs of the old epochs still in flight are dropped.
+  void check_time_line() {
+    if(!clock_generation_.take_reset()) return;
+    bank_.reset();mapper_.reset();last_pose_.reset();last_header_=std_msgs::msg::Header{};
+    last_received_stamp_=0;last_occupancy_stamp_=0;recovery_identities_.clear();
+    newest_input_stamp_=0;watermark_=pipeline_progress::MonotonicWatermark{};contract_.reset();
+    depends_on_occupancy_=false;occupancy_content_max_used_=0;
+    stale_epoch_=std::max(mapper_epoch_,recovery_epoch_);
+    ++time_line_resets_;
+    RCLCPP_WARN(get_logger(),"ROS clock jumped back: lane map cleared, clock generation %lu, inputs of epoch <= %lu dropped",
+      clock_generation_.value(),stale_epoch_);
+  }
   void publish_snapshot(const Array& lanes,int64_t complete) {
     std::vector<std::pair<std::string,uint64_t>> discards;
     if(mapper_enabled_) {
@@ -742,7 +766,8 @@ class MapFusionNode : public rclcpp::Node {
       {"metadata",recovery_metadata_rejected_},{"duplicate_identity",recovery_duplicates_}});
     vision_lane_interfaces::msg::LaneMapSnapshot out;
     const uint64_t sequence=contract_.published(complete);
-    out.meta=map_snapshot::fill_meta("lane",snapshot_session_,contract_.epoch(),contract_.content_version(),
+    out.meta=map_snapshot::fill_meta("lane",snapshot_session_,clock_generation_.value(),contract_.epoch(),
+      contract_.content_version(),
       sequence,contract_.content_max(),complete,discards,contract_.late_changes());
     out.meta.depends_on_occupancy=depends_on_occupancy_;
     out.meta.occupancy_content_max_used=pipeline_progress::to_time(occupancy_content_max_used_);
@@ -753,6 +778,8 @@ class MapFusionNode : public rclcpp::Node {
   lane_fusion::RegisteredBank bank_;
   lane_mapping::LaneMapper mapper_;
   map_snapshot::Contract contract_;
+  clock_generation::Tracker clock_generation_;
+  uint64_t stale_epoch_{0},time_line_resets_{0},time_line_drops_{0};
   rclcpp::Publisher<vision_lane_interfaces::msg::LaneMapSnapshot>::SharedPtr snapshot_pub_;
   std::string snapshot_session_;
   bool depends_on_occupancy_{false};
