@@ -49,6 +49,12 @@ def angle_deg(a: float, b: float) -> float:
     return abs(math.degrees(math.atan2(math.sin(a - b), math.cos(a - b))))
 
 
+# Message layout of the map snapshot / fused topics (runner manifest
+# "snapshot_format"). Runs recorded before it may be skipped; runs recorded with
+# it must read, or the comparison would silently lose its subject.
+SNAPSHOT_FORMAT = 2
+UNREADABLE = "__unreadable_topics__"
+
 SNAPSHOT_TOPICS = ("/mapping/snapshot/lanes", "/mapping/snapshot/occupancy", "/mapping/fused_map")
 
 
@@ -231,6 +237,7 @@ def _read_bag(reader, path: Path, topics: list[str]) -> dict[str, list]:
         if topic in SNAPSHOT_TOPICS:  # their time lives in msg.meta; keep when they arrived
             stamp = receive_ns * 1e-9
         out[topic].append((stamp, msg))
+    out[UNREADABLE] = sorted(unreadable)
     return out
 
 
@@ -345,6 +352,14 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                   "/pipeline/progress", *SNAPSHOT_TOPICS]
         data = read_bag(outputs, topics)
         if data is not None:
+            skipped = data.pop(UNREADABLE, [])
+            if skipped and manifest.get("snapshot_format", 0) >= SNAPSHOT_FORMAT:
+                raise SystemExit(f"{run}: recorded with snapshot_format {manifest['snapshot_format']} "
+                                 f"but unreadable: {', '.join(skipped)}")
+            m["unreadable_topics"] = len(skipped)
+            # What the contract checks below actually looked at.
+            for topic in SNAPSHOT_TOPICS + ("/perception/occupancy_grid_map",):
+                m["read_" + topic.strip("/").replace("/", "_") + "_msgs"] = len(data[topic])
             m.update(rate_stats([t for t, _ in data["/localization/monoscale_raw"]], "raw_odom"))
             m.update(rate_stats([t for t, _ in data["/localization/kinematic_state"]], "pose"))
             pose = pose_series(data["/localization/kinematic_state"])
@@ -408,6 +423,8 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
             for _, snap in data["/mapping/snapshot/occupancy"]:
                 by_time.setdefault(_ns(snap.meta.content_max), set()).add(hashlib.sha1(bytes(snap.grid.data)).hexdigest())
             if by_time:
+                comparable = sum(_ns(msg.header.stamp) in by_time for _, msg in grids)
+                m["occupancy_topic_stamp_comparable_ratio"] = comparable / len(grids) if grids else 0.0
                 m["occupancy_topic_stamp_mislabeled"] = sum(
                     _ns(msg.header.stamp) in by_time and
                     hashlib.sha1(bytes(msg.data)).hexdigest() not in by_time[_ns(msg.header.stamp)]

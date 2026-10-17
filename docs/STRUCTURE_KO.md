@@ -101,8 +101,10 @@ complete_through 이전 것은 1개만 남기고 정리)를 모아 조립한다.
 
 ## 시간 역행 (bag을 다시 재생, sim time 되감기)
 
-clock generation = 노드가 본 ROS 시계의 뒤로 점프(1 s 이상) 횟수 + 1(vision_lane_interfaces/clock_generation.hpp).
-모든 노드가 같은 /clock을 보므로 같은 시간축의 노드는 같은 번호를 갖는다. 정상 실행(시계가 뒤로 가지 않음)에서는 아무것도 바뀌지 않는다.
+clock generation = 그 노드가 본 ROS 시계의 뒤로 점프(1 s 이상) 횟수 + 1(vision_lane_interfaces/clock_generation.hpp).
+번호는 노드마다 따로 센다. 그래서 "모든 노드가 같은 시점에 시작해 같은 역행을 관찰한 경우에만" 일치한다.
+노드 하나만 재시작하거나 늦게 합류하면 달라질 수 있어, 노드 단독 재시작은 지원하지 않는 규약이다(운영은 전체 재시작).
+정상 실행(시계가 뒤로 가지 않음)에서는 아무것도 바뀌지 않는다.
 
 | 노드 | 점프 뒤 동작 |
 |---|---|
@@ -121,13 +123,20 @@ clock generation = 노드가 본 ROS 시계의 뒤로 점프(1 s 이상) 횟수 
   - clock_guard 노드(vision_mapping_bringup/scripts/clock_guard.py, 항상 실행)가 ROS 시계가 1 s 넘게 뒤로 가면 종료 코드 3으로 끝낸다.
   - 기존 "노드 하나가 끝나면 전체 종료" 가드가 파이프라인을 내린다.
   - 다시 띄우는 것은 실행한 쪽이 맡는다: `bash tools/run/supervise_launch.sh <launch 파일> <인수...>`(Ctrl-C로 끝냄), systemd, 사람.
+  - `ros2 launch`의 종료 코드로는 이유를 알 수 없다(가드 종료 뒤 0). 그래서 supervisor는 실행마다 고유한 VISION_RUN_ID를 주고,
+    clock_guard가 $VISION_RESTART_REQUEST_DIR/<실행 ID>.restart를 원자적으로(임시 파일 → rename) 남긴다.
+  - supervisor는 그 파일이 방금 실행의 ID를 담고 있을 때만 다시 띄운다. 그 밖의 종료(노드 종료, 설정 오류)는 멈추고 이유를 출력한다.
+  - 600 s 안에 5회를 넘게 재시작하면 멈추고, 대기 중 Ctrl-C도 처리한다(tests/test_supervise_launch.py).
+  - 전체 재시작은 무중단 복구가 아니다. 실차에서는 pose 공백이 생기고, 지도와 좌표 원점이 새로 시작한다.
   - 확인 검사는 steady 타이머로 한다. ROS 시간 타이머는 시계가 이전 위치를 따라잡을 때까지 다시 울리지 않기 때문이다.
   - 지도 노드의 자체 초기화(위 표)는 재시작 전 짧은 순간에 섞임을 막는 이중 안전장치로 남긴다.
 
 ## sweep_node 종료
 
-- 종료 시 가끔 나던 exit −11은 Fast DDS 2.6.12(Humble 최신)의 탐색 스레드(EDP::unpairWriterProxy)에서 났다. sweep_node가 구독을 지우는 순간 다른 노드들도 동시에 빠질 때의 경합이다(backtrace 처리기로 2회 포착).
-- sweep_node는 종료 파일을 쓰지 않으므로, 작업 스레드만 끝내고 DDS 객체 정리 없이 나간다(std::_Exit). 종료 동작 말고는 바뀌는 것이 없다.
+- 종료 시 가끔 나던 exit −11은 Fast DDS 2.6.12(Humble 최신)의 탐색 스레드(EDP::unpairWriterProxy)에서 멈췄다(backtrace 처리기로 2회 포착).
+  sweep_node가 구독을 지우는 순간 다른 노드들도 동시에 빠질 때의 경합으로 "의심"한다. backtrace만으로 우리 코드의 영향(메모리 손상 등)을 완전히 배제하지는 못한다.
+- 대응은 근본 해결이 아니라 우회다: sweep_node는 종료 파일을 쓰지 않으므로, 작업 스레드만 끝내고 DDS 객체 정리 없이 나간다(std::_Exit).
+  재현을 억제했다(5/5 정상 종료). 다만 정상 소멸 경로를 검증한 것은 아니고, 장시간 반복 재시작까지 보장하지는 않는다. 종료 동작 말고는 바뀌는 것이 없다.
 
 ## launch
 

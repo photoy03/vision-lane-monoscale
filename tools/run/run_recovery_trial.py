@@ -381,6 +381,8 @@ def main() -> int:
         "replayed_topics": list(TOPICS),
         "recorded_output_topics": list(OUTPUT_TOPICS) if args.record_outputs == "on" else [],
         "playback_rate": args.playback_rate,
+        # Layout of /mapping/snapshot/* and /mapping/fused_map (clock_generation added).
+        "snapshot_format": 2,
         "rmw_implementation": env.get("RMW_IMPLEMENTATION", "") or "default(rmw_fastrtps_cpp)",
         "outputs_compression": args.outputs_compression if args.record_outputs == "on" else None,
         "ros_domain_id": args.domain_id,

@@ -8,7 +8,8 @@
 - 각 노드 내부의 매칭·누적(차선 pose 매칭, 점유 sweep 등)은 여전히 각 노드가 한다. 백엔드는 그 결과의 시각을 맞춰 묶을 뿐이다.
 - 시간 정합이 맞다는 것은 지도 자체의 정확도와는 별개다.
 - ROS 시계가 되돌아가면(bag을 처음부터 다시 재생 등) clock_guard가 파이프라인 전체를 내린다.
-  `tools/run/supervise_launch.sh`로 실행하면 깨끗하게 다시 시작한다(docs/STRUCTURE_KO.md "시간 역행").
+  `tools/run/supervise_launch.sh`로 실행하면 그 요청이 있을 때만 깨끗하게 다시 시작한다. 무중단 복구가 아니다(pose 공백, 지도 새로 시작).
+  자세한 내용은 docs/STRUCTURE_KO.md "시간 역행".
 
 ```text
 src/
