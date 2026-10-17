@@ -1,4 +1,4 @@
-#include "pending_lane_observations.hpp"
+#include "lane_map/pending_lane_observations.hpp"
 
 #include <cassert>
 #include <cstdint>

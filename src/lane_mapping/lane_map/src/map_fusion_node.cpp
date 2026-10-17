@@ -19,6 +19,8 @@
 #include <std_msgs/msg/string.hpp>
 #include <geometry_msgs/msg/pose2_d.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <filesystem>
 #include <vector>
 #include <vision_lane_interfaces/msg/recovered_marking_segment_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -29,17 +31,22 @@ using Recovered = vision_lane_interfaces::msg::RecoveredMarkingSegmentArray;
 #include <opencv2/imgproc.hpp>
 #include "lane_map/registration.hpp"
 #include "lane_map/recovery_identity.hpp"
+#include "lane_map/lane_mapper.hpp"
 
 using Array = vision_lane_interfaces::msg::MarkingSegmentArray;
 using Steady = std::chrono::steady_clock;
 
 class MapFusionNode : public rclcpp::Node {
  public:
-  MapFusionNode():Node("lane_map_fusion"),bank_(settings()) {
+  MapFusionNode():Node("lane_map_fusion"),bank_(settings()),mapper_(mapper_settings()) {
     input_frame_=declare_parameter<std::string>("input_frame","base_link");
     map_frame_=declare_parameter<std::string>("map_frame","lane_map");
     camera_=declare_parameter<std::string>("camera_id","front");
     recovered_input_enabled_=declare_parameter<bool>("recovered_input_enabled",false);
+    // mapping_owner=map: lane_detection only detects; this node attaches poses,
+    // runs the world-frame tracker and feeds the same recovered path internally.
+    mapper_enabled_=declare_parameter<bool>("mapper_enabled",false);
+    if(mapper_enabled_) recovered_input_enabled_=true;
     recovered_topic_=declare_parameter<std::string>("recovered_input_topic","/parking/cpp/marking_segments_recovered");
     expected_session_id_=declare_parameter<std::string>("expected_recovery_session_id","");
     expected_calibration_id_=declare_parameter<std::string>("expected_calibration_id","");
@@ -108,7 +115,8 @@ class MapFusionNode : public rclcpp::Node {
     if(recovered_input_enabled_){
       if(expected_session_id_.empty()||expected_calibration_id_.empty()||expected_source_frame_.empty())
         throw std::invalid_argument("recovered input requires session, calibration, and source-frame IDs");
-      recovered_subscription_=create_subscription<Recovered>(recovered_topic_,rclcpp::QoS(10).reliable(),
+      if(mapper_enabled_) start_mapper();
+      else recovered_subscription_=create_subscription<Recovered>(recovered_topic_,rclcpp::QoS(10).reliable(),
         [this](Recovered::ConstSharedPtr m){on_recovered(*m);});
     }else{
       subscription_=create_subscription<Array>(input_topic,rclcpp::SensorDataQoS(),[this](Array::ConstSharedPtr m){on_vectors(*m);});
@@ -128,7 +136,11 @@ class MapFusionNode : public rclcpp::Node {
       bank_.settings().continuation_gap_m,extent_mode_.c_str(),occupancy_filter_enabled_?"on":"off",
       occupancy_confirm_updates_,occupancy_threshold_,occupancy_inflation_);
   }
-  ~MapFusionNode() override { if(journal_) journal_.flush(); if(recovery_results_) recovery_results_.flush(); }
+  ~MapFusionNode() override {
+    if(mapper_enabled_) finish_mapper();
+    if(journal_) journal_.flush();
+    if(recovery_results_) recovery_results_.flush();
+  }
  private:
   static constexpr double pi_=3.14159265358979323846;
   struct ProcessResult {
@@ -138,6 +150,168 @@ class MapFusionNode : public rclcpp::Node {
     bool keyframe_created{false};
     int input_segments{0},usable_segments{0},created{0},merged{0},continued{0},pruned{0};
   };
+  lane_mapping::MapperSettings mapper_settings() {
+    lane_mapping::MapperSettings m;
+    m.odom_buffer_sec=declare_parameter<double>("mapper_odom_buffer_sec",m.odom_buffer_sec);
+    m.max_odom_age_sec=declare_parameter<double>("mapper_max_odom_age_sec",m.max_odom_age_sec);
+    m.max_odom_gap_sec=declare_parameter<double>("mapper_max_odom_gap_sec",m.max_odom_gap_sec);
+    m.ttl_sec=declare_parameter<double>("mapper_pending_ttl_sec",m.ttl_sec);
+    m.unresolvable_grace_sec=declare_parameter<double>("mapper_unresolvable_grace_sec",m.unresolvable_grace_sec);
+    m.max_count=static_cast<size_t>(declare_parameter<int>("mapper_pending_max_count",static_cast<int>(m.max_count)));
+    m.commit_budget=declare_parameter<int>("mapper_commit_budget",m.commit_budget);
+    m.drop_unresolvable_head=declare_parameter<bool>("mapper_drop_unresolvable_head",m.drop_unresolvable_head);
+    m.tracker_reset_gap_sec=declare_parameter<double>("mapper_tracker_reset_gap_sec",m.tracker_reset_gap_sec);
+    auto &t=m.tracker;
+    t.history=declare_parameter<int>("tracker_history",t.history);
+    t.confirm_hits=declare_parameter<int>("tracker_confirm_hits",t.confirm_hits);
+    t.max_missed=declare_parameter<int>("tracker_max_missed",t.max_missed);
+    t.temporal_angle=declare_parameter<double>("tracker_temporal_angle_deg",t.temporal_angle);
+    t.temporal_offset=declare_parameter<double>("tracker_temporal_offset_m",t.temporal_offset);
+    t.temporal_anchor_offset=declare_parameter<double>("tracker_temporal_anchor_offset_m",t.temporal_anchor_offset);
+    t.temporal_gap=declare_parameter<double>("tracker_temporal_gap_m",t.temporal_gap);
+    t.ema=declare_parameter<double>("tracker_ema",t.ema);
+    if(!std::isfinite(m.ttl_sec)||m.ttl_sec<=0||!std::isfinite(m.unresolvable_grace_sec)||
+       m.unresolvable_grace_sec<=0||m.unresolvable_grace_sec>m.ttl_sec||m.max_count<1||m.commit_budget<1||
+       !std::isfinite(m.max_odom_age_sec)||m.max_odom_age_sec<=0||!std::isfinite(m.max_odom_gap_sec)||
+       m.max_odom_gap_sec<=0||t.history<1||t.confirm_hits<1||t.max_missed<0||t.ema<=0||t.ema>1)
+      throw std::invalid_argument("invalid lane mapper parameters");
+    return m;
+  }
+  void start_mapper() {
+    observation_topic_=declare_parameter<std::string>("observation_topic","/parking/cpp/lane_observations");
+    odom_topic_=declare_parameter<std::string>("odom_topic","/localization/kinematic_state");
+    const auto ledger=declare_parameter<std::string>("pending_ledger_path","");
+    if(!ledger.empty()) {
+      if(std::filesystem::exists(ledger)) throw std::runtime_error("refusing to overwrite pending ledger: "+ledger);
+      mapper_ledger_.open(ledger);
+      if(!mapper_ledger_) throw std::runtime_error("cannot open pending ledger: "+ledger);
+      mapper_ledger_<<"event,session_id,epoch,observation_id,camera_id,source_stamp_ns,pose_match\n";
+      mapper_summary_path_=ledger+".summary.json";
+      if(std::filesystem::exists(mapper_summary_path_)) throw std::runtime_error("refusing to overwrite pending summary");
+    }
+    observation_subscription_=create_subscription<Recovered>(observation_topic_,rclcpp::QoS(200).reliable(),
+      [this](Recovered::ConstSharedPtr m){on_observation(*m);});
+    odom_subscription_=create_subscription<nav_msgs::msg::Odometry>(odom_topic_,rclcpp::QoS(200).reliable(),
+      [this](nav_msgs::msg::Odometry::ConstSharedPtr m){on_odom(*m);});
+    mapper_timer_=create_wall_timer(std::chrono::milliseconds(5),[this]{drain_mapper();});
+    RCLCPP_INFO(get_logger(),"lane mapper owns pose matching and world tracking: %s + %s",
+      observation_topic_.c_str(),odom_topic_.c_str());
+  }
+  void on_observation(const Recovered& msg) {
+    std::vector<lane_mapping::MapperEvent> events;
+    const int64_t stamp=ns(msg.header.stamp);
+    if(msg.session_id!=expected_session_id_||msg.epoch==0||msg.observation_id==0||
+       msg.source_frame!=expected_source_frame_||msg.calibration_id!=expected_calibration_id_||
+       msg.header.frame_id!=input_frame_||stamp<=0||
+       std::find(cameras_.begin(),cameras_.end(),msg.camera_id)==cameras_.end()) {
+      ++mapper_invalid_;
+      write_mapper_events({{"INVALID_DROP",msg.epoch,msg.observation_id,msg.camera_id,stamp,"none"}});
+      return;
+    }
+    if(msg.epoch<mapper_epoch_) {
+      write_mapper_events({{"EPOCH_RESET_DROP",msg.epoch,msg.observation_id,msg.camera_id,stamp,"none"}});
+      ++mapper_epoch_drops_;
+      return;
+    }
+    if(msg.epoch>mapper_epoch_) {
+      if(mapper_epoch_!=0) mapper_.reset();
+      mapper_epoch_=msg.epoch;
+    }
+    std::vector<lane_tracking::Observation> observations;
+    for(const auto& s:msg.segments) {
+      lane_tracking::Observation o;
+      o.p0_m=lane_tracking::base_to_metric({static_cast<float>(s.start.x),static_cast<float>(s.start.y)});
+      o.p1_m=lane_tracking::base_to_metric({static_cast<float>(s.end.x),static_cast<float>(s.end.y)});
+      o.family=s.family;o.span=s.span_m;o.width=s.mean_width_m;o.confidence=s.confidence;
+      observations.push_back(o);
+    }
+    mapper_.add_observation(msg.epoch,msg.observation_id,msg.camera_id,stamp,steady_now_ns(),
+      std::move(observations),&events);
+    write_mapper_events(events);
+    drain_mapper();
+  }
+  void on_odom(const nav_msgs::msg::Odometry& msg) {
+    const auto& q=msg.pose.pose.orientation;
+    const double norm=std::sqrt(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w);
+    const int64_t stamp=ns(msg.header.stamp);
+    if(msg.header.frame_id!=map_frame_||msg.child_frame_id!=input_frame_||stamp<=0||
+       !std::isfinite(norm)||norm<1e-9||!std::isfinite(msg.pose.pose.position.x)||
+       !std::isfinite(msg.pose.pose.position.y)) {++mapper_odom_rejected_;return;}
+    const double x=q.x/norm,y=q.y/norm,z=q.z/norm,w=q.w/norm;
+    const double yaw=std::atan2(2*(w*z+x*y),1-2*(y*y+z*z));
+    const double c=std::cos(yaw),s=std::sin(yaw);
+    const auto safe=[](double v){return std::isfinite(v)&&v>0.0?v:0.0;};
+    const auto& cov=msg.pose.covariance;
+    monoscale_pose::TimedPose pose{stamp,msg.pose.pose.position.x,msg.pose.pose.position.y,yaw,
+      c*msg.twist.twist.linear.x-s*msg.twist.twist.linear.y,
+      s*msg.twist.twist.linear.x+c*msg.twist.twist.linear.y,msg.twist.twist.angular.z,
+      std::max(safe(cov[0]),safe(cov[7])),safe(cov[35]),
+      safe(cov[0])>0.0&&safe(cov[7])>0.0&&safe(cov[35])>0.0,steady_now_ns()};
+    mapper_.add_pose(pose);
+    drain_mapper();
+  }
+  void drain_mapper() {
+    std::vector<lane_mapping::MapperEvent> events;
+    // Keep committing while lines are ready; the budget only bounds one pass.
+    for(int pass=0;pass<64;++pass) {
+      const auto resolved=mapper_.drain(steady_now_ns(),&events);
+      for(const auto& r:resolved) feed_resolved(r);
+      if(resolved.empty()) break;
+    }
+    write_mapper_events(events);
+  }
+  void feed_resolved(const lane_mapping::ResolvedObservation& r) {
+    Recovered out;
+    out.header.stamp.sec=static_cast<int32_t>(r.stamp_ns/1000000000LL);
+    out.header.stamp.nanosec=static_cast<uint32_t>(r.stamp_ns%1000000000LL);
+    out.header.frame_id=input_frame_;
+    out.session_id=expected_session_id_;out.epoch=r.epoch;out.observation_id=r.observation_id;
+    out.camera_id=r.camera_id;out.source_frame=expected_source_frame_;out.calibration_id=expected_calibration_id_;
+    out.pose_match=r.kind==monoscale_pose::PoseMatchKind::exact?"exact":"interpolated";
+    out.observer_pose.x=r.pose.x;out.observer_pose.y=r.pose.y;out.observer_pose.theta=r.pose.yaw;
+    for(const auto& o:r.confirmed) {
+      vision_lane_interfaces::msg::MarkingSegment s;
+      s.track_id=o.track_id;s.camera_id=r.camera_id;s.family=o.family;
+      const auto a=lane_tracking::metric_to_base(o.p0_m),b=lane_tracking::metric_to_base(o.p1_m);
+      s.start.x=a.x;s.start.y=a.y;s.end.x=b.x;s.end.y=b.y;
+      s.angle_rad=std::atan2(b.y-a.y,b.x-a.x);s.span_m=o.span;s.mean_width_m=o.width;s.confidence=o.confidence;
+      s.hits_total=o.hits_total;s.hits_in_window=o.hits_window;s.confirmed=true;s.reprojected=false;
+      s.source_stamp=out.header.stamp;out.segments.push_back(s);
+    }
+    on_recovered(out);
+  }
+  void write_mapper_events(const std::vector<lane_mapping::MapperEvent>& events) {
+    if(!mapper_ledger_) return;
+    for(const auto& e:events)
+      mapper_ledger_<<e.event<<','<<expected_session_id_<<','<<e.epoch<<','<<e.observation_id<<','
+        <<e.camera_id<<','<<e.stamp_ns<<','<<e.pose_match<<'\n';
+    if((mapper_ledger_rows_+=events.size())>=32) {mapper_ledger_.flush();mapper_ledger_rows_=0;}
+  }
+  void finish_mapper() {
+    std::vector<lane_mapping::MapperEvent> events;
+    mapper_.shutdown(&events);
+    write_mapper_events(events);
+    if(mapper_ledger_) mapper_ledger_.flush();
+    if(mapper_summary_path_.empty()) return;
+    const auto& c=mapper_.counters();
+    const auto temporary=mapper_summary_path_+".tmp";
+    {
+      std::ofstream summary(temporary,std::ios::out|std::ios::trunc);
+      // Same keys as lane_detection's recovery summary, so the evaluation tools read either.
+      summary<<"{\"session_id\":\""<<expected_session_id_<<"\",\"epoch\":"<<mapper_epoch_
+        <<",\"queued\":"<<c.queued<<",\"resolved\":"<<c.resolved<<",\"published\":"<<c.resolved
+        <<",\"ttl_drop\":"<<c.ttl_drop<<",\"unresolvable_drop\":"<<c.unresolvable_drop
+        <<",\"overflow_drop\":"<<c.overflow_drop<<",\"invalid_drop\":"<<(c.invalid_drop+mapper_invalid_)
+        <<",\"nonmonotonic_drop\":"<<c.nonmonotonic_drop<<",\"duplicate_drop\":"<<c.duplicate_drop
+        <<",\"epoch_drop\":"<<mapper_epoch_drops_<<",\"shutdown_drop\":"<<c.shutdown_drop
+        <<",\"blocked_head_drop\":0,\"readiness_scans\":0,\"readiness_lookups\":0"
+        <<",\"pending_after_shutdown\":"<<mapper_.pending()
+        <<",\"tracker_gap_resets\":"<<c.tracker_gap_resets<<",\"odom_rejected\":"<<(c.odom_rejected+mapper_odom_rejected_)
+        <<",\"event_ledger_flush_ok\":"<<(static_cast<bool>(mapper_ledger_)?"true":"false")<<"}\n";
+    }
+    std::error_code error;
+    std::filesystem::rename(temporary,mapper_summary_path_,error);
+  }
   lane_fusion::Settings settings() {
     lane_fusion::Settings s;
     s.angle_deg=declare_parameter<double>("match_angle_deg",s.angle_deg);
@@ -506,6 +680,15 @@ class MapFusionNode : public rclcpp::Node {
       pruned_landmarks_,pruned_support_bins_,occupancy_pruned_landmarks_,occupancy_pruned_support_bins_);
   }
   lane_fusion::RegisteredBank bank_;
+  lane_mapping::LaneMapper mapper_;
+  bool mapper_enabled_{false};
+  std::string observation_topic_,odom_topic_,mapper_summary_path_;
+  std::ofstream mapper_ledger_;
+  size_t mapper_ledger_rows_{0};
+  uint64_t mapper_epoch_{0},mapper_invalid_{0},mapper_epoch_drops_{0},mapper_odom_rejected_{0};
+  rclcpp::Subscription<Recovered>::SharedPtr observation_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
+  rclcpp::TimerBase::SharedPtr mapper_timer_;
   std::string input_frame_,map_frame_,camera_,extent_mode_,recovered_topic_,expected_session_id_,expected_calibration_id_,expected_source_frame_,recovery_session_,recovery_results_path_;
   std::vector<std::string> cameras_;
   int warmup_{120},width_{0},height_{0};

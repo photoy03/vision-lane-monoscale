@@ -243,6 +243,7 @@ def main() -> int:
         "lane_pending_commit_budget",
         "tracker_opencv_threads", "tracker_executor_threads", "odom_executor_threads",
         "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
+        "lane_mapping_owner",
     }
     launch_overrides: dict[str, str] = {}
     for item in args.launch_arg:
@@ -258,6 +259,8 @@ def main() -> int:
             if value.lower() not in {"true", "false"}:
                 raise SystemExit(f"{name} must be true or false")
             value = value.lower()
+        if name == "lane_mapping_owner" and value not in {"detection", "map"}:
+            raise SystemExit("lane_mapping_owner must be detection or map")
         if name == "tracker_input_reliability" and value not in {"best_effort", "reliable"}:
             raise SystemExit("tracker_input_reliability must be best_effort or reliable")
         if name == "lane_pending_commit_budget":
@@ -370,7 +373,9 @@ def main() -> int:
                 Path("src/lane_mapping/lane_detection/src/global_mapping_node.cpp"),
                 Path("src/lane_mapping/lane_detection/src/compressed_image_replay_node.cpp"),
                 Path("src/monoscale/monoscale_pose/include/monoscale_pose/pose_timeline.hpp"),
-                Path("src/lane_mapping/lane_detection/src/pending_lane_observations.hpp"),
+                Path("src/lane_mapping/lane_map/include/lane_map/pending_lane_observations.hpp"),
+                Path("src/lane_mapping/lane_map/include/lane_map/lane_tracker.hpp"),
+                Path("src/lane_mapping/lane_map/include/lane_map/lane_mapper.hpp"),
                 Path("src/monoscale/monoscale_occupancy_grid_map/src/sweep_node.cpp"),
                 Path("src/lane_mapping/lane_map/src/map_fusion_node.cpp"),
                 Path("src/vision_mapping_bringup/config/qos.yaml"),

@@ -1,6 +1,6 @@
 #include <cassert>
-#include "pending_lane_observations.hpp"
-#include "pending_readiness.hpp"
+#include "lane_map/pending_lane_observations.hpp"
+#include "lane_map/pending_readiness.hpp"
 
 int main() {
   using namespace vision_lane;

@@ -50,9 +50,10 @@
 #include <vision_lane_interfaces/msg/marking_segment_array.hpp>
 #include <vision_lane_interfaces/msg/recovered_marking_segment_array.hpp>
 #include "monoscale_pose/pose_timeline.hpp"
+#include "lane_map/lane_tracker.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
-#include "pending_lane_observations.hpp"
-#include "pending_readiness.hpp"
+#include "lane_map/pending_lane_observations.hpp"
+#include "lane_map/pending_readiness.hpp"
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -81,26 +82,12 @@ double orthogonal_error(double a, double base) {
 }
 double clamp01(double v) { return std::clamp(v, 0.0, 1.0); }
 
-struct Pose2 {
-  double x{0.0}, y{0.0}, yaw{0.0};
-};
 
-cv::Point2f metric_to_base(const cv::Point2f &p) {
-  // BEV: x=right, y=forward. base_link: x=forward, y=left.
-  return {p.y, -p.x};
-}
-cv::Point2f base_to_metric(const cv::Point2f &p) { return {-p.y, p.x}; }
-cv::Point2f base_to_global(const cv::Point2f &p, const Pose2 &pose) {
-  const double c = std::cos(pose.yaw), s = std::sin(pose.yaw);
-  return {static_cast<float>(pose.x + c * p.x - s * p.y),
-          static_cast<float>(pose.y + s * p.x + c * p.y)};
-}
-cv::Point2f global_to_base(const cv::Point2f &p, const Pose2 &pose) {
-  const double dx = p.x - pose.x, dy = p.y - pose.y;
-  const double c = std::cos(pose.yaw), s = std::sin(pose.yaw);
-  return {static_cast<float>(c * dx + s * dy),
-          static_cast<float>(-s * dx + c * dy)};
-}
+using lane_tracking::Pose2;
+using lane_tracking::metric_to_base;
+using lane_tracking::base_to_metric;
+using lane_tracking::base_to_global;
+using lane_tracking::global_to_base;
 
 struct Params {
   double camera_height{0.8}, camera_forward{0.0}, camera_left{0.0};
@@ -145,24 +132,9 @@ struct Candidate {
   double angle{0}, length{0}, width{0}, binary{0}, color{0}, response{0}, glare{0}, score{0};
 };
 
-struct Observation {
-  cv::Point2f p0_m, p1_m;
-  std::string family;
-  double angle{0}, span{0}, width{0}, confidence{0};
-  uint32_t track_id{0}, hits_total{0}, hits_window{0};
-  bool confirmed{false}, reprojected{false};
-};
 
-struct Primitive {
-  uint32_t id{0};
-  cv::Point2f g0, g1;
-  cv::Point2f anchor_g0, anchor_g1;
-  std::string family;
-  double width{0}, confidence{0};
-  std::deque<int> hits;
-  int hits_total{1}, missed{0};
-  bool confirmed{false}, anchor_valid{false};
-};
+using lane_tracking::Observation;
+using lane_tracking::Primitive;
 
 struct Profile {
   uint64_t frame{0};
@@ -591,27 +563,14 @@ class CudaPreprocessor {
 };
 #endif
 
-class Tracker {
- public:
-  explicit Tracker(const Params&p):p_(p){}
-  void reset(){tracks_.clear();next_id_=1;}
-  void update(const std::vector<Observation>&obs,const Pose2&pose){
-    for(auto&x:tracks_){x.hits.push_back(0);while(static_cast<int>(x.hits.size())>p_.history)x.hits.pop_front();++x.missed;}
-    struct Pair{double cost;size_t ti,oi;};std::vector<Pair>pairs;
-    std::vector<std::pair<cv::Point2f,cv::Point2f>> global;
-    for(const auto&o:obs)global.push_back({base_to_global(metric_to_base(o.p0_m),pose),base_to_global(metric_to_base(o.p1_m),pose)});
-    for(size_t ti=0;ti<tracks_.size();++ti)for(size_t oi=0;oi<obs.size();++oi){auto cost=association(tracks_[ti],global[oi]);if(cost)pairs.push_back({*cost,ti,oi});}
-    std::sort(pairs.begin(),pairs.end(),[](auto&a,auto&b){return a.cost<b.cost;});std::vector<bool>ut(tracks_.size()),uo(obs.size());
-    for(const auto&m:pairs){if(ut[m.ti]||uo[m.oi])continue;auto&t=tracks_[m.ti];const bool was_confirmed=t.confirmed;auto g=global[m.oi];if((t.g1-t.g0).dot(g.second-g.first)<0)std::swap(g.first,g.second);const float alpha=static_cast<float>(p_.ema);t.g0=(1.0f-alpha)*t.g0+alpha*g.first;t.g1=(1.0f-alpha)*t.g1+alpha*g.second;t.family=obs[m.oi].family;t.width=obs[m.oi].width;t.confidence=obs[m.oi].confidence;t.hits.back()=1;++t.hits_total;t.missed=0;if(std::accumulate(t.hits.begin(),t.hits.end(),0)>=p_.confirm_hits)t.confirmed=true;if(!was_confirmed&&t.confirmed){t.anchor_g0=t.g0;t.anchor_g1=t.g1;t.anchor_valid=true;}ut[m.ti]=uo[m.oi]=true;}
-    for(size_t i=0;i<obs.size();++i)if(!uo[i]){Primitive t;t.id=next_id_++;t.g0=global[i].first;t.g1=global[i].second;t.family=obs[i].family;t.width=obs[i].width;t.confidence=obs[i].confidence;t.hits.push_back(1);t.confirmed=p_.confirm_hits<=1;if(t.confirmed){t.anchor_g0=t.g0;t.anchor_g1=t.g1;t.anchor_valid=true;}tracks_.push_back(t);}
-    tracks_.erase(std::remove_if(tracks_.begin(),tracks_.end(),[&](auto&t){return t.missed>p_.max_missed;}),tracks_.end());
-  }
-  std::vector<Observation> project(const Pose2&pose,bool confirmed_only=false,bool force_reprojected=false)const{std::vector<Observation>out;for(const auto&t:tracks_){if(confirmed_only&&!t.confirmed)continue;cv::Point2f b0=global_to_base(t.g0,pose),b1=global_to_base(t.g1,pose);Observation o;o.p0_m=base_to_metric(b0);o.p1_m=base_to_metric(b1);o.family=t.family;o.span=cv::norm(o.p1_m-o.p0_m);o.width=t.width;o.confidence=t.confidence;o.track_id=t.id;o.hits_total=t.hits_total;o.hits_window=std::accumulate(t.hits.begin(),t.hits.end(),0);o.confirmed=t.confirmed;o.reprojected=force_reprojected||t.missed>0;out.push_back(o);}return out;}
-  const std::vector<Primitive>&primitives()const{return tracks_;}
- private:
-  std::optional<double>association(const Primitive&t,const std::pair<cv::Point2f,cv::Point2f>&g)const{cv::Point2f od=t.g1-t.g0,nd=g.second-g.first;double oa=angle180(deg(std::atan2(od.y,od.x))),na=angle180(deg(std::atan2(nd.y,nd.x)));double ae=angle_diff180(oa,na);if(ae>p_.temporal_angle)return{};double n=cv::norm(od);if(n<1e-9)return{};od*=1.0f/n;cv::Point2f normal(-od.y,od.x);double offset=std::abs((0.5f*(g.first+g.second)-0.5f*(t.g0+t.g1)).dot(normal));if(offset>p_.temporal_offset)return{};if(t.anchor_valid){cv::Point2f ad=t.anchor_g1-t.anchor_g0;double al=cv::norm(ad);if(al<1e-9)return{};ad*=1.0f/al;double anchor_angle=angle_diff180(angle180(deg(std::atan2(ad.y,ad.x))),na);if(anchor_angle>p_.temporal_angle)return{};cv::Point2f anormal(-ad.y,ad.x);double anchor_offset=std::abs((0.5f*(g.first+g.second)-0.5f*(t.anchor_g0+t.anchor_g1)).dot(anormal));if(anchor_offset>p_.temporal_anchor_offset)return{};}double o0=t.g0.dot(od),o1=t.g1.dot(od),n0=g.first.dot(od),n1=g.second.dot(od);double gap=std::max({std::min(o0,o1)-std::max(n0,n1),std::min(n0,n1)-std::max(o0,o1),0.0});if(gap>p_.temporal_gap)return{};return ae/p_.temporal_angle+offset/p_.temporal_offset+0.25*gap/p_.temporal_gap;}
-  Params p_;uint32_t next_id_{1};std::vector<Primitive>tracks_;
-};
+using lane_tracking::Tracker;
+lane_tracking::TrackerParams tracker_params(const Params&p){
+  lane_tracking::TrackerParams t;
+  t.history=p.history;t.confirm_hits=p.confirm_hits;t.max_missed=p.max_missed;
+  t.temporal_angle=p.temporal_angle;t.temporal_offset=p.temporal_offset;
+  t.temporal_anchor_offset=p.temporal_anchor_offset;t.temporal_gap=p.temporal_gap;t.ema=p.ema;
+  return t;
+}
 
 class MarkingMap {
  public:
@@ -625,7 +584,7 @@ class MarkingMap {
 
 class GlobalMappingNode : public rclcpp::Node {
  public:
-  GlobalMappingNode():Node("global_mapping_cpp"),p_(load_params()),pipeline_(p_),tracker_(p_),local_tracker_(p_),map_(p_){
+  GlobalMappingNode():Node("global_mapping_cpp"),p_(load_params()),pipeline_(p_),tracker_(tracker_params(p_)),local_tracker_(tracker_params(p_)),map_(p_){
     input_mode_=declare_parameter<std::string>("input_mode","topic");
     std::transform(input_mode_.begin(),input_mode_.end(),input_mode_.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
     image_topic_=declare_parameter<std::string>("image_topic","/camera/image_raw");
@@ -738,6 +697,24 @@ class GlobalMappingNode : public rclcpp::Node {
     capture_fourcc_=declare_parameter<std::string>("capture_fourcc","MJPG");
     capture_buffer_size_=declare_parameter<int>("capture_buffer_size",1);
     capture_poll_ms_=declare_parameter<int>("capture_poll_ms",1);
+    // detection (default): this node also attaches poses, tracks lines in the
+    // world frame and keeps its own map. map: it only detects; lane_map owns
+    // pose matching, world tracking and the map (/parking/cpp/lane_observations).
+    mapping_owner_=declare_parameter<std::string>("mapping_owner","detection");
+    if(mapping_owner_!="detection"&&mapping_owner_!="map")
+      throw std::runtime_error("mapping_owner must be 'detection' or 'map'");
+    owner_map_=mapping_owner_=="map";
+    observation_topic_=declare_parameter<std::string>("observation_topic","/parking/cpp/lane_observations");
+    if(owner_map_){
+      if(recovery_session_id_.empty()||recovery_calibration_id_.empty())
+        throw std::runtime_error("mapping_owner=map requires recovery_session_id and recovery_calibration_id");
+      // Nothing here waits for odometry any more.
+      pending_observations_enabled_=false;
+      sync_images_to_odom_=false;
+      recovered_output_enabled_=false;
+      publish_map_=false;
+      use_static_=false;
+    }
 
     segment_pub_=create_publisher<vision_lane_interfaces::msg::MarkingSegmentArray>(output_topic_,10);
     if(recovered_output_enabled_)
@@ -751,7 +728,11 @@ class GlobalMappingNode : public rclcpp::Node {
       vector_debug_pub_=create_publisher<sensor_msgs::msg::Image>("/parking/cpp/vector_bev",rclcpp::SensorDataQoS());
     }
     if(publish_raw_)raw_pub_=create_publisher<sensor_msgs::msg::Image>(raw_image_topic_,rclcpp::SensorDataQoS());
-    odom_sub_=create_subscription<nav_msgs::msg::Odometry>(odom_topic_,rclcpp::SensorDataQoS(),std::bind(&GlobalMappingNode::on_odom,this,std::placeholders::_1));
+    if(owner_map_)
+      observation_pub_=create_publisher<vision_lane_interfaces::msg::RecoveredMarkingSegmentArray>(
+        observation_topic_,rclcpp::QoS(200).reliable());
+    else
+      odom_sub_=create_subscription<nav_msgs::msg::Odometry>(odom_topic_,rclcpp::SensorDataQoS(),std::bind(&GlobalMappingNode::on_odom,this,std::placeholders::_1));
 
     if(!profile_path_.empty()){
       csv_.open(profile_path_);
@@ -1517,7 +1498,11 @@ class GlobalMappingNode : public rclcpp::Node {
       obs=pipeline_.vectorize(prep,&pr.raw,&dominant_angle,&dominant_confidence);
       pr.hough=ms_since(t);
       t=Clock::now();
-      if(pending_observations_enabled_){
+      if(owner_map_){
+        // The same observations the pending queue used to hold, handed to lane_map.
+        if(!warming_up_&&!pr.quality_rejected)publish_observations(stamp,obs);
+        local_tracker_.update(obs,Pose2{});
+      }else if(pending_observations_enabled_){
         if(!warming_up_&&!pr.quality_rejected){
           vision_lane::PendingLaneObservation<std::pair<std::vector<Observation>,uint64_t>> item;
           item.epoch=run_epoch_;
@@ -1605,7 +1590,8 @@ class GlobalMappingNode : public rclcpp::Node {
     t=Clock::now();
     const bool mapping_pose_ok=pending_observations_enabled_?pending_current_resolved:measured_pose;
     pr.map_eligible=run&&pr.confirmed>0&&mapping_pose_ok&&!warming_up_&&!pr.quality_rejected;
-    if(warming_up_)pr.map_block_reason="STARTUP_WARMUP";
+    if(owner_map_)pr.map_block_reason="MAPPING_OWNER_MAP";
+    else if(warming_up_)pr.map_block_reason="STARTUP_WARMUP";
     else if(!mapping_pose_ok){
       if(pending_readiness_enabled_&&pending_observations_.contains(run_epoch_,camera_id_,stamp.nanoseconds())){
         const auto current=lookup_pose(stamp);
@@ -1652,7 +1638,7 @@ class GlobalMappingNode : public rclcpp::Node {
       map_header.frame_id=map_frame_;
       map_pub_->publish(*cv_bridge::CvImage(map_header,"bgr8",map_.render()).toImageMsg());
     }
-    if(!lookup.valid&&require_odom_for_mapping_){
+    if(!owner_map_&&!lookup.valid&&require_odom_for_mapping_){
       RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,"local vectors active, global map blocked: no fresh odom for image stamp");
     }
   }
@@ -1698,6 +1684,23 @@ class GlobalMappingNode : public rclcpp::Node {
     if(!recovery_event_csv_)return;
     recovery_event_csv_<<event<<','<<recovery_session_id_<<','<<epoch<<','<<observation_id<<','<<camera<<','<<stamp_ns<<','<<pose_match<<'\n';
     if(++recovery_event_count_%32==0)recovery_event_csv_.flush();
+  }
+  void publish_observations(const rclcpp::Time&stamp,const std::vector<Observation>&obs){
+    vision_lane_interfaces::msg::RecoveredMarkingSegmentArray out;
+    out.header.stamp=stamp;
+    out.header.frame_id=base_frame_;
+    out.session_id=recovery_session_id_;out.epoch=run_epoch_;out.observation_id=++recovery_observation_seq_;
+    out.camera_id=camera_id_;out.source_frame=camera_frame_;out.calibration_id=recovery_calibration_id_;
+    out.pose_match="unresolved";
+    for(const auto&o:obs){
+      vision_lane_interfaces::msg::MarkingSegment s;
+      s.camera_id=camera_id_;s.family=o.family;
+      const auto a=metric_to_base(o.p0_m),b=metric_to_base(o.p1_m);
+      s.start.x=a.x;s.start.y=a.y;s.end.x=b.x;s.end.y=b.y;
+      s.angle_rad=std::atan2(b.y-a.y,b.x-a.x);s.span_m=o.span;s.mean_width_m=o.width;s.confidence=o.confidence;
+      s.source_stamp=out.header.stamp;out.segments.push_back(s);
+    }
+    observation_pub_->publish(out);
   }
   void publish_recovered_segments(
       const vision_lane::PendingLaneObservation<std::pair<std::vector<Observation>,uint64_t>>&item,
@@ -1904,6 +1907,9 @@ class GlobalMappingNode : public rclcpp::Node {
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
   rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_image_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Publisher<vision_lane_interfaces::msg::RecoveredMarkingSegmentArray>::SharedPtr observation_pub_;
+  std::string mapping_owner_{"detection"},observation_topic_;
+  bool owner_map_{false};
   rclcpp::Publisher<vision_lane_interfaces::msg::RecoveredMarkingSegmentArray>::SharedPtr recovered_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr raw_pub_;
   rclcpp::Publisher<vision_lane_interfaces::msg::MarkingSegmentArray>::SharedPtr segment_pub_;

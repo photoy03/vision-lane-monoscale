@@ -326,6 +326,42 @@ def _launch(context, group='all'):
         (run/'rear_rig_used.yaml').write_text(yaml.safe_dump(rear_rig))
         (run/'rear_parameters.yaml').write_text(yaml.safe_dump(rear_parameters))
 
+    mapping_owner = arg('lane_mapping_owner').strip().lower() or 'detection'
+    if mapping_owner not in ('detection', 'map'):
+        raise ValueError('lane_mapping_owner must be detection or map')
+    lane_defaults = node_parameters('lane_detection.yaml', 'global_mapping_cpp')
+    lane_explicit = {
+                     'use_sim_time': sim_time, 'image_topic': image_topic,
+                     'odom_topic': odom_topic, 'camera_frame': camera_frame,
+                     'map_frame': world['frame'], 'base_frame': 'base_link', 'camera_id': 'front',
+                     'calibration_yaml': str(run / 'calibration.yaml'),
+                     'pending_oracle_enabled': stage_diagnostics,
+                     'profile_csv_path': str(csv_path),
+                     **given((
+                         ('warmup_frames', 'startup_warmup_frames', int),
+                         ('image_quality_gate_mode', 'image_quality_gate_mode', str),
+                         ('lane_sync_wait_sec', 'sync_max_wait_sec', float),
+                         ('lane_prediction_wait_sec', 'odom_prediction_wait_sec', float),
+                         ('lane_sync_queue_size', 'sync_queue_size', int),
+                         ('lane_odom_buffer_sec', 'odom_buffer_duration_sec', float),
+                         ('lane_pending_ttl_sec', 'pending_observation_ttl_sec', float),
+                         ('lane_pending_gap_grace_sec', 'pending_observation_unresolvable_grace_sec', float),
+                         ('lane_pending_max_count', 'pending_observation_max_count', int),
+                         ('lane_pending_commit_budget', 'pending_commit_budget', int),
+                         ('lane_pending_readiness', 'pending_readiness_enabled', bool),
+                         ('lane_pending_blocked_head_grace_sec', 'pending_blocked_head_grace_sec', float),
+                         ('lane_pending_drop_unresolvable', 'pending_drop_unresolvable_head', bool),
+                         ('image_quality_min_sharpness', 'image_quality_min_sharpness', float))),
+                     'pending_observations_enabled': flag('lane_pending_recovery'),
+                     'recovered_output_enabled': flag('lane_pending_recovery'),
+                     'recovered_output_topic': '/parking/cpp/marking_segments_recovered',
+                     'recovery_session_id': recovery_session_id,
+                     'recovery_calibration_id': recovery_calibration_id,
+                     **{key: float(rig[key]) for key in ('camera_height_m', 'camera_forward_m',
+                        'camera_left_m', 'pitch_deg', 'roll_deg', 'yaw_deg')},
+}
+    if mapping_owner == 'map':
+        lane_explicit['mapping_owner'] = 'map'
     nodes += [
         static_tf('stage1_camera_tf', translation, quaternion, camera_frame),
         static_tf('stage1_imu_tf', imu_position, [0., 0., 0., 1.], 'imu_link'),
@@ -395,37 +431,7 @@ def _launch(context, group='all'):
                          ('pose_imu_fill', 'imu_fill_enabled', bool))),
                  }]),
         make_node(package='lane_detection', executable='global_mapping_node',
-             name='global_mapping_cpp', output='screen', parameters=[
-                 node_parameters('lane_detection.yaml', 'global_mapping_cpp'), {
-                     'use_sim_time': sim_time, 'image_topic': image_topic,
-                     'odom_topic': odom_topic, 'camera_frame': camera_frame,
-                     'map_frame': world['frame'], 'base_frame': 'base_link', 'camera_id': 'front',
-                     'calibration_yaml': str(run / 'calibration.yaml'),
-                     'pending_oracle_enabled': stage_diagnostics,
-                     'profile_csv_path': str(csv_path),
-                     **given((
-                         ('warmup_frames', 'startup_warmup_frames', int),
-                         ('image_quality_gate_mode', 'image_quality_gate_mode', str),
-                         ('lane_sync_wait_sec', 'sync_max_wait_sec', float),
-                         ('lane_prediction_wait_sec', 'odom_prediction_wait_sec', float),
-                         ('lane_sync_queue_size', 'sync_queue_size', int),
-                         ('lane_odom_buffer_sec', 'odom_buffer_duration_sec', float),
-                         ('lane_pending_ttl_sec', 'pending_observation_ttl_sec', float),
-                         ('lane_pending_gap_grace_sec', 'pending_observation_unresolvable_grace_sec', float),
-                         ('lane_pending_max_count', 'pending_observation_max_count', int),
-                         ('lane_pending_commit_budget', 'pending_commit_budget', int),
-                         ('lane_pending_readiness', 'pending_readiness_enabled', bool),
-                         ('lane_pending_blocked_head_grace_sec', 'pending_blocked_head_grace_sec', float),
-                         ('lane_pending_drop_unresolvable', 'pending_drop_unresolvable_head', bool),
-                         ('image_quality_min_sharpness', 'image_quality_min_sharpness', float))),
-                     'pending_observations_enabled': flag('lane_pending_recovery'),
-                     'recovered_output_enabled': flag('lane_pending_recovery'),
-                     'recovered_output_topic': '/parking/cpp/marking_segments_recovered',
-                     'recovery_session_id': recovery_session_id,
-                     'recovery_calibration_id': recovery_calibration_id,
-                     **{key: float(rig[key]) for key in ('camera_height_m', 'camera_forward_m',
-                        'camera_left_m', 'pitch_deg', 'roll_deg', 'yaw_deg')},
-                 }]),
+             name='global_mapping_cpp', output='screen', parameters=[lane_defaults, lane_explicit]),
     ]
     if launch_occupancy:
         # Camera lists/lenses come from the rig below, not the package's sample mounts.
@@ -495,6 +501,31 @@ def _launch(context, group='all'):
         **given((('lane_duplicate_render_offset_m', 'duplicate_render_offset_m', float),
                  ('lane_duplicate_candidate_offset_m', 'duplicate_candidate_offset_m', float))),
     }
+    lane_effective = {**lane_defaults, **lane_explicit}
+    # mapping_owner=map: lane_map attaches poses and tracks lines in the world
+    # frame with exactly the values lane_detection would have used.
+    mapper_parameters = {} if mapping_owner == 'detection' else {
+        'mapper_enabled': True,
+        'observation_topic': '/parking/cpp/lane_observations',
+        'odom_topic': odom_topic,
+        'mapper_odom_buffer_sec': float(lane_effective['odom_buffer_duration_sec']),
+        'mapper_max_odom_age_sec': float(lane_effective['max_odom_age_sec']),
+        'mapper_max_odom_gap_sec': float(lane_effective['max_odom_interpolation_gap_sec']),
+        'mapper_pending_ttl_sec': float(lane_effective['pending_observation_ttl_sec']),
+        'mapper_unresolvable_grace_sec': float(lane_effective['pending_observation_unresolvable_grace_sec']),
+        'mapper_pending_max_count': int(lane_effective['pending_observation_max_count']),
+        'mapper_commit_budget': int(lane_effective['pending_commit_budget']),
+        'mapper_drop_unresolvable_head': bool(lane_effective['pending_drop_unresolvable_head']),
+        'mapper_tracker_reset_gap_sec': float(lane_effective['global_tracker_reset_gap_sec']),
+        'tracker_history': int(lane_effective['temporal_history_size']),
+        'tracker_confirm_hits': int(lane_effective['temporal_confirm_hits']),
+        'tracker_max_missed': int(lane_effective['temporal_max_missed_updates']),
+        'tracker_temporal_angle_deg': float(lane_effective['temporal_angle_gate_deg']),
+        'tracker_temporal_offset_m': float(lane_effective['temporal_offset_gate_m']),
+        'tracker_temporal_anchor_offset_m': float(lane_effective['temporal_anchor_offset_m']),
+        'tracker_temporal_gap_m': float(lane_effective['temporal_gap_gate_m']),
+        'tracker_ema': float(lane_effective['temporal_ema_alpha']),
+    }
     recovery_fusion_parameters = {
         'recovered_input_enabled': flag('lane_pending_recovery'),
         'recovered_input_topic': '/parking/cpp/marking_segments_recovered',
@@ -514,6 +545,8 @@ def _launch(context, group='all'):
                 'occupancy_topic': arg('occupancy_topic'),
                 **lane_fusion_overrides,
                 'keyframe_path': str(run / 'registered_keyframes.jsonl'),
+                **({**mapper_parameters, 'pending_ledger_path': str(run / 'lane_map.recovery_events.csv')}
+                   if mapper_parameters else {}),
                 'output_image_topic': '/parking/cpp/global_marking_map_fused',
                 'output_vector_topic': '/parking/cpp/global_marking_segments_fused',
                 'output_marker_topic': '/parking/cpp/global_marking_markers',
@@ -530,6 +563,9 @@ def _launch(context, group='all'):
                 'occupancy_topic': arg('occupancy_topic'),
                 **lane_fusion_overrides,
                 'keyframe_path': str(run / 'registered_keyframes_continuation.jsonl'),
+                **({**mapper_parameters,
+                    'pending_ledger_path': str(run / 'lane_map_continuation.recovery_events.csv')}
+                   if mapper_parameters else {}),
                 'output_image_topic': '/parking/cpp/global_marking_map_continuation',
                 'output_vector_topic': '/parking/cpp/global_marking_segments_continuation',
                 'output_marker_topic': '/parking/cpp/global_marking_markers_continuation',

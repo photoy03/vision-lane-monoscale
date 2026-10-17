@@ -5,3 +5,6 @@ launch_arguments:
   launch_lane_fusion: 'true'
   map_fusion_mode: legacy
   compare_lane_registration: 'false'
+  # Who builds the lane map: '' or detection (lane_detection tracks/accumulates, default)
+  # or map (lane_detection only detects; lane_map matches poses, tracks and accumulates).
+  lane_mapping_owner: ''
