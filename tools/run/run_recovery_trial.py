@@ -212,6 +212,10 @@ def main() -> int:
                         help="zstd: compress outputs_bag per file when it closes (a full "
                              "occupancy-grid stream is ~350 MB raw, a few MB compressed); "
                              "none: plain sqlite3 like runs before 2026-10-17")
+    parser.add_argument("--playback-rate", type=float, default=1.0,
+                        help="bag playback rate; time metrics are only comparable at the same rate")
+    parser.add_argument("--rmw", choices=("", "rmw_fastrtps_cpp", "rmw_cyclonedds_cpp"), default="",
+                        help="ROS middleware for every process of this run (empty: inherit)")
     parser.add_argument("--sample-plan", type=Path, help="frozen sample_manifest.json")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -303,6 +307,10 @@ def main() -> int:
 
     env = os.environ.copy()
     env.update({"ROS_DOMAIN_ID": str(args.domain_id), "RCUTILS_COLORIZED_OUTPUT": "0"})
+    if not (0.1 <= args.playback_rate <= 4.0):
+        raise SystemExit("--playback-rate must be within 0.1..4")
+    if args.rmw:
+        env["RMW_IMPLEMENTATION"] = args.rmw
     info = run_capture(repo, ["ros2", "bag", "info", str(bag)], env, timeout=60.0)
     if info.returncode:
         raise SystemExit("ros2 bag info failed:\n" + info.stdout)
@@ -345,7 +353,7 @@ def main() -> int:
         front_repub.extend(["-p", f"diagnostics_csv_path:={output / 'front_decode.csv'}"])
         rear_repub.extend(["-p", f"diagnostics_csv_path:={output / 'rear_decode.csv'}"])
     player = [
-        "ros2", "bag", "play", str(bag), "--clock", "30", "--rate", "1.0",
+        "ros2", "bag", "play", str(bag), "--clock", "30", "--rate", str(args.playback_rate),
         "--disable-keyboard-controls", "--wait-for-all-acked", "2000",
         "--qos-profile-overrides-path", str(qos), "--topics", *TOPICS,
     ]
@@ -372,6 +380,8 @@ def main() -> int:
         "bag_info": info.stdout, "bag_topics": sorted(available_topics),
         "replayed_topics": list(TOPICS),
         "recorded_output_topics": list(OUTPUT_TOPICS) if args.record_outputs == "on" else [],
+        "playback_rate": args.playback_rate,
+        "rmw_implementation": env.get("RMW_IMPLEMENTATION", "") or "default(rmw_fastrtps_cpp)",
         "outputs_compression": args.outputs_compression if args.record_outputs == "on" else None,
         "ros_domain_id": args.domain_id,
         "output_dir": str(output), "free_disk_gib_at_start": round(free_gib, 3),
