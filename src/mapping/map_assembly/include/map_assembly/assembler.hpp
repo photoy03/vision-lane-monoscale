@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -130,5 +131,45 @@ std::optional<Choice> choose_single(const LayerHistory<Payload> &layer, int64_t 
   if (t < m.content_max || t <= last_t) return std::nullopt;
   return Choice{e.size() - 1, e.size() - 1, t};
 }
+
+// Pose provenance (msg/PoseProvenance.msg kinds), kept by stamp until the pose
+// at a chosen T is looked up. Provenance and pose arrive on two topics in either
+// order; a pose whose provenance never came reads as unknown.
+enum class PoseKind : uint8_t { kUnknown = 0, kRaw = 1, kInterpolated = 2, kImuFill = 3, kHeld = 4 };
+
+struct Provenance {
+  PoseKind kind{PoseKind::kUnknown};
+  int64_t raw_lower{0}, raw_upper{0};
+};
+
+// The kind of the pose at T: an exact sample keeps its own kind; a blend of two
+// samples is never RAW (at least INTERPOLATED) and takes the weaker endpoint.
+// Weaker = later in RAW < INTERPOLATED < IMU_FILL < HELD; UNKNOWN wins over all.
+inline PoseKind combine_kind(bool exact, PoseKind lower, PoseKind upper) {
+  if (lower == PoseKind::kUnknown || upper == PoseKind::kUnknown) return PoseKind::kUnknown;
+  PoseKind weaker = static_cast<uint8_t>(lower) > static_cast<uint8_t>(upper) ? lower : upper;
+  if (!exact && weaker == PoseKind::kRaw) weaker = PoseKind::kInterpolated;
+  return weaker;
+}
+
+class ProvenanceBuffer {
+ public:
+  explicit ProvenanceBuffer(size_t capacity = 4000) : capacity_(capacity) {}
+  void add(int64_t stamp, const Provenance &p) {
+    by_stamp_[stamp] = p;
+    while (by_stamp_.size() > capacity_) by_stamp_.erase(by_stamp_.begin());
+  }
+  std::optional<Provenance> find(int64_t stamp) const {
+    const auto it = by_stamp_.find(stamp);
+    if (it == by_stamp_.end()) return std::nullopt;
+    return it->second;
+  }
+  void clear() { by_stamp_.clear(); }
+  size_t size() const { return by_stamp_.size(); }
+
+ private:
+  size_t capacity_;
+  std::map<int64_t, Provenance> by_stamp_;
+};
 
 }  // namespace map_assembly

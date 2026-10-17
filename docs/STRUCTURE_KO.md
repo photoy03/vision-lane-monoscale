@@ -95,6 +95,15 @@ complete_through 이전 것은 1개만 남기고 정리)를 모아 조립한다.
   - 불완전 모드(allow_incomplete:=true, 기본 false): 한 층만 멈췄을 때 다른 층만으로 T를 정하고, 멈춘 층의 최신 스냅샷을 붙여 complete=false, stale_layers로 표시한다.
   - pose at T: 측정 pose 또는 T를 감싸는 두 측정 pose 사이 보간(간격 ≤ pose_max_gap_sec 0.25 s, 외삽 없음). 보간은 T 뒤의 pose를 쓴다.
     못 구하면 pose_valid=false와 이유(pose_match)만 남기고 지도는 그대로 낸다. 사용한 두 pose 시각(pose_lower/upper)을 기록한다.
+- pose 출처 계약(2026-10-18, PoseProvenance)
+  - stabilizer는 내보내는 pose마다 같은 stamp로 /localization/kinematic_state/provenance를 낸다. 내용은 생성 방식, stabilizer 내부 이름, 공분산 유효 여부, 그 pose를 만든 raw 측정 두 시각이다.
+    - 생성 방식: RAW(raw 측정 그대로) / INTERPOLATED(두 raw 사이 선형 보간: short·moving·stationary·straight) / IMU_FILL(IMU yaw로 모양을 잡은 보간·채움: imu_fill·imu_straight·imu_stationary) / HELD(마지막 값 유지, 지금은 생성 경로가 없어 예약)
+  - 모르는 공분산은 0이 아니라 covariance[0] = −1로 낸다.
+    - MonoScale은 이 설정(fusion_model: velocity)에서 공분산을 내지 않고 모두 0으로 둔다.
+    - lane_map·lane_detection·PoseTimeline은 원래 0과 음수를 똑같이 "모름"으로 읽으므로 동작은 같다.
+  - FusedMap은 T 시각 pose의 pose_kind, pose_covariance_valid, 분산(모르면 −1), pose_raw_lower/upper를 싣는다.
+    - pose_match와 함께 읽는다. exact면 그 표본의 kind, 보간이면 RAW가 아니라 최소 INTERPOLATED이고 두 끝 중 약한 쪽이다. 출처를 못 받았으면 UNKNOWN이다.
+  - 이것은 불확실도를 만드는 작업이 아니다. 지금 설정에서 pose_covariance_valid는 늘 false다. 채움 한도·pose 선택·누적 조건은 바꾸지 않았다.
 - map_visualizer: /mapping/fused_map 한 메시지를 이미지 한 장(/mapping/fused_map/image)으로 그린다. 점유 격자(회색), 차선(하늘색), T 시각 차량 화살표(빨강), T·지연·층별 T−content_max·pose 상태 글자.
   두 토픽을 따로 그리는 RViz와 달리 항상 같은 묶음이다. 위치·yaw 오차, 차선 중복은 그대로 보인다(고치지 않는다).
 - 보기: `ros2 run rqt_image_view rqt_image_view /mapping/fused_map/image`

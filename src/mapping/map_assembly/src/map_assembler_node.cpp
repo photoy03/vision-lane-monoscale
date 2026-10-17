@@ -13,6 +13,7 @@
 #include <vision_lane_interfaces/msg/fused_map.hpp>
 #include <vision_lane_interfaces/msg/lane_map_snapshot.hpp>
 #include <vision_lane_interfaces/msg/occupancy_snapshot.hpp>
+#include <vision_lane_interfaces/msg/pose_provenance.hpp>
 
 #include "map_assembly/assembler.hpp"
 #include "monoscale_pose/pose_timeline.hpp"
@@ -60,6 +61,9 @@ class MapAssembler : public rclcpp::Node {
       });
     pose_sub_ = create_subscription<nav_msgs::msg::Odometry>(pose_topic, rclcpp::QoS(200).reliable(),
       [this](nav_msgs::msg::Odometry::ConstSharedPtr m) { check_time_line(); on_pose(*m); });
+    provenance_sub_ = create_subscription<vision_lane_interfaces::msg::PoseProvenance>(
+      pose_topic + "/provenance", rclcpp::QoS(200).reliable(),
+      [this](vision_lane_interfaces::msg::PoseProvenance::ConstSharedPtr m) { check_time_line(); on_provenance(*m); });
     fused_pub_ = create_publisher<FusedMap>(output_topic, rclcpp::QoS(5).reliable());
     status_pub_ = create_publisher<std_msgs::msg::String>(output_topic + "/status", 10);
     progress_pub_ = create_publisher<vision_lane_interfaces::msg::PipelineProgress>(
@@ -91,6 +95,7 @@ class MapAssembler : public rclcpp::Node {
     lanes_ = {};
     occupancy_ = {};
     poses_ = monoscale_pose::PoseTimeline{30.0};
+    provenance_.clear();
     last_t_ = 0;
     ++time_line_resets_;
     RCLCPP_WARN(get_logger(), "ROS clock jumped back: fused map restarts on clock generation %lu",
@@ -104,8 +109,22 @@ class MapAssembler : public rclcpp::Node {
     }
     const auto &q = m.pose.pose.orientation;
     const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-    if (!poses_.insert({ns(m.header.stamp), m.pose.pose.position.x, m.pose.pose.position.y, yaw}))
-      ++pose_rejected_;
+    monoscale_pose::TimedPose sample{ns(m.header.stamp), m.pose.pose.position.x, m.pose.pose.position.y, yaw};
+    // Variances only when all three are reported; -1 / 0 mean unknown.
+    const auto &cov = m.pose.covariance;
+    if (cov[0] > 0.0 && cov[7] > 0.0 && cov[35] > 0.0 &&
+        std::isfinite(cov[0]) && std::isfinite(cov[7]) && std::isfinite(cov[35])) {
+      sample.position_variance = std::max(cov[0], cov[7]);
+      sample.yaw_variance = cov[35];
+      sample.covariance_source_valid = true;
+    }
+    if (!poses_.insert(sample)) ++pose_rejected_;
+  }
+
+  void on_provenance(const vision_lane_interfaces::msg::PoseProvenance &m) {
+    if (clock_generation_.stale(ns(m.header.stamp), now().nanoseconds())) return;
+    const auto kind = m.kind <= 4 ? static_cast<map_assembly::PoseKind>(m.kind) : map_assembly::PoseKind::kUnknown;
+    provenance_.add(ns(m.header.stamp), {kind, ns(m.raw_lower), ns(m.raw_upper)});
   }
 
   void tick() {
@@ -171,6 +190,22 @@ class MapAssembler : public rclcpp::Node {
     }
     out.pose_lower = pipeline_progress::to_time(std::max<int64_t>(match.lower_stamp_ns, 0));
     out.pose_upper = pipeline_progress::to_time(std::max<int64_t>(match.upper_stamp_ns, 0));
+    // Provenance of the pose at T (UNKNOWN without a pose or without provenance).
+    out.pose_kind = vision_lane_interfaces::msg::PoseProvenance::UNKNOWN;
+    if (match.valid) {
+      const bool exact = match.kind == monoscale_pose::PoseMatchKind::exact;
+      const auto lower = provenance_.find(match.lower_stamp_ns);
+      const auto upper = provenance_.find(match.upper_stamp_ns);
+      out.pose_kind = static_cast<uint8_t>(map_assembly::combine_kind(
+        exact, lower ? lower->kind : map_assembly::PoseKind::kUnknown,
+        upper ? upper->kind : map_assembly::PoseKind::kUnknown));
+      if (lower) out.pose_raw_lower = pipeline_progress::to_time(lower->raw_lower);
+      if (upper) out.pose_raw_upper = pipeline_progress::to_time(upper->raw_upper);
+      if (!lower || !upper) ++provenance_missing_;
+    }
+    out.pose_covariance_valid = match.valid && match.covariance_source_valid;
+    out.pose_position_variance = out.pose_covariance_valid ? match.position_variance : -1.0;
+    out.pose_yaw_variance = out.pose_covariance_valid ? match.yaw_variance : -1.0;
     fused_pub_->publish(out);
     last_t_ = t;
     last_lane_age_ms_ = (t - lane.meta.content_max) * 1e-6;
@@ -185,6 +220,7 @@ class MapAssembler : public rclcpp::Node {
       << ",\"lane_history\":" << lanes_.entries().size() << ",\"occupancy_history\":" << occupancy_.entries().size()
       << ",\"lane_invalid\":" << lanes_.invalid() << ",\"occupancy_invalid\":" << occupancy_.invalid()
       << ",\"lane_complete_ns\":" << lanes_.last_complete() << ",\"occupancy_complete_ns\":" << occupancy_.last_complete()
+      << ",\"provenance_missing\":" << provenance_missing_ << ",\"provenance_held\":" << provenance_.size()
       << ",\"clock_generation\":" << clock_generation_.value()
       << ",\"time_line_resets\":" << time_line_resets_ << ",\"generation_mismatch\":" << generation_mismatch_
       << ",\"pose_stale\":" << pose_stale_
@@ -205,7 +241,9 @@ class MapAssembler : public rclcpp::Node {
   double pose_max_gap_{0.25}, last_lane_age_ms_{0.0}, last_occupancy_age_ms_{0.0};
   bool allow_incomplete_{false};
   uint64_t published_{0}, pose_missing_{0}, pose_rejected_{0}, frame_mismatch_{0};
-  uint64_t time_line_resets_{0}, generation_mismatch_{0}, pose_stale_{0};
+  uint64_t time_line_resets_{0}, generation_mismatch_{0}, pose_stale_{0}, provenance_missing_{0};
+  map_assembly::ProvenanceBuffer provenance_{4000};
+  rclcpp::Subscription<vision_lane_interfaces::msg::PoseProvenance>::SharedPtr provenance_sub_;
   clock_generation::Tracker clock_generation_;
   std::string output_topic_;
   rclcpp::Subscription<LaneSnapshot>::SharedPtr lane_sub_;

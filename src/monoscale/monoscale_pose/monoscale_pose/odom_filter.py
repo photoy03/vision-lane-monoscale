@@ -738,3 +738,27 @@ def interpolate_pose_covariance(previous, current, ratio, span, distance, kind):
     result[7] += sigma_xy*sigma_xy
     result[35] += sigma_yaw*sigma_yaw
     return result
+
+
+# Pose provenance (vision_lane_interfaces/msg/PoseProvenance.msg kinds).
+INTERPOLATED_KINDS = ("short", "moving", "stationary", "straight")
+IMU_KINDS = ("imu_fill", "imu_straight", "imu_stationary")
+
+
+def pose_provenance_kind(resample_kind, is_resampled):
+    """'raw' for a passthrough, 'interpolated' for a blend of two raw poses,
+    'imu_fill' when IMU yaw shaped it, 'unknown' for anything else."""
+    if not is_resampled:
+        return "raw"
+    if resample_kind in INTERPOLATED_KINDS:
+        return "interpolated"
+    if resample_kind in IMU_KINDS:
+        return "imu_fill"
+    return "unknown"
+
+
+def unknown_pose_covariance():
+    """ROS convention for an unknown pose covariance: element 0 = -1, the rest 0."""
+    covariance = [0.0] * 36
+    covariance[0] = -1.0
+    return covariance

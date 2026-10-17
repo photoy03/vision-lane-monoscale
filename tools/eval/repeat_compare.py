@@ -53,6 +53,8 @@ def angle_deg(a: float, b: float) -> float:
 # "snapshot_format"). Runs recorded before it may be skipped; runs recorded with
 # it must read, or the comparison would silently lose its subject.
 SNAPSHOT_FORMAT = 2
+# FusedMap before pose provenance (snapshot_format 2) still reads through this layout.
+LEGACY_TYPES = {"/mapping/fused_map": "vision_lane_interfaces/msg/FusedMapV2"}
 UNREADABLE = "__unreadable_topics__"
 
 SNAPSHOT_TOPICS = ("/mapping/snapshot/lanes", "/mapping/snapshot/occupancy", "/mapping/fused_map")
@@ -178,6 +180,18 @@ def fused_metrics(fused: list, lanes: list, occupancy: list) -> dict[str, float]
             key(msg.occupancy.meta, bytes(msg.occupancy.grid.data)) not in occupancy_keys
             for _, msg in fused)
     m["fused_pose_valid_ratio"] = sum(msg.pose_valid for _, msg in fused) / len(fused)
+    if hasattr(fused[0][1], "pose_kind"):  # snapshot_format 3: pose provenance
+        names = {0: "unknown", 1: "raw", 2: "interpolated", 3: "imu_fill", 4: "held"}
+        for code, name in names.items():
+            m[f"fused_pose_kind_{name}"] = sum(msg.pose_kind == code for _, msg in fused if msg.pose_valid)
+        m["fused_pose_covariance_valid"] = sum(msg.pose_covariance_valid for _, msg in fused)
+        # Must stay 0: a variance claimed valid that is not a positive number.
+        m["fused_pose_covariance_valid_but_not_positive"] = sum(
+            msg.pose_covariance_valid and not (msg.pose_position_variance > 0 and msg.pose_yaw_variance > 0)
+            for _, msg in fused)
+        m["fused_pose_variance_unknown_not_minus_one"] = sum(
+            not msg.pose_covariance_valid and (msg.pose_position_variance != -1.0 or msg.pose_yaw_variance != -1.0)
+            for _, msg in fused)
     lags = sorted(arrival - _ns(msg.header.stamp) * 1e-9 for arrival, msg in fused)
     m["fused_lag_p50_ms"] = 1000.0 * lags[len(lags) // 2]
     m["fused_lag_p90_ms"] = 1000.0 * lags[int(0.9 * (len(lags) - 1))]
@@ -207,6 +221,13 @@ def read_bag(path: Path, topics: list[str]) -> dict[str, list] | None:
     return _read_bag(rosbag2_py.SequentialReader(), path, topics)
 
 
+def stamp_of(msg, topic: str, receive_ns: int) -> float:
+    if topic in SNAPSHOT_TOPICS:  # their time lives in msg.meta; keep when they arrived
+        return receive_ns * 1e-9
+    header = getattr(msg, "header", None)
+    return header.stamp.sec + header.stamp.nanosec * 1e-9 if header else receive_ns * 1e-9
+
+
 def _read_bag(reader, path: Path, topics: list[str]) -> dict[str, list]:
     import rosbag2_py
     from rclpy.serialization import deserialize_message
@@ -228,15 +249,20 @@ def _read_bag(reader, path: Path, topics: list[str]) -> dict[str, list]:
         try:
             msg = deserialize_message(data, classes[topic])
         except Exception:  # recorded with an older message layout (Humble bags keep no definitions)
+            legacy = LEGACY_TYPES.get(topic)
+            if legacy:
+                try:
+                    classes[topic] = get_message(legacy)
+                    msg = deserialize_message(data, classes[topic])
+                    out[topic].append((stamp_of(msg, topic, receive_ns), msg))
+                    continue
+                except Exception:
+                    pass
             unreadable.add(topic)
             out[topic] = []
             print(f"note: {path}: {topic} has an older message layout; skipped", file=sys.stderr)
             continue
-        header = getattr(msg, "header", None)
-        stamp = header.stamp.sec + header.stamp.nanosec * 1e-9 if header else receive_ns * 1e-9
-        if topic in SNAPSHOT_TOPICS:  # their time lives in msg.meta; keep when they arrived
-            stamp = receive_ns * 1e-9
-        out[topic].append((stamp, msg))
+        out[topic].append((stamp_of(msg, topic, receive_ns), msg))
     out[UNREADABLE] = sorted(unreadable)
     return out
 
@@ -349,7 +375,7 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
         topics = ["/localization/monoscale_raw", "/localization/kinematic_state",
                   "/parking/cpp/marking_segments", "/parking/cpp/global_marking_segments_fused",
                   "/perception/occupancy_grid_map", "/parking/cpp/map_fusion/status",
-                  "/pipeline/progress", *SNAPSHOT_TOPICS]
+                  "/pipeline/progress", "/localization/kinematic_state/provenance", *SNAPSHOT_TOPICS]
         data = read_bag(outputs, topics)
         if data is not None:
             skipped = data.pop(UNREADABLE, [])
@@ -407,6 +433,11 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                     m[f"watermark_{node}_lag_p50_ms"] = lags[len(lags) // 2]
                     m[f"watermark_{node}_lag_p90_ms"] = lags[int(0.9 * (len(lags) - 1))]
             m.update(snapshot_metrics(data["/mapping/snapshot/lanes"], data["/mapping/snapshot/occupancy"]))
+            provenance = data["/localization/kinematic_state/provenance"]
+            if provenance:
+                for code, name in {0: "unknown", 1: "raw", 2: "interpolated", 3: "imu_fill", 4: "held"}.items():
+                    m[f"pose_provenance_{name}"] = sum(msg.kind == code for _, msg in provenance)
+                m["pose_provenance_covariance_valid"] = sum(msg.covariance_valid for _, msg in provenance)
             m.update(fused_metrics(data["/mapping/fused_map"], data["/mapping/snapshot/lanes"],
                                    data["/mapping/snapshot/occupancy"]))
             grids = data["/perception/occupancy_grid_map"]

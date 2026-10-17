@@ -18,6 +18,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LaneMapSnapshot.msg"
   "msg/OccupancySnapshot.msg"
   "msg/FusedMap.msg"
+  "msg/FusedMapV2.msg"
+  "msg/PoseProvenance.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs std_msgs
 )
 

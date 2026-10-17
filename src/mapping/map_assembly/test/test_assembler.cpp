@@ -85,5 +85,29 @@ int main() {
     assert(!map_assembly::choose_single(lanes, 20 * s, 11 * s));
     assert(!map_assembly::choose_single(lanes, 9 * s, 0));  // pose behind content
   }
+  {  // Pose provenance at T: exact keeps the sample's kind; a blend is never RAW and takes the weaker end.
+    using map_assembly::PoseKind;
+    using map_assembly::combine_kind;
+    assert(combine_kind(true, PoseKind::kRaw, PoseKind::kRaw) == PoseKind::kRaw);
+    assert(combine_kind(false, PoseKind::kRaw, PoseKind::kRaw) == PoseKind::kInterpolated);
+    assert(combine_kind(false, PoseKind::kRaw, PoseKind::kImuFill) == PoseKind::kImuFill);
+    assert(combine_kind(false, PoseKind::kInterpolated, PoseKind::kRaw) == PoseKind::kInterpolated);
+    assert(combine_kind(true, PoseKind::kImuFill, PoseKind::kImuFill) == PoseKind::kImuFill);
+    assert(combine_kind(false, PoseKind::kUnknown, PoseKind::kRaw) == PoseKind::kUnknown);
+    assert(combine_kind(true, PoseKind::kHeld, PoseKind::kHeld) == PoseKind::kHeld);
+  }
+  {  // Provenance by stamp: either arrival order works, capacity bounds it, a reset empties it.
+    map_assembly::ProvenanceBuffer buffer(3);
+    assert(!buffer.find(10 * s));                         // pose first, provenance not yet here: unknown
+    buffer.add(10 * s, {map_assembly::PoseKind::kRaw, 10 * s, 10 * s});
+    assert(buffer.find(10 * s)->kind == map_assembly::PoseKind::kRaw);  // provenance arrived later
+    buffer.add(11 * s, {map_assembly::PoseKind::kImuFill, 10 * s, 12 * s});
+    buffer.add(12 * s, {map_assembly::PoseKind::kRaw, 12 * s, 12 * s});
+    buffer.add(13 * s, {map_assembly::PoseKind::kInterpolated, 12 * s, 14 * s});
+    assert(buffer.size() == 3 && !buffer.find(10 * s));  // oldest dropped first
+    assert(buffer.find(11 * s)->raw_upper == 12 * s);
+    buffer.clear();                                       // time-line reset
+    assert(buffer.size() == 0 && !buffer.find(12 * s));
+  }
   return 0;
 }

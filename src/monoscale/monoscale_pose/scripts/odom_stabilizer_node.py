@@ -14,7 +14,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float64MultiArray, String
 from tf2_ros import TransformBroadcaster
-from vision_lane_interfaces.msg import PipelineProgress
+from vision_lane_interfaces.msg import PipelineProgress, PoseProvenance
 
 from monoscale_pose import progress
 
@@ -36,6 +36,8 @@ from monoscale_pose.odom_filter import (
     parse_tracker_esm,
     covariance_matrix_is_usable,
     interpolate_pose_covariance,
+    pose_provenance_kind,
+    unknown_pose_covariance,
     wrap_pi,
 )
 
@@ -208,6 +210,10 @@ class OdomStabilizer(Node):
         self.pub = self.create_publisher(Odometry, self.output_topic, 30)
         self.status_pub = self.create_publisher(String, "/localization/odom_filter_status", 10)
         self.progress_pub = self.create_publisher(PipelineProgress, progress.TOPIC, 50)
+        # Provenance of every published pose (same stamp), right after it.
+        self.provenance_pub = self.create_publisher(
+            PoseProvenance, self.output_topic + "/provenance", 200)
+        self.provenance_counts = {"raw": 0, "interpolated": 0, "imu_fill": 0, "unknown": 0}
         self.watermark = progress.MonotonicWatermark()
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
         self.sub = self.create_subscription(
@@ -335,7 +341,7 @@ class OdomStabilizer(Node):
         if self.previous_corrected is None:
             while self.pending_vision_stamps and self.pending_vision_stamps[0] <= stamp:
                 self.pending_vision_stamps.popleft()
-            self.emit_odom(current[4], stamp, pose, roll, pitch)
+            self.emit_odom(current[4], stamp, pose, roll, pitch, ("raw", "raw", stamp, stamp))
             self.previous_corrected = current
             return
 
@@ -460,7 +466,10 @@ class OdomStabilizer(Node):
                 self._set_resampled_covariance(
                     output_template, previous[4], current[4], ratio, span,
                     distance, resample_kind)
-            self.emit_odom(output_template, target, held_pose, held_roll, held_pitch)
+            self.emit_odom(output_template, target, held_pose, held_roll, held_pitch,
+                           (pose_provenance_kind(resample_kind, is_resampled),
+                            resample_kind if is_resampled else "raw",
+                            previous[0] if is_resampled else stamp, stamp))
             if is_resampled:
                 self.resampled_published += 1
                 if resample_kind == "stationary":
@@ -483,8 +492,13 @@ class OdomStabilizer(Node):
         out.pose.covariance = interpolate_pose_covariance(
             previous_cov, current_cov, ratio, span, distance, kind)
 
-    def emit_odom(self, template, stamp_sec, pose, roll, pitch):
+    def emit_odom(self, template, stamp_sec, pose, roll, pitch, provenance=("unknown", "", 0.0, 0.0)):
         out = copy.deepcopy(template)
+        # MonoScale leaves the covariance at all zeros when it has no estimate; that
+        # must not read as certainty downstream, so an unusable one is "unknown".
+        covariance_valid = covariance_matrix_is_usable(out.pose.covariance)
+        if not covariance_valid:
+            out.pose.covariance = unknown_pose_covariance()
         out.header.stamp.sec = int(math.floor(stamp_sec))
         out.header.stamp.nanosec = int(round((stamp_sec - out.header.stamp.sec) * 1e9))
         if out.header.stamp.nanosec >= 1_000_000_000:
@@ -522,6 +536,7 @@ class OdomStabilizer(Node):
         )
         self.pub.publish(out)
         self.last_emitted_stamp_ns = out.header.stamp.sec * 1_000_000_000 + out.header.stamp.nanosec
+        self.publish_provenance(out.header, provenance, covariance_valid)
 
         if self.tf_broadcaster is not None:
             transform = TransformStamped()
@@ -532,6 +547,21 @@ class OdomStabilizer(Node):
             transform.transform.translation.z = out.pose.pose.position.z
             transform.transform.rotation = out.pose.pose.orientation
             self.tf_broadcaster.sendTransform(transform)
+
+    def publish_provenance(self, header, provenance, covariance_valid):
+        kind, resample_kind, raw_lower, raw_upper = provenance
+        msg = PoseProvenance()
+        msg.header = header
+        msg.kind = {"raw": PoseProvenance.RAW, "interpolated": PoseProvenance.INTERPOLATED,
+                    "imu_fill": PoseProvenance.IMU_FILL}.get(kind, PoseProvenance.UNKNOWN)
+        msg.resample_kind = resample_kind
+        msg.covariance_valid = covariance_valid
+        for field, sec in (("raw_lower", raw_lower), ("raw_upper", raw_upper)):
+            stamp = getattr(msg, field)
+            stamp.sec = int(math.floor(sec))
+            stamp.nanosec = min(int(round((sec - stamp.sec) * 1e9)), 999_999_999)
+        self.provenance_pub.publish(msg)
+        self.provenance_counts[kind if kind in self.provenance_counts else "unknown"] += 1
 
     def publish_progress(self):
         # Watermark: the newest pose published. Poses are emitted in increasing
@@ -565,6 +595,7 @@ class OdomStabilizer(Node):
             "imu_stationary_gaps_rejected_total": self.imu_stationary_gap_rejected,
             "imu_stationary_resampled_total": self.imu_stationary_resampled_published,
             "imu_fill_gaps_accepted_total": self.imu_fill_gaps_accepted,
+            "provenance_counts": self.provenance_counts,
             "imu_fill_gaps_rejected_total": self.imu_fill_gaps_rejected,
             "imu_fill_published_total": self.imu_fill_published,
             "pending_vision_stamps": len(self.pending_vision_stamps),

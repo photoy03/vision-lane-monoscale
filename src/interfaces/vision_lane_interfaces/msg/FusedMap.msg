@@ -18,3 +18,12 @@ string pose_match                       # exact | interpolated | gap_too_large |
 geometry_msgs/Pose2D pose
 builtin_interfaces/Time pose_lower
 builtin_interfaces/Time pose_upper
+# Provenance of the pose at T (from <pose topic>/provenance). Read together with
+# pose_match: an exact pose has its sample's kind; an interpolated pose is never RAW
+# (at least INTERPOLATED, or the weaker endpoint). UNKNOWN when provenance is missing.
+uint8 pose_kind                          # PoseProvenance constants
+bool pose_covariance_valid               # false: variances unknown (both fields hold -1)
+float64 pose_position_variance
+float64 pose_yaw_variance
+builtin_interfaces/Time pose_raw_lower   # raw measurements behind the pose at T
+builtin_interfaces/Time pose_raw_upper
