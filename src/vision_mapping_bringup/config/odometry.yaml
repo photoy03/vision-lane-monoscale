@@ -1,0 +1,7 @@
+# Vehicle overrides only. Node defaults live in the owning package:
+#   monoscale_odometry/config/{vision_fisheye,deployment}.param.yaml (monoscale_odometry)
+# launch_arguments: command-line knobs. An empty value means "use the package default".
+launch_arguments:
+  odom_executor_threads: ''
+  odom_profile: bounded
+  imu_accel_shadow: 'false'

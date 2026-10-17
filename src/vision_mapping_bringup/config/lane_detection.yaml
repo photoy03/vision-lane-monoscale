@@ -1,0 +1,31 @@
+# Vehicle overrides only. Node defaults live in the owning package:
+#   lane_detection/config/global_mapping_cpp.yaml (global_mapping_cpp)
+# launch_arguments: command-line knobs. An empty value means "use the package default".
+global_mapping_cpp:
+  ros__parameters:
+    camera_frame: front_camera_optical_frame
+    capture_buffer_size: 1
+    capture_fourcc: MJPG
+    capture_fps: 30.0
+    capture_height: 1440
+    capture_poll_ms: 1
+    capture_width: 2560
+    v4l2_device: /dev/video2
+launch_arguments:
+  lane_duplicate_render_offset_m: ''
+  lane_duplicate_candidate_offset_m: ''
+  lane_sync_wait_sec: ''
+  lane_prediction_wait_sec: ''
+  lane_sync_queue_size: ''
+  lane_odom_buffer_sec: ''
+  lane_pending_recovery: 'true'
+  lane_pending_ttl_sec: ''
+  lane_pending_max_count: ''
+  lane_pending_gap_grace_sec: ''
+  lane_pending_commit_budget: ''
+  lane_pending_readiness: ''
+  lane_pending_blocked_head_grace_sec: ''
+  lane_pending_drop_unresolvable: ''
+  warmup_frames: ''
+  image_quality_gate_mode: monitor
+  image_quality_min_sharpness: ''

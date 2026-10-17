@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>map_assembly</name>
+  <version>0.1.0</version>
+  <description>Time-matched map set: lane map + occupancy grid exact at one capture time T, and its one-image view.</description>
+  <maintainer email="ujin@tukorea.ac.kr">photoy03</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>vision_lane_interfaces</depend>
+  <depend>monoscale_pose</depend>
+  <depend>libopencv-dev</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

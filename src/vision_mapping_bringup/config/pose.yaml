@@ -1,0 +1,17 @@
+# Vehicle overrides only. Node defaults live in the owning package:
+#   monoscale_pose/config/odom_stabilizer.yaml (lane_odom_stabilizer)
+# launch_arguments: command-line knobs. An empty value means "use the package default".
+launch_arguments:
+  yaw_correction_enabled: ''
+  vision_yaw_sign: ''
+  imu_yaw_rate_tau_sec: '0.12'
+  yaw_bias_tau_sec: ''
+  yaw_bias_limit_deg_s: ''
+  yaw_straight_rate_deg_s: ''
+  yaw_straight_hold_sec: ''
+  yaw_turn_blend: ''
+  straight_resample_span_sec: ''
+  yaw_max_visual_correction_deg: ''
+  resample_odom_to_camera: ''
+  # IMU-rate pose fill between raw visual odometry updates (lane_odom_stabilizer imu_fill_enabled).
+  pose_imu_fill: ''

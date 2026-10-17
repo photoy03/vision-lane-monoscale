@@ -1,0 +1,39 @@
+# ROS 2 / colcon 산출물
+/build/
+/install/
+/log/
+
+# rosbag 및 대용량 기록
+rosbag2_*/
+*.db3
+*.mcap
+*.bag
+
+# 영상·결과물
+*.mp4
+*.avi
+*.mkv
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+dist/
+
+# 평가 결과
+docs/evaluation_runs/
+
+# 에디터·OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# 성능 평가·검증 보고서와 설계 측정 문서 (공개 저장소에 올리지 않음)
+docs/LAYOUT_VALIDATION_*.md
+docs/design/
+docs/reports/
+*_REPORT.md
+*_REPORT_*.md

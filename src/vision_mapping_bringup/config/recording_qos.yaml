@@ -1,0 +1,44 @@
+/sensing/camera/front/fisheye/image_raw:
+  history: keep_last
+  depth: 5
+  reliability: best_effort
+  durability: volatile
+/sensing/camera/front/fisheye/camera_info:
+  history: keep_last
+  depth: 5
+  reliability: best_effort
+  durability: volatile
+/sensing/camera/rear/fisheye/image_raw:
+  history: keep_last
+  depth: 5
+  reliability: best_effort
+  durability: volatile
+/sensing/camera/rear/fisheye/camera_info:
+  history: keep_last
+  depth: 5
+  reliability: best_effort
+  durability: volatile
+/sensing/imu/imu_data:
+  history: keep_last
+  depth: 200
+  reliability: best_effort
+  durability: volatile
+/measurement/front/image_raw/compressed:
+  history: keep_last
+  depth: 5
+  reliability: best_effort
+  durability: volatile
+/measurement/rear/image_raw/compressed:
+  history: keep_last
+  depth: 5
+  reliability: best_effort
+  durability: volatile
+/tf:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile
+/tf_static:
+  history: keep_all
+  reliability: reliable
+  durability: transient_local

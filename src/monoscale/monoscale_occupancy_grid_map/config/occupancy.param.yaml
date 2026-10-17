@@ -1,0 +1,76 @@
+# The plane-sweep occupancy mapper, deployed.
+#
+# Every operating-point number lives in SweepSettings' defaults, measured on
+# approach_hd60_occ_b and scored against truth; this file carries only what the
+# node cannot know -- which topics to read, and where the cameras are. The lens
+# entries are the same ones vision_fisheye.param.yaml gives the estimator.
+/monoscale_occupancy_grid_map:
+  ros__parameters:
+    cameras: ['front', 'rear']
+    image_topics:
+      - '/sensing/camera/front/fisheye/image_raw'
+      - '/sensing/camera/rear/fisheye/image_raw'
+    info_topics:
+      - '/sensing/camera/front/fisheye/camera_info'
+      - '/sensing/camera/rear/fisheye/camera_info'
+    # The estimator's output, not the truth: this is the deployed chain. The
+    # name has to match what monoscale_odometry publishes -- its default is
+    # `/localization/kinematic_state`, Autoware's name for the same thing, and
+    # the port session's default of `/localization/odometry` came from the
+    # bench harness. They do not connect, and nothing says so: the node starts,
+    # subscribes, and publishes an empty grid forever.
+    odometry_topic: '/localization/kinematic_state'
+    occupancy_topic: '/perception/occupancy_grid_map'
+    map_frame: 'map'
+    base_frame: 'base_link'
+    # The width the sweep works at. 1280 is what the operating point was
+    # measured at and what the frame caches hold.
+    processing_width: 1280
+    use_cuda: true
+    rolling_radius_m: 60.0
+    # GitHub's documented/scored map: fixed 600x600 cells at 0.1 m, anchored
+    # at the first pose with origin (-30,-30). Use 'rolling' for the newer
+    # vehicle-centred sparse mode.
+    extent_mode: 'github_fixed'
+    # 5 cm saturated the shared camera/odometry pipeline even on CUDA. The
+    # sweep already uses source baselines at 0.6 m and beyond, so 25 cm keeps
+    # useful overlap while cutting GPU submissions and host copies by ~5x.
+    keyframe_travel_m: 0.25
+    # Live odometry is noisier than the truth-pose benchmark. Require repeated
+    # evidence, but expose cells after roughly 2-3 consistent observations.
+    occupied_probability: 0.85
+    free_probability: 0.40
+    # Real fisheye/JPEG road costs are roughly 1000-5000 after four SGM paths;
+    # the original 60 gate rejects virtually every free-space candidate.
+    # Keep this conservative until a labelled obstacle/free-space bag is available.
+    free_cost_max: 1000.0
+    # Bound repeated free rays and let new obstacle evidence recover a cell.
+    free_cap: 0.5
+    free_to_occupied: 1.0
+    occlusion_aware: 0.55
+    # Automatically area-scaled by (processing_width / 1280)^2.
+    min_blob_reference_pixels: 80
+    max_pending_keyframes: 2
+    # Live odometry arrives at a few Hz; 0.40 s is the gap the live pipeline uses.
+    max_odom_interpolation_gap_sec: 0.40
+    max_odom_interpolation_translation_m: 0.10
+    max_odom_interpolation_yaw_deg: 3.0
+    image_quality_gate_mode: 'reject'
+    image_quality_min_sharpness: 25.0
+    publish_rate_hz: 5.0
+    front:
+      k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
+      d: [0.0, 0.0, 0.0, 0.0]
+      distortion_model: 'equidistant'
+      frame_id: 'front_fisheye_camera_optical_frame'
+      calibration_width: 2560.0
+      rotation_base_from_camera: [0.0, -0.5, 0.8660254, -1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
+      translation_base_from_camera: [3.694, 0.0, 0.89]
+    rear:
+      k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
+      d: [0.0, 0.0, 0.0, 0.0]
+      distortion_model: 'equidistant'
+      frame_id: 'rear_fisheye_camera_optical_frame'
+      calibration_width: 2560.0
+      rotation_base_from_camera: [0.0, 0.5, -0.8660254, 1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
+      translation_base_from_camera: [-0.82, 0.0, 1.26]

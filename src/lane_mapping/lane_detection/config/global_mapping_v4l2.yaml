@@ -1,0 +1,15 @@
+# Standalone V4L2 overlay, loaded after global_mapping_cpp.yaml.
+# This node owns the device and keeps only the newest frame; stop other camera
+# drivers first because a V4L2 device is normally exclusive.
+global_mapping_cpp:
+  ros__parameters:
+    input_mode: v4l2
+    v4l2_device: /dev/video2
+    capture_width: 2560
+    capture_height: 1440
+    capture_fps: 30.0
+    capture_fourcc: MJPG
+    capture_buffer_size: 1
+    capture_poll_ms: 1
+    camera_frame: front_camera_optical_frame
+    profile_csv_path: /tmp/v52_cpp_v4l2_profile.csv

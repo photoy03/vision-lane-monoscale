@@ -1,0 +1,11 @@
+# Whole-pipeline launch options.
+launch_arguments:
+  use_sim_time: 'false'
+  launch_viewer: 'true'
+  launch_rviz: 'false'
+  launch_occupancy: 'false'
+  stage_diagnostics: 'false'
+  recovery_session_id: ''
+  output_dir: ''
+  # Time-matched map set + its image (map_assembly). Empty = off.
+  launch_fusion: ''

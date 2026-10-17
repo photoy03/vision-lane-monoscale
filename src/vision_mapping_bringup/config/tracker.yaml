@@ -1,0 +1,19 @@
+# Vehicle overrides only. Node defaults live in the owning package:
+#   monoscale_odometry/config/{vision_fisheye,deployment}.param.yaml (feature_tracker)
+# launch_arguments: command-line knobs. An empty value means "use the package default".
+launch_arguments:
+  tracker_processing_width: ''
+  tracker_max_features: ''
+  tracker_lk_window_px: ''
+  tracker_lk_pyramid_levels: ''
+  tracker_input_queue_depth: ''
+  tracker_input_reliability: ''
+  tracker_motion_prediction: ''
+  tracker_motion_warp: ''
+  tracker_opencv_threads: ''
+  tracker_executor_threads: ''
+  tracker_gyro_prediction_mode: ''
+  tracker_gyro_time_offset_sec: ''
+  tracker_gyro_history_sec: ''
+  tracker_gyro_max_gap_sec: ''
+  tracker_imu_yaw_history_sec: ''

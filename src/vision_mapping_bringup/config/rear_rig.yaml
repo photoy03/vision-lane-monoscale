@@ -1,0 +1,9 @@
+# Provisional rear camera pose in base_link; update after measuring the mount.
+# The same intrinsics as the front camera may be selected in the launch file.
+camera_forward_m: -0.30
+camera_left_m: 0.0
+camera_height_m: 1.20
+pitch_deg: 30.0
+roll_deg: 0.0
+yaw_deg: 180.0
+

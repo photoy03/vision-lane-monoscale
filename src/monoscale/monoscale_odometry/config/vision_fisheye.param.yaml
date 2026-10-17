@@ -1,0 +1,1525 @@
+# The fisheye variant: the assembled 2560x1440 equidistant pair instead of the
+# 640 pinholes.
+#
+# fx = fy = 1051.81 px/rad is the entire lens -- equidistant means r = f*theta,
+# so there is no distortion vector to fit and d stays zero. The estimator
+# already had the branch for it: undistort_pixels sends `equidistant` through
+# cv2.fisheye.undistortPoints, which normalises feature points rather than
+# rectifying whole images, so none of the resolution the projection saved is
+# spent back.
+#
+# processing_width is 1920, where the frame carries 13.77 px per degree -- the
+# same as the 1920 pinhole at 93.7 degrees, for 139.5 degrees of field instead
+# of 101. Dropping to 640 would land on 4.59, which is what the old 640 pinhole
+# gave, and the measurements below the setting say what that costs.
+/**:
+  ros__parameters:
+    # Measure the step from the road region itself, and spend it where the map
+    # is silent. Measured 08-28 on the nine-drive set, against this file with
+    # everything below switched off:
+    #
+    #   RPE 5/10/20/40  0.402/0.300/0.227/0.164 -> 0.320/0.236/0.179/0.134
+    #   hop%  0.42 -> 0.31      walk  1.86 -> 1.56
+    #   ATE   0.0658 -> 0.0541  worst 0.1041 -> 0.1001
+    #   repeat spread          1.42 -> 1.26
+    #
+    # All nine improve, which nothing else this session managed: every other
+    # switch that bought the per-hop terms sold the accumulated one and the
+    # other way round. This one does not, because it adds no freedom -- it
+    # replaces a vote over individually ambiguous asphalt corners with one
+    # measurement over the whole region, and a warp that either lands on itself
+    # or does not.
+    #
+    # `road_from_step` is read by the tracker, which this file reaches through
+    # its `/**:` wildcard. Without it the tracker publishes no photometric block
+    # and the three settings under it have nothing to consume.
+    # Which cameras the graph fuses, read by all three nodes. One is enough --
+    # the filter then carries `single_camera_variance` where two would carry
+    # their disagreement -- and there is no upper bound: frames are aligned by
+    # stamp, not by being a pair. The estimator also answers to the older name
+    # `camera_names`, and warns when it is the one that supplied the list.
+    cameras: ['front', 'rear']
+    image_topics:
+      - /sensing/camera/front/fisheye/image_raw
+      - /sensing/camera/rear/fisheye/image_raw
+    info_topics:
+      - /sensing/camera/front/fisheye/camera_info
+      - /sensing/camera/rear/fisheye/camera_info
+    road_from_step: true
+    # The four-parameter fit that frees step, turn, pitch and roll over the
+    # hop. Its code default is false, so every launch that reached deployment
+    # ran without it -- while the benchmark's own track sets have always been
+    # extracted with `road_step_esm:=true`. The two were therefore never the
+    # same configuration, and the number this repository has been quoting was
+    # not the number the launch produced.
+    #
+    # Measured 2026-09-08 on the nine re-recorded drives, same params, only
+    # this key moved:  ATE/거리 0.0445% -> 0.0229% mean, 0.0682% -> 0.0389%
+    # worst, walk 1.59 -> 0.94. The shape says where it lands: hop% is
+    # unchanged (0.14 vs 0.16) and RPE 5m barely moves (0.170 -> 0.158), while
+    # RPE 40m nearly halves (0.103 -> 0.058). One hop was already right; what
+    # was missing was heading. With the fit off the tracker does not append the
+    # three angles at all (`if (road_step_esm_)`), so `camera.esm_valid` never
+    # becomes true and the ESM yaw observation at `estimator.cpp:1380` -- armed
+    # here by `esm_yaw_sigma_rad` -- could never fire.
+    #
+    # `road_step_calibrate` is deliberately *not* set alongside it. It feeds
+    # only `camera.band_pitch`/`band_roll`, which `band_attitude` gates and
+    # that defaults false, so it buys nothing and costs frame time: an
+    # esm-only extraction scores 0.0229% / 0.0389%, matching the set that
+    # carries both.
+    road_step_esm: true
+    # How many of the fit's four parameters it may move, in the order
+    # (step, yaw, pitch, roll). 4 is what every recorded number came from until
+    # 2026-09-11; 3 drops the roll.
+    #
+    # Roll is free to drop and pitch is not, which is the opposite of what the
+    # geometry suggests. The truth pitch is -0.0002 to -0.0005 deg on every
+    # drive -- zero -- so freeing it looks like estimating a quantity that is
+    # not there, and the band's own covariance says step and pitch are 0.93
+    # correlated, so whatever it estimates lands on the step. Measured:
+    #
+    #   dof   bench ATE/거리     held-out ATE       held-out 끝오차
+    #   4     0.0234% / 0.0402%  0.1833% / 0.2893%  0.1582% / 0.2361%
+    #   3     0.0237% / 0.0391%  0.1781% / 0.2659%  0.1461% / 0.1937%
+    #   2     0.0647% / 0.0971%  0.2077% / 0.3382%  0.2749% / 0.4695%
+    #
+    # Dropping pitch as well costs **2.8x**. The note in feature_tracker.cpp
+    # anticipated exactly this and it is right: the angles are not consumed as
+    # angles, but they absorb model error the step would otherwise take as
+    # scale. A truth pitch of zero does not make a fitted pitch useless -- it is
+    # the family's only outlet for whatever the plane model cannot express, and
+    # that is why the photometric length's bias splits by road surface with it
+    # free and does not with it fixed.
+    #
+    # 3 is taken on the held-out set: -2.8% and -8.1% on ATE, -7.6% and -18.0%
+    # on the final error, with the bench a wash inside its 1.05x repeat floor
+    # and its worst drive 2.7% better. It is also cheaper, measured on
+    # straight120_v2: warps 99102 -> 74557 (-24.8%), warps per solve 27.5 ->
+    # 20.7, the road stage 8.49 -> 7.09 ms at the front mount and 8.68 -> 7.72
+    # at the rear.
+    road_step_esm_dof: 3
+    # The hop follows the arc the body actually travels, not the chord.
+    #
+    # A vehicle turning by `psi` while advancing `s` displaces by
+    # `(s sin psi / psi, s (1 - cos psi) / psi)` in the starting body frame, and
+    # the chord form left the lateral half-step out entirely. The derivation and
+    # the yaw error it explains are in feature_tracker.cpp; this key is the
+    # deployment decision, which waited on an eleven-drive judgement that the
+    # code default (false) was holding open.
+    #
+    # Judged 2026-09-11, only this key moved. Bench nine: ATE/거리 0.0226% ->
+    # 0.0224% mean, 0.0375% -> 0.0379% worst -- a wash, both inside the 1.05x
+    # repeat floor. Held-out park: 0.1880% -> 0.1875% mean and 0.2915% ->
+    # 0.2905% worst, 끝오차/거리 0.1777% -> 0.1750% and 0.2611% -> 0.2557%;
+    # slightly better on every metric and worse on none.
+    #
+    # What decides it is not the error. First it is the correct geometry, and
+    # at `psi` = 0 both forms reduce to `(1, 0)` exactly, so a straight hop is
+    # bit for bit what it always was -- nothing the straights established is at
+    # risk. Second it measures more: the road fit returns a step on **4.4% more
+    # frames** on the turning drives (curve_s20 1692 -> 1766, curve_s27_low
+    # 2490 -> 2600 on the front camera) against +0.3% on straight120_v2, which
+    # is that comparison's own churn floor (37 frames gained, 31 lost). The
+    # chord mismatches the true flow through a turn, the correlation peak
+    # degrades, and the search fails; the arc matches it and the search lands.
+    #
+    # The length is untouched: measured against truth with photometric_bias.py,
+    # curve_s20 +0.206% -> +0.197%, curve_s27_low +0.115% -> +0.118%,
+    # straight120_v2 -0.025% -> -0.026%, all inside the 0.033% three-recording
+    # spread. The earlier note here arguing the arc moved the length "the wrong
+    # way" was measured before that instrument was corrected for the truth
+    # pose's report point, and it was noise on a bent baseline.
+    road_step_arc: true
+    # Interpolate the warp map cubically, on a stride-4 lattice.
+    #
+    # The map is the fisheye composed with the homography and it is curved over
+    # a lattice cell, so joining exact samples with straight lines leaves the
+    # second-order term with a fixed sign inside every cell -- a bias of about a
+    # tenth of a pixel, reading opposite ways on the two mounts because their
+    # ground flows opposite ways. Synthetic pair, front camera, 61.5 mm of step:
+    # the aligner's own bias is -0.501% at stride 8 linear and +0.018% here.
+    #
+    # Cubic leaves O(h^4) where linear leaves O(h^2), so halving the stride from
+    # 8 to 4 buys sixteenfold and the pair together is better than no lattice at
+    # all (stride 1 reads -0.026 mm against +0.0095 mm here) at half the cost.
+    # `road` goes 6.5 ms a camera to 8.1.
+    road_step_cubic_map: true
+    road_step_fit_stride: 4
+    road_step_stride: 4
+    # Coarse candidates, and the same count again over one coarse spacing.
+    #
+    # 13 was chosen when the search's answer was the answer. It is not any
+    # more: the fit above overwrites it, so the search only has to put the seed
+    # inside the fit's basin. Measured 2026-09-08 on the nine re-recorded
+    # drives, ATE/거리 mean/worst: 13 gives 0.0229%/0.0389%, 9 gives
+    # 0.0231%/0.0383%, 7 gives 0.0233%/0.0380%. The mean moves inside the
+    # harness's own +-2% repeat noise and the worst improves, while `road`
+    # falls 9.01 ms a frame to 7.20.
+    #
+    # 7 rather than lower because the fit's own warp count says where the seed
+    # stops being good enough: it sits at the 13-sample level through 7 on both
+    # a straight and a curve (27.1 and 30.5), and rises at 6 on the curve
+    # (31.1) and at 5 on the straight (38.2) as the fit starts working to make
+    # up the difference. Below that the search saves warps the fit spends back.
+    road_step_samples: 7
+    # The step goes in as a prior and a gate on frames the map did not answer,
+    # not as an overwrite. Overwriting the hop was measured and loses: the map's
+    # hop is a pose *correction*, not a displacement, and rescaling it to a
+    # measured distance takes away the thing that bounds the drift. Blending on
+    # every frame reads hop% 0.42 -> 0.22 and ATE 0.0526 -> 0.1361 for exactly
+    # that reason.
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 0.4 -> 1.0. The blend that lost at 0.4 above was
+    # measured with `photometric_align_prior` on; with it off the step is a
+    # prior on a hop the map did not answer and full gain is what wins
+    photometric_step_gain: 1.0
+    photometric_when_mapless: true
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): true -> false. It also breaks the bearing tilt
+    # independently of `ground_min_inliers`, which cost a session to separate
+    photometric_align_prior: true
+    # An even spread of anchor bearings, admitted rather than evicted. The map's
+    # longitudinal information is not where its anchors are: measured 08-28,
+    # 92.1% of them sit within fifteen degrees of straight astern holding 9.7%
+    # of it, while 0.2% abreast hold 57%. An anchor dead astern recedes radially
+    # and its bearing hardly turns, so it says little about how far the vehicle
+    # went; one abreast sweeps past and pins it. A quota per polar cell moves
+    # the population that way -- astern 92.1% -> 78.3% -- and buys walk
+    # 1.86 -> 1.75 at an ATE of 0.0654 against 0.0658.
+    anchor_polar_quota: 400
+    use_sim_time: true
+
+    # `<camera>_image_topic` and `<camera>_camera_info_topic`, composed per
+    # camera in parameters.cpp rather than written out, which is why a search
+    # for either name finds nothing and they look dead. They are not: the
+    # camera_info pair is what lets the estimator take its intrinsics from the
+    # recording instead of from `k` below, and removing it moves the nine-drive
+    # headline 0.0254 -> 0.0453.
+    #
+    # The estimator reads these; the tracker does not -- it takes an
+    # `image_topics` array instead, which the live graph supplies from
+    # `deployment.param.yaml`. Two spellings of one idea, and the reason the
+    # deployed tracker spent a while subscribed to topics nobody publishes.
+    # CARLA derives a valid pinhole CameraInfo from the blueprint FOV, unlike
+    # the Isaac cameras whose CameraInfo was all zeros.
+    use_camera_info: true
+    imu_topic: /sensing/imu/imu_data
+    # Where the IMU actually sits, from base_link: (1.35, 0, 0.34). Left at
+    # zero, which means the samples are used exactly as they arrive.
+    #
+    # The lever arm is real and CARLA renders it. Regressing the measured
+    # lateral specific force on v*omega and on yaw acceleration recovers the
+    # arm as the alpha coefficient: 1.425 m on park_clean, 1.376 on
+    # approach_hd60, 1.209 on park_obst_a, against the 1.35 configured, and
+    # including the term takes the explained variance from 0.25 to 0.46 and
+    # from 0.10 to 0.42 on the first two. It is not small either -- the
+    # tangential part runs 0.727 m/s^2 at p95 through a parking manoeuvre
+    # against a 1.277 m/s^2 signal.
+    #
+    # Compensating it correctly still costs: mean ATE 0.1302 -> 0.1352, and
+    # the cost falls monotonically as the differentiated term is smoothed away
+    # (tau 0 / 0.02 / 0.05 / 0.15 give 0.1373 / 0.1358 / 0.1352 / 0.1341,
+    # centripetal alone 0.1323). Nothing unlocks it: trusting the
+    # accelerometer more afterwards is worse with the arm on or off (noise 0.6
+    # gives 0.289 on / 0.267 off), and a faster attitude filter tracks the
+    # uncompensated one at every tau. The pose comes from the ground solve and
+    # the accelerometer is held at noise 1.55, i.e. barely consulted, so the
+    # correction buys less than the gyro differentiation it costs.
+    #
+    # Set it to [1.35, 0.0, 0.37635] on a rig whose accelerometer is actually
+    # trusted. The physics does not stop being right here.
+    #
+    # 0.3772, not the 0.34 the sensor kit lists: that file measures z from the
+    # CARLA actor origin, which sits actor_origin_height_m = 0.03635 off the
+    # road, while base_link here is on the road -- which is exactly why the
+    # camera heights below read 0.88915 and 1.25915 rather than the kit's 0.8528
+    # and 1.2228. The cameras got that correction and the arm did not. It barely
+    # matters for a road vehicle: the rotation is nearly all yaw, and both
+    # alpha x r and omega x (omega x r) drop the z component of r under a
+    # z-axis rotation, so this is correctness rather than accuracy.
+    #
+    # Measured with the arm on at the corrected softness: 0.1951 -> 0.1964,
+    # inside the +-2% this harness resolves. Neutral, not a loss -- the earlier
+    # note that compensating it "costs" was reading noise as signal. Scored
+    # against the truth attitude instead, where it should show if anywhere, it
+    # moves the combined roll+pitch error 0.450 -> 0.456 deg, and the only
+    # drive that improves is park_clean at -5.5%, which is the one drive where
+    # the term was measured to be large.
+    imu_translation_base_from_imu: [0.0, 0.0, 0.0]
+    imu_angular_accel_tau_sec: 0.05
+    use_imu_yaw: true
+    # The heading, from the gyro rather than from the orientation the IMU
+    # reports.
+    #
+    # That orientation is CARLA's truth on these bags -- 0.000000 deg RMS yaw
+    # against the ground truth pose -- so every number ever measured under it
+    # was conditional on a heading no real rig has. The gyro is a real reading:
+    # its z bias measures 0.0003 to 0.90 deg/s across the recordings, differing
+    # in value and sign per run, and integrating it alone costs ATE 0.0363 ->
+    # 4.9072 over eleven drives.
+    #
+    # What makes it usable is the ESM's turn as an observation of that heading.
+    # The anchor map cannot serve: it is built in the estimator's own frame, so
+    # a slow heading drift turns the map and the vehicle together and the
+    # alignment residual barely moves -- with it as the only observer the
+    # filter recovered 21% of the bias, with the ESM beside it, 89-115%.
+    #
+    # Eleven drives: ATE 0.3632, worst 0.6875, RPE 5/10/20/40 m of
+    # 3.124/1.000/0.780/0.682 %, hop% 0.18. That is ten times the truth-yaw
+    # configuration and it is what a self-contained heading costs here. The
+    # binding term is the ESM front camera's own accumulated yaw error, 0.29 to
+    # 2.52 deg a drive, which is not a constant and so cannot be calibrated
+    # out. Repeat spread over three recordings of one condition is 1.24x here
+    # against 2.02x under the truth heading.
+    #
+    # To go back to the instrument's orientation, BOTH of the first two lines
+    # have to move: `gyro_bias_sigma_rad_s` is what enables the heading filter
+    # at all, and enabling it under a heading that is already exact is all cost
+    # -- mean ATE 0.1703 -> 0.8056 when that was last measured.
+    imu_yaw_from_gyro: true
+    # Zero, which switches the heading filter off entirely.
+    #
+    # The filter was turned on 2026-08-29 to chase a gyro bias of up to
+    # 0.9 deg/s. That bias was a PhysX substep artefact -- `max_substep_delta_
+    # time` at CARLA's default 0.01 leaves two 8.33 ms substeps inside a 1/60 s
+    # step, and the vehicle's reported angular velocity then stops integrating
+    # to the rotation its own transform performs. Fixed in the bridge at 0.002
+    # and the bench set re-recorded 2026-09-02: the worst drive's phantom rate
+    # went 0.90212 to 0.00348 deg/s, its integrated error 54.14 to -0.06 deg.
+    #
+    # On those recordings there is nothing left for the filter to observe and
+    # it only costs. Eleven drives, best-known estimator settings:
+    #
+    #   filter off, ESM off   mean 0.2928  worst 1.0450
+    #   filter on,  ESM off   mean 0.8285  worst 2.5652
+    #   filter on,  ESM on    mean 0.6519  worst 1.7585
+    #
+    # `imu_yaw_from_gyro` stays true and is now free: integrating the gyro
+    # scores 0.2928 against 0.2924 for the truth heading, a 0.14% difference.
+    # The self-contained heading cost 76x before the recordings were fixed and
+    # costs nothing after.
+    #
+    # A real MEMS gyro does carry turn-on bias and in-run instability, so this
+    # will have to come back for hardware -- but tuned against a real gyro,
+    # not against a square wave that only ever existed in the simulator.
+    # How fast the bias is allowed to move. Never swept until now, and the code
+    # default of 1e-5 costs 12% of worst-drive: 1e-6/1e-5/1e-4/3e-4/1e-3 give
+    # 0.3657/0.3656/0.3632/0.4297/0.6939. An interior optimum, so the bias in
+    # these recordings is not a constant.
+    gyro_noise_sigma_rad_s: 0.001
+    # Front only. Over eleven drives the front camera's accumulated ESM yaw
+    # error stays inside 0.29-2.52 deg while the rear's reaches -36.78 on
+    # straight120_v3 and +35.58 on v4 -- one condition, two recordings,
+    # opposite sign. Averaging the two taught the filter the bias backwards on
+    # exactly those drives.
+    # Sigma is `esm_yaw_sigma_rad + esm_yaw_sigma_rate * |turn|`. The rate part
+    # is the load-bearing one: the ESM's yaw error is a scale on the rotation,
+    # 0.93/1.66/1.97% of the angle turned on curve_s05/s10/s20, so at 1.0 the
+    # observation is trusted only while the vehicle is going straight, which is
+    # where the bias is observable anyway. It took curve_s20 from 2.5560 to
+    # 0.0791, and measuring the ESM's error against truth puts the coefficient
+    # at 0.836 -- inside the scatter of 1.0, so it stands.
+    #
+    # The constant part is measured rather than swept. `MONOSCALE_HEADING_
+    # INNOVATION` writes each observation out; the ESM's error against truth on
+    # the six straight drives has robust sd 1.2-4.1e-5, and its own lag-1
+    # autocorrelation is 0.15-0.61, which inflates the sigma the filter needs by
+    # sqrt((1+rho)/(1-rho)) = 1.16-2.03. That puts it at 1.7e-5 to 6.5e-5.
+    # Three earlier derivations measured the wrong quantity and all lost: the
+    # innovation's own scatter (2.94e-5, rate 0.0073 -- the per-drive median
+    # absorbs the turn-proportional systematic and curve_s20 went 0.35 -> 2.05),
+    # the full regression of ESM error on turn (3.17e-4, mean 0.8584), and the
+    # straight-only fit with no correlation term (1.8e-5, mean 0.5534).
+    #
+    # A sweep puts the optimum at 1e-4, 17% better on the mean than this. The
+    # measured value is deployed instead: the fifty-fold gap between 2e-6 and
+    # the instrument's real noise is the result, and the last factor of two is
+    # fitting the score. The plateau the old comment recorded -- 2e-6 and 2e-5
+    # both giving 0.3632 -- was measured before `road_step_esm` reached this
+    # file, so the observation it describes was never running in deployment.
+    # How much of the learned bias to take out of the gyro itself. Zero: the
+    # value is in the filter correcting the pose, not in correcting the source.
+    # 0.15 is a wash, 1.0 is +27%, and negative is worse still.
+    # 100 Hz IMU against the same simulation clock as the images.
+    imu_max_age_sec: 0.02
+    # Carry yaw through a short visual-solve outage only with complete IMU
+    # sample coverage and a plausible total turn. The 2026-09-25 log has a
+    # 15.43 s visual gap while IMU samples remain continuous.
+    imu_yaw_only_max_gap_sec: 20.0
+    # A fixed 400-sample buffer lasted only four seconds on the live F9R and
+    # could permanently freeze visual solves after an ordinary stop.
+    imu_history_sec: 30.0
+
+    odometry_topic: /localization/kinematic_state
+    pose_topic: /current_pose
+    # REP-105. This estimator dead reckons, so its pose is odom->base_link and
+    # it drifts; map->odom is the correction and it has none, so that transform
+    # goes out as identity purely to complete the tree. Point a real localiser
+    # at map->odom and set publish_map_to_odom false, and nothing below changes.
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    # Independent USB cameras in the dual-camera bag were about 50 ms apart.
+    # A 60 ms gate retains more pairs. Each visual solve uses its camera's
+    # actual IMU yaw interval rather than the pair midpoint.
+    sync_tolerance_sec: 0.06
+
+    # Fallback intrinsics, used only until the first CameraInfo arrives. CARLA
+    # reports fx = width / (2 tan(fov/2)) = 200.45 for fov 134.669081 at 960
+    # px, and cx, cy at the exact image centre.
+    #
+    # The lens went to a 140 degree diagonal on 08-08 because the field edge,
+    # not any gate, was what cut the pavement off the bottom of the occupancy
+    # grid: the two 93.7 degree cameras between them ever held 73.7% of the
+    # cells the truth reference could see. fx fell from 450 with it, which is
+    # the whole cost -- the centre of the frame, where the ground solve reads,
+    # resolves 44% less angle than it did. The cameras are spawned at 960x540
+    # rather than the Isaac 1920x1080: the tracker runs at 640 px wide anyway,
+    # and two 1080p renders per frame starved the simulator of frames.
+    front:
+      horizontal_fov_deg: 139.470
+      k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
+      distortion_model: equidistant
+      d: [0.0, 0.0, 0.0, 0.0]
+      calibration_width: 2560
+      calibration_height: 1440
+      # Trim only the bottom sliver of the frame. This camera's lowest visible
+      # ground is 0.52 m ahead of it, so 0.6 discards a couple of rows; the
+      # 1.5 m this used to be threw away 48 % of the image, and it was the
+      # half where a pixel is worth 5 mm rather than the 34 cm it is worth at
+      # the far limit. Measured on a recorded drive: 0.6 m gives 1.11 % drift,
+      # 1.0 gives 1.94 %, 1.5 gives 2.62 %, 2.5 gives 4.03 %.
+      ground_min_distance_m: 0.6
+      # ROS optical axes expressed in base_link. Derived from the CARLA sensor
+      # kit pose (pitch -30 deg, yaw 0) and identical to the Isaac rig.
+      rotation_base_from_camera: [0.0, -0.5, 0.8660254, -1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
+      # x matches the kit exactly, and that is correct: both are base_link.
+      # The bridge converts to CARLA's vehicle-centre frame itself, in
+      # sensor_kit_loader, so neither file carries the offset.
+      #
+      # Height above the road, which is what the ground plane solve scales
+      # with -- not the offset the sensor is attached at, which is 0.03635 less
+      # because CARLA holds the actor origin off the ground.
+      # test_sensor_kit_consistency holds this and the kit together.
+      #
+      # 0.88915, not the 0.89 this carried until 2026-09-11. The kit's
+      # `actor_origin_height_m` was 0.0372 against a truth-pose measurement of
+      # 0.036354, and its own note said so and left it: the millimetre sat in a
+      # joint optimum with `ground_plane_offset_m`. That optimum was measured
+      # with `photometric_scale` absorbing length and before the ESM's pitch
+      # freedom was known to leak into the step.
+      #
+      # Predicted before it was measured, from delta/h alone: the photometric
+      # length bias falls 0.275% -> 0.180% here and 0.231% -> 0.164% at the
+      # rear. Measured +0.179% and +0.164%. Bench nine ATE/거리 0.0523% ->
+      # 0.0257%, held-out 0.1903% -> 0.1883%, better on every metric of both.
+      translation_base_from_camera: [3.694, 0.0, 0.88915]
+    rear:
+      horizontal_fov_deg: 139.470
+      k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
+      distortion_model: equidistant
+      d: [0.0, 0.0, 0.0, 0.0]
+      calibration_width: 2560
+      calibration_height: 1440
+      # CARLA sensor kit pose pitch -30 deg, yaw 180 deg.
+      rotation_base_from_camera: [0.0, 0.5, -0.8660254, 1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
+      translation_base_from_camera: [-0.82, 0.0, 1.25915]
+
+    # Run the tracker at 640x360 while keeping the 960x540 calibration scale.
+    # 2560 -- the fisheye's own size, with no downsampling at all. The fisheye carries 18.36 px per
+    # degree and downsampling spends it back. Measured on an 8 s drive, with
+    # the forward-backward threshold scaled to match:
+    #
+    #     width   2D ATE   drift   RPE
+    #      1280   0.060 m  0.51%  1.05%
+    #      1600   0.020    0.14   0.58
+    #      1920   0.028    0.23   1.32
+    #      2240   0.040    0.06   0.77
+    #      2560   0.039    0.09   0.81
+    #
+    # 2560 reads 0.168 m and 1.27% if lk_forward_backward_threshold_px is left
+    # at the 1.0 that suits 1920, which is what made the wider frame look worse
+    # than the narrower one for a while. It is not: that threshold is counted
+    # in pixels, so at a larger width the same physical disagreement measures
+    # bigger and the check throws away corners that were fine.
+    #
+    # Not every pixel-denominated parameter wants scaling. min_feature_distance
+    # 8 -> 24 costs 0.022 -> 0.053 m and lk_window 21 -> 31 costs 0.148, so
+    # dense corners and a small window still suit this manoeuvre. The
+    # triangulation and solve-trigger thresholds move nothing at all.
+    #
+    # 640, not 2560. The header above describes an assembled 2560x1440 pair,
+    # but `record_run.sh` records 1280x720 (`FISHEYE_ARGS -p width:=1280`,
+    # which is what fx = 525.91 is calibrated to). The tracker only downscales
+    # when `gray.cols > processing_width`, so on a 1280 frame **2560 did
+    # nothing at all** -- it silently tracked at native 1280, a setting nobody
+    # chose. That is not where the accuracy is. Sweeping the width alone, with
+    # every other tracker setting held, on straight120_v3:
+    #
+    #   width   320     480     640     960     1280
+    #   ate    0.608   0.208   0.099   0.184   0.269
+    #   points  256     576     706     764     760
+    #   spread 0.0211  0.0145  0.0086  0.0042  0.0035
+    #
+    # A sharp optimum, and the two arms fail differently: below 640 the ground
+    # solve starves, above it the points agree with each other *better*
+    # (spread falls) while the answer gets worse -- more agreement, less
+    # accuracy, the same trap `fuse_by_precision` fell into.
+    #
+    # This file's own settings at 640 beat the candidate's at 640 everywhere
+    # except a wash on park, so only the width was wrong:
+    #
+    #   drive   candidate 640    this file @ 640
+    #   1.5    0.191 / 0.45%    0.189 / 0.12%
+    #   2.0    0.099 / 0.12%    0.072 / 0.11%
+    #   4.0    0.232 / 0.36%    0.183 / 0.19%
+    #   8.0    0.817 / 2.94%    0.695 / 1.79%
+    #   park   0.246 / 1.06%    0.251 / 1.10%
+    #
+    # It is an absolute target width, so it survives the rig ever delivering
+    # the 2560 assembly the header assumes.
+    processing_width: 640
+    # 600 was set at parking speed and is the single biggest constraint at
+    # road speed: at a steady 8 m/s it left a median of 78 usable ground
+    # points per solve against 188 at 2.5 m/s, only 10 of them matching an
+    # anchor, and 32% of solves returned nothing at all. At 2000 the failures
+    # go to zero, the median rises to 426 with 132 anchored, and position RMSE
+    # over 34 m falls from 3.478 m to 0.250 m. It also helps at parking speed
+    # (0.213 -> 0.156 m), so there is no speed to trade off against.
+    max_features_per_camera: 2000
+    quality_level: 0.01
+    min_feature_distance_px: 8.0
+    lk_error_threshold: 30.0
+    lk_window_px: 21
+    lk_pyramid_levels: 5
+    # Detections spread over a grid of cells with a quota each, the way
+    # OpenVINS extracts (ov_core Grider_GRID), instead of taking the globally
+    # strongest corners. What the ground registration is conditioned on is how
+    # far apart the points are, not how many there are, and quality ordering
+    # hands the whole budget to whichever patch has the richest texture.
+    # ON. It used to be off here, justified by one measurement at 2000 features
+    # on a 34 m stretch at 8 m/s where the quota cost 0.250 -> 0.314 m. That
+    # does not reproduce anywhere in the purpose-recorded set. Grid off against
+    # grid on, ate_rmse over four speeds and both processing widths:
+    #
+    #   speed   640 on/off        2560 on/off        ground points on/off
+    #   1.5   0.191 / 7.307     0.240 / 4.869        738/673   1011/251
+    #   2.0   0.099 / 0.294     0.217 / 0.640        706/615    946/191
+    #   4.0   0.232 / 0.893     0.314 / 1.273        572/502    757/140
+    #   8.0   0.817 / 3.453     0.903 / 46.667       209/170    218/ 93
+    #
+    # Eight of eight, and worst exactly where this file is deployed: at 2560
+    # and 8 m/s the quality ordering leaves 93 usable ground points a solve and
+    # the estimate diverges. The comment above already says why -- what the
+    # registration is conditioned on is how far apart the points are -- and
+    # quality ordering spends the whole budget on whichever patch has the
+    # richest texture, which at these speeds is not the road.
+    detection_grid_columns: 4
+    detection_grid_rows: 3
+    # Left at 1.333 even though processing_width is now 640, where the old
+    # rule (1.0 suits 1920) would ask for 0.333. Measured: this file's settings
+    # at 640, fb gate included, beat the candidate's 1.0 at the same width on
+    # four of five drives -- see the table under processing_width. The rule was
+    # never checked below 1920 and does not hold there.
+    lk_forward_backward_threshold_px: 1.333
+
+    # Beyond this the ground plane assumption is doing most of the work and
+    # anything standing on the road projects far away and moves too fast,
+    # which biases the solve long.
+    # 8 m, down from 12. The far ground is where a small error in the assumed
+    # camera pitch turns into a large depth error, and how far out the band
+    # reaches moves the recovered scale monotonically: 6/8/10/12 m give scale
+    # 0.995/0.999/1.007/1.018 at a steady 8 m/s. At 12 the estimate over-
+    # travelled by 1.8%, which for a long time was hidden because it cancelled
+    # against the 0.375 m the pose lost while the map was warming up. With
+    # that offset gone the bias is what is left, and 8 m puts scale on 1.000 at
+    # both speeds: 0.091 m RMSE at 8 m/s and 0.103 m at 2.5.
+    ground_max_distance_m: 8.0
+    # Off. The adaptive band below was measured against bags re-recorded in
+    # this environment and helped there, but on the original recordings it
+    # hurts: park comes out at 2.518 m with scale 0.776 against 0.110 m and
+    # 0.996 with the band fixed. The original bags are the reference the
+    # recorded figures were taken on, so the fixed band stands until the
+    # adaptive one is shown to beat it on those.
+    # The plane fit's inlier gate, and the width of the Gaussian that now
+    # weights points inside it instead of counting them all alike.
+    #
+    # A hard gate makes the estimate a step function of its own threshold:
+    # sweeping it moved the score in jumps (0.04 was a disaster at 0.478, 0.08
+    # good, 0.12 worse, 0.30 good again) because a point crossing the edge
+    # changes from full vote to none. Weighting by exp(-d^2/2s^2) instead is
+    # what Chandraker et al. do for the same estimate (PAMI 2015, "High
+    # Accuracy Monocular SFM and Scale Correction for Autonomous Driving",
+    # their eq. 4 scores ground height by sum_j exp(-mu dh_ij^2) with mu = 50,
+    # i.e. s = 0.14 m), and it removes the jumps.
+    #
+    # Measured over ten drives, mean ATE: hard gate at 0.12 gives 0.1779; the
+    # pair below gives 0.1437, and nine of the ten drives improve. The gate is
+    # still needed -- widening it to 0.20 under the same softness costs 0.239 --
+    # so this is a soft weight inside a hard bound, not a replacement for it.
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 0.10 -> 0.06. The soft-weight-inside-a-hard-bound
+    # argument above is unchanged; only where the bound sits moved
+    ground_ransac_threshold_m: 0.06
+    #
+    # 0.055 until 08-25, when the residual it is a width over was finally
+    # measured rather than fitted. monoscale_replay reports it per camera:
+    #
+    #   nv2 .013/.020  nv3 .012/.017  nv4 .013/.018  ns15 .016/.024
+    #   ns4 .015/.018  s8  .042/.029  park .022/.028 pobst .052/.089
+    #   cs05 .020/.027 cs10 .021/.028 cs20 .018/.035
+    #
+    # So the weight was two to five times wider than the errors it weighs.
+    # Sweeping it down agrees with the measurement, and so does the fallback's
+    # (see ground_pair_softness_m); together, align/pair:
+    #
+    #   .055/.080  .040/.060  .030/.045  .025/.030  .020/.020
+    #   mean .2237     .2039      .1951      .1913      .1976
+    #   SD   .1755     .1733      .1633      .1592      .1551
+    #   MAX  .6912     .6848      .6369      .6251      .6200
+    #   rep   1.71x     1.98x      2.17x      2.41x      2.52x
+    #
+    # This is the one change in the session where the two criteria disagree.
+    # Mean, SD across the eleven drives, and the worst case all improve; the
+    # repeat spread of three recordings of one drive gets worse, in absolute
+    # metres as well as in ratio (0.052 -> 0.080 m), and two of that trio are
+    # worse outright. A narrower Gaussian is a smaller effective sample: more
+    # accurate on average, more variable run to run.
+    #
+    # Taken because the mean and the across-drive spread are what a general
+    # stack is judged on, and because the measurement says the old value was
+    # wrong rather than merely different. Seven of eleven drives improve, led
+    # by the slow drive (-68%) and 4 m/s (-33%).
+    #
+    # Making it follow the measured residual online rather than picking a
+    # better constant was implemented and lost -- see softness_from_residual in
+    # estimator.hpp. The residual varies seven times across these drives, so a
+    # constant cannot be right for all of them, and yet tracking it is worse.
+
+    # 0.030 / 0.045 -> 0.012 / 0.020 on 2026-08-26, found by asking which stage
+    # was correlating the hops rather than which was noisiest. Narrowing the
+    # pair width alone takes str_4.0's final error from 0.081 m to 0.009 and its
+    # walk ratio -- what it accumulated over what independent hops predict --
+    # from 1.89 to 0.24. Across the set both widths narrow monotonically:
+    #
+    #   pair (align .030)   .045    .035    .025    .020    .015    .010
+    #   ATE                .1496   .1357   .1175   .1155   .1164   .1203
+    #   walk                1.68    1.57    1.40    1.36    1.37    1.41
+    #
+    #   align (pair .015)   .030    .020    .012
+    #   ATE                .1164   .1062   .1064
+    #   walk                1.37    1.28    1.04
+    #
+    # The basin over .012-.020 by .015-.025 is flat on ATE (0.1043-0.1099), so
+    # this is chosen on walk, which reads **1.02** here -- the estimator adds
+    # essentially no memory of its own, against 1.68 before. That was the whole
+    # of the remaining gap on the straights.
+    #
+    # The widths stay in the ratio the residual measurement gives (the two frame
+    # path runs about half again the anchor path's), 0.020/0.012 = 1.67 against
+    # a measured 1.5; it is the scale that was wrong, not the balance. The
+    # earlier .030/.045 were set from the same residuals and are still two to
+    # three times wider than what they weigh on most drives.
+    # Re-tuned 2026-08-27 on the re-recorded set, jointly over nine axes. The
+    # values these replace were fitted to drives in which six of eleven ended in
+    # a collision, and they were mis-fitted: a 400-point joint search found a
+    # whole region better, and the median of its top forty scores as well as its
+    # best single point. ATE 0.1195 -> 0.0654, worst ATE 0.3061 -> 0.0898,
+    # walk 3.78 -> 2.14, repeat spread 1.71 -> 1.21, RPE40 0.211 -> 0.172, in
+    # exchange for RPE5 +13% and RPE10 +6%. It is the hard drives that move --
+    # 8 m/s -74%, the sharp slalom -85% -- and the easy straights that pay a
+    # little. Taken on the trajectory, which is what this stack is for.
+    # The Gaussian weight's width is the residual's own sigma, so it is measured
+    # rather than configured -- the solve reports the residual every frame and
+    # `Camera::residual_scale` is its running mean. sqrt(2) is the derived
+    # multiplier: the reported spread is a two-dimensional scatter while the
+    # weight acts on a one-dimensional distance.
+    #
+    # This replaces two fitted constants with one derived rule, and the two
+    # below are now only the fallback for the first frames of a drive, before
+    # the residual has been measured. What the constants could not do is follow
+    # the conditions: sweeping the fixed `ground_pair_softness_m` moves ATE by
+    # 4.09x on the 8 m/s drive, where this rule moves it by 1.29x.
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 1.41 -> 1.0. The sqrt(2) derivation above is
+    # sound; what the sweep says is that the residual's running mean already
+    # carries the two-dimensional spread, so the multiplier double-counts it
+    softness_from_residual: 1.0
+    ground_align_softness_m: 0.017
+
+    # How many starting points the alignment's mode search tries.
+    #
+    # The reweighted mean only walks downhill from where it starts, and it
+    # started at the median vote. When the hop is short the votes spread wider
+    # than the hop itself, so the median sits near zero and the iteration
+    # settles on "did not move" -- a real local optimum, just the wrong one.
+    # This is the same failure that makes the slow drives read 5% short and
+    # that breaks them outright when the anchor supply is raised.
+    #
+    # Starting the same iteration from several votes and keeping whichever
+    # attracts the most weight finds the mode the data has. Mean ATE over ten
+    # drives: 0.1437 at 1, 0.1367 at 6; the reference bag
+    # approach_hd60_tracks_w1280 goes 0.1090 -> 0.0639. Counts of 4, 5, 8 and
+    # 10 all land in 0.140-0.144, so 6 is chosen from a flat region rather
+    # than a sharp optimum -- do not read the exact value as tuned.
+    #
+    # Note that once the solve band below was narrowed, most of this gain went
+    # with it: at band 5.0 restarts 1 scores 0.1315 against 0.1302 for 6. The
+    # two are treating the same disease -- far ground points are what widened
+    # the vote spread that swallowed the hop in the first place.
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 6 -> 4, which the note above already calls a
+    # flat region rather than an optimum
+    align_restarts: 4
+
+    # How far out a ground point may be and still speak for the pose.
+    #
+    # ground_max_distance_m (8 m) bounds three things at once: which pixels
+    # project to a usable ground point, which sightings found anchors, and
+    # which points the registration reads. Only the first is about the map.
+    # A ground point's position error grows with its range -- the same angular
+    # error is worth proportionally more centimetres further out -- so the far
+    # half of the band maps well and registers badly.
+    #
+    # Bounding the pose paths alone at 4.5 m takes mean ATE over ten drives
+    # from 0.1367 to 0.1291, exactly matching what narrowing the whole band to
+    # 4.5 m achieves, while the grid keeps its 8 m reach. Both frames of a hop
+    # are tested, because it is the AND of the two that narrowing tightens.
+    # 4.0 is too few points (0.1495); 4.5-5.5 is flat on the mean
+    # (0.129-0.133). 5.0 rather than 4.5 because the mean is not the whole
+    # story: at 4.5 the three recordings of the identical 2.0 m/s drive spread
+    # 1.80x, at 5.0 they spread 1.20x, and SD over the ten drives is 0.076
+    # against 0.083. Buying 0.001 of mean with half the repeatability is not a
+    # trade a general-purpose stack should take.
+    solve_max_distance_m: 5.8
+    anchor_max_range_m: 5.7
+    # Translation-only feature region. Yaw is still estimated from the full
+    # photometric road fit, while ground registration only accepts the central
+    # lower road patch. This prevents nearby parked vehicles and vertical scene
+    # structure at the fisheye edges from being projected onto the road plane
+    # and voting for a false x/y jump. The bottom 4% is omitted to avoid the
+    # vehicle body / mount edge. Set x1 <= x0 to restore the historical full
+    # frame translation solve for A/B measurements.
+    pixel_region_x0: 0.20
+    pixel_region_y0: 0.55
+    pixel_region_x1: 0.80
+    pixel_region_y1: 0.96
+    # Widening these was tried 2026-09-12 and **refused by held-out**. Recorded
+    # so the edge is not chased again.
+    #
+    # `anchor_max_range_m` sits on an edge: raising it alone improves the bench
+    # until it saturates, and 8.5 and 10.0 come back bit identical because
+    # `ground_max_distance_m` 8.0 bounds where an anchor can exist at all. They
+    # are one knob, and moving the band alone does nothing -- bit identical to
+    # the deployed pair, because the anchor range binds first.
+    #
+    # Moved together, on the bench nine:
+    #
+    #   range/band   ATE/거리          끝오차/거리        walk
+    #   5.7 / 8.0    0.0237 / 0.0391   0.0326 / 0.0627   1.10 / 2.57
+    #   9.0          0.0221 / 0.0371   0.0357 / 0.0592   1.30 / 3.35
+    #   10.0         0.0211 / 0.0340   0.0312 / 0.0518   1.31 / 3.27
+    #   11.0         0.0237 / 0.0315   0.0335 / 0.0458   1.18 / 2.70
+    #
+    # 10.0 is -11% on the mean and -13% on the worst drive, and it raises walk
+    # 19% against the 10% the acceptance rule allows. On the two held-out park
+    # drives it is **+7.5% on ATE and +12.2% on the final error**, and no value
+    # from 9 to 12 improves that set on every metric: 9.0 takes its final error
+    # -15.6% while raising its worst ATE 8.0%, 11.0 takes its worst ATE -5.8%
+    # while raising its final error 21.6%.
+    #
+    # So the edge is real and what lies past it belongs to the bench. Further
+    # ground is more points and a longer lever for the rotation, and it is also
+    # range-squared noise on every one of them; the trade lands differently on a
+    # 111 m straight than on a 30 m parking manoeuvre, and this set has 5 of the
+    # former and 2 of the latter.
+    # Both frames of a hop used to be projected with the *current* body tilt,
+    # so the earlier frame carried the whole pitch change of the hop. The
+    # ray-plane intersection moves by (R^2+h^2)/h per radian -- about 8 m/rad
+    # at 2.5 m of range on the 0.89 m mount -- so 0.06 deg of body pitch is
+    # 8 mm in the hop, added in metres rather than as a fraction. Measured
+    # against the truth pitch change per solve, that single variable explains
+    # R^2 = 0.76 of the hop error on the 8 m/s drive, 0.61 on park_clean and
+    # 0.60 on curve_s10, where every other candidate this stack has regressed
+    # reaches 0.02. Both cameras take the SAME sign -- the rear camera's points
+    # sit at negative x and their range shrinks where the front's grows -- so
+    # the fusion cannot cancel it.
+    tilt_at_capture: true
+    # 60 rather than 30, measured 08-28 over the nine drives. A solve standing
+    # on thirty correspondences is not a cheap solve, it is a thin one, and the
+    # map answers often enough that refusing the thin ones costs nothing:
+    # RPE 5/10/20/40 0.402/0.300/0.227/0.164 -> 0.388/0.290/0.219/0.158 and the
+    # repeat spread 1.42 -> 1.26 at exactly the same ATE. 120 goes further on
+    # RPE still (0.377/0.279/0.211/0.149) and gives the walk back; 60 is where
+    # the two stop trading.
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 60 -> 45, jointly with the block at the end
+    # of this file. The 60-vs-30 reading above still holds at that operating
+    # point; it moved once the anchor policy under it changed
+    ground_min_inliers: 30
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 0.08 -> 0.04
+    max_scale_error: 0.04
+    # 20 Hz frames, so this caps the vehicle at 20 m/s before a frame is rejected.
+    # One, not two. The two cameras were worked by a pair of threads, and
+    # measured against each other on the same recording the pair is slower --
+    # 2.7 ms a pair against 2.5 -- for exactly the same answer. Nearly all of
+    # what a camera does here is numpy and Python, which hold the interpreter
+    # lock, so the threads cannot overlap the part that costs and still pay
+    # to hand the work over.
+    # How much further than the truth each camera measures the ground to have
+    # moved, as a factor to divide out. Not an extrinsic: the camera is where
+    # the kit says it is, and this is measured downstream of that, from the
+    # flow and the projection alone against the simulator's own pose with no
+    # estimator in between (scratchpad/flow_scale.py, straight drives only).
+    #
+    # 0.39% on the front and 0.60% on the rear, and dividing them out is worth
+    # 2.6x on the drives that were worst: 0.127 m to 0.048 at 2.5 m/s and
+    # 0.151 to 0.059 through a turn. The fastest drive was already close and
+    # goes the other way, 0.040 to 0.076, so one factor per camera cannot zero
+    # all of them; a 0.4% spread is left that still tracks speed. What causes
+    # any of it is not known -- the ground band, the body's pitch, the solve
+    # cadence and the anchor map were each ruled out first.
+    # Extra metres of inlier gate per radian the vehicle turns over one hop.
+    #
+    # A ground point at range R sweeps R*dyaw when the vehicle rotates, so both
+    # its range error and any yaw error are multiplied by the turn: the votes
+    # spread wider through a manoeuvre than they ever do on a straight. A gate
+    # sized for the straight then throws away good points exactly where there
+    # are fewest. Swept per drive, the curved recordings want 0.16-0.24 m and
+    # the straight ones 0.06-0.10 -- one fixed number cannot serve both.
+    #
+    # Over the thirteen drives: mean ATE 0.1693 -> 0.1622, SD 0.1306 -> 0.1187,
+    # MAX 0.4481 -> 0.4079, repeat spread unchanged at 1.26x. The three slalom
+    # drives carry it (0.448 -> 0.408, 0.423 -> 0.383, 0.136 -> 0.109) and the
+    # straights do not move; park and the approach pay about 0.003 each.
+    #
+    # Flat from 15 to 40 (0.1620-0.1625). 15 is the conservative end: at 40 a
+    # parking hop would open the gate to 0.7 m, which is wider than the band
+    # the points come from.
+    #
+    # 15 -> 0 on 2026-08-26, and it is the clearest case of a measured win that
+    # the stack outgrew. The gate had to widen with the turn because the
+    # residuals widened with the turn -- and the reason they did was the
+    # common-mode pitch error, which scales every range in the frame and shows
+    # up hardest where the geometry is changing. With the attitude bias state
+    # carrying that, the residuals no longer widen, and all this does is admit
+    # points that should be rejected. Re-swept: 0 / 8 / 15 / 30 give ATE 0.0952
+    # / 0.0997 / 0.0993 / 0.1015 and RPE10 0.690 / 0.722 / 0.723 / 0.730.
+    ground_rotation_threshold_m: 0.0
+    # The same Gaussian weight the anchor alignment uses, for the two frame
+    # fallback that answers whenever the map cannot.
+    #
+    # That path ended in a hard gate and an unweighted mean, which is exactly
+    # the step function `ground_align_softness_m` was introduced to remove --
+    # it was simply never applied here. It matters most through a turn: with
+    # the map off, the parking drives read +1.32% long at a 0.04 m gate and
+    # +6.22% at 0.30, because a ground point's apparent displacement carries
+    # its own range error, range error grows with range, and a wider gate
+    # admits more of the far votes that read long. Softening takes park_obst
+    # from +3.31% to +1.12%.
+    #
+    # Over the thirteen drive set, mean ATE 0.1731 -> 0.1693 with SD
+    # 0.1318 -> 0.1306 and MAX 0.4460 -> 0.4481. 0.080 rather than the anchor
+    # path's 0.055, which reaches the same mean with a worse SD, MAX and repeat
+    # spread once the curved drives are in the set.
+    # 0.080 until 08-25. Same reasoning and same measurement as
+    # ground_align_softness_m, which carries the table; this path's residual is
+    # the larger of the two reported per drive, so it keeps the wider of the
+    # pair at half again the anchor path's.
+    ground_pair_softness_m: 0.047
+    # Metres of hop given back per radian of turn.
+    #
+    # It acts on the **common** mode, which is what matters: both cameras share
+    # that error, so their disagreement cannot see it, and the fused bias is
+    # the only thing that reaches the output -- it equals the drift, and drift
+    # times distance is the error.
+    #
+    # THE NAME IS WRONG AND THE TERM IS EMPIRICAL. It was derived from hops on
+    # a straight reading 0.09-0.47% short against hops through a parking
+    # manoeuvre reading 0.67-0.82% long, i.e. a percentage point per 0.15
+    # rad/m. Purpose-recorded slalom drives then falsified the law: the turning
+    # bias runs -0.28% at 0.021 rad/m, +1.84% at 0.039 and +0.94% at 0.075,
+    # which is not monotonic in curvature at all. The two clusters it was
+    # fitted on (0 and ~0.15) simply could not show that.
+    #
+    # It is kept because it earns its keep on the wider set anyway: over
+    # thirteen drives mean ATE 0.1838 -> 0.1691, helping curve_s10 (0.488 ->
+    # 0.420) and curve_s20 (0.209 -> 0.134) and costing curve_s05 (0.421 ->
+    # 0.465). The sweep is flat from 0.067 to 0.120 and 0.067 holds the lowest
+    # SD. What it really does is shorten hops through a turn, which is right
+    # wherever the drive reads long and wrong where it reads short.
+    #
+    # A flat `vision_scale` is NOT applied with it. 1.0025 alone reaches mean
+    # 0.1185 and the two together 0.1098, but both take the repeat spread of
+    # one identical drive from 1.20x to 4.5x -- buying the mean with the
+    # repeatability, which is the trade this set has refused before.
+    # 0.067 until 08-25. It was fitted before the attitude filter's tau and the
+    # two softness widths were corrected, and it is a yaw-dependent term, so it
+    # had been absorbing some of what those were getting wrong. Re-swept on the
+    # corrected stack:
+    #
+    #   gain    0.000  0.033  0.067  0.085  0.100  0.115  0.130  0.150
+    #   mean    .2124  .2040  .1946  .1912  .1895  .1910  .1908  .1936
+    #   SD      .1701  .1670  .1628  .1597  .1588  .1589  .1579  .1573
+    #   repeat   2.17   2.17   2.17   2.01   2.00   2.00   1.99   1.98
+    #
+    # 0.085-0.130 is a flat basin, so 0.100 is not a fitted point, and it is the
+    # rare change that takes mean, SD and repeat spread together.
+    # The ground the cameras see sits this far above the datum the extrinsics
+    # are measured from, so each mount is really at `h - d` and
+    # `range_scale = h / (h - d)`. Measured 2026-08-27, not fitted:
+    # triangulating the tracked features from the truth poses with no plane
+    # assumed and fitting a plane to them puts the rendered road **2.4 to
+    # 8.1 mm** above z=0 -- and the correction it asks for is the SAME on both
+    # mounts (front 5.5 / 8.1 / 2.6 / 2.5 mm against rear 5.9 / 7.0 / 2.4 /
+    # 2.7 on nv3 / ns4 / sv2 / cs10). One number, not two.
+    #
+    # It replaces `ground_range_scale_front: 1.0032` and `_rear: 1.0053`, which
+    # were two free parameters where the physics has one -- and which had the
+    # front scale SMALLER than the rear, the opposite of what a shared road
+    # offset requires, because the front is the lower mount. That is the
+    # signature of a pair absorbing something per-camera.
+    #
+    # 5.5 mm gives front 1.0062 / rear 1.0044 and is the first configuration
+    # this session to dominate the deployed one on all eleven metrics:
+    # RPE5 0.431->0.416, RPE10 0.331->0.312, RPE20 0.256->0.238,
+    # RPE40 0.193->0.171, worst5 0.585->0.574, worst10 0.411->0.368,
+    # hop% 0.45->0.44, walk 2.76->2.42, ATE 0.0834->0.0744,
+    # worst ATE 0.1148->0.1067, repeat 1.21->1.15.
+    #
+    # The plane it is fitted to is flat: 0.011-0.060 deg of tilt, so there is no
+    # road crown to model.
+    ground_plane_offset_m: 0.0055
+    # Roll and pitch from the IMU, feeding the ground projection. The gain
+    # here is small because this simulator's vehicle barely tilts -- 0.1
+    # degrees under hard braking and hard steering -- and the whole four drive
+    # set improves by 3%. Where it shows is the manoeuvre it was built for:
+    # the parking drive, which starts and stops repeatedly, goes from 0.051 m
+    # to 0.036. On a vehicle whose suspension actually moves, one degree is
+    # worth two and a half to five per cent of every range in the frame.
+    #
+    # The two numbers matter more than the feature does. Correcting towards
+    # gravity on every sample with a one second constant put pitch 4.3 degrees
+    # out; a sixty second trim, applied only while the measured acceleration
+    # is within 0.3 m/s2 of gravity, lands at 0.046 against the simulator's
+    # own attitude.
+    # How long a ground anchor survives, in frames. 120 was tuned on the
+    # 24-32 m approach drives, where it is 4 s and the map turns over well
+    # inside one manoeuvre. Over a 110 m straight it starves: measured 08-19,
+    # the estimate tracks truth to within 0.5% for the first 50 m and then the
+    # local ratio falls to 0.94 and never recovers, for a whole-drive scale of
+    # 0.973. Three recordings of that identical drive scored 0.18/0.78/1.24 m
+    # -- a 6.7x spread -- because whether the map starves is not repeatable.
+    #
+    # At 250 the same three score 0.192/0.195/0.162 (1.20x) and scale lands at
+    # 0.998-1.000; the 1.5 m/s drive goes 2.405 -> 0.230. The cost is the short
+    # approach drives, which no longer turn the map over as often: v2 0.042 ->
+    # 0.076, w960 0.092 -> 0.097, w1280 0.111 -> 0.110. Paying 3 cm there to
+    # take 2.2 m off a road-speed drive.
+    # 2026-08-28, joint sweep (13k configs over 86 axes, then 2.3k with
+    # sharing forced on): 250 -> 350. 120 is dominated on every metric
+    anchor_max_age_frames: 350
+
+    # 60.0 until 08-25, and wrong by four times. It was chosen on ATE, which is
+    # a noisy downstream proxy; the recorded truth pose carries roll and pitch,
+    # so the filter can be scored on the thing it estimates instead. Combined
+    # roll+pitch RMS error against truth over all eleven drives:
+    #
+    #   tau      0.5    2.0    5.0    8.0   15.0   30.0   60.0    inf
+    #   error   0.80   0.51   0.39   0.40   0.45   0.58   0.69   0.87
+    #
+    # At 60 the correction is so slow the gyro is effectively running open, and
+    # the filter reports tilt the vehicle does not have: on the flat straights
+    # the true roll is 0.00 deg and it reports 0.07-0.58, which is noise
+    # injected straight into the ground projection. Turning the whole
+    # correction off (attitude_from_imu false) scores 0.2427 against 0.2457,
+    # i.e. as implemented it was break-even -- that is what a correction whose
+    # own error exceeds its signal is worth.
+    #
+    # ATE agrees, and picks a slightly longer tau than the truth error does:
+    #
+    #   tau      3.0    5.0    8.0   10.0   12.0   15.0   20.0   30.0   60.0
+    #   mean   0.2445 0.2380 0.2278 0.2230 0.2224 0.2237 0.2239 0.2313 0.2457
+    #   repeat  1.36   1.47   1.61   1.64   1.65   1.71   1.95   2.02   2.16
+    #
+    # 10-20 is a flat basin, so 15 is not a fitted point. It takes the mean to
+    # 0.2237 (-9%), the repeat spread of three recordings of one drive from
+    # 2.16x to 1.71x, and SD to 0.1755; eight of eleven drives improve, led by
+    # the curves (s10 -31%, s05 -20%, s20 -18%). MAX pays 1.5% on the 8 m/s
+    # drive, and the slow drive and clean park pay 21% and 15% -- both are
+    # manoeuvres where the true tilt is real and a slower filter tracked its
+    # mean better.
+    #
+    # 15 -> 8 on 2026-08-26, and the reason is mechanical rather than a better
+    # score. Differencing the deployed trajectory against truth per hop, the
+    # along-track error is not a random walk: its autocorrelation runs +0.29,
+    # +0.44, +0.35, +0.28, +0.19 at lags 1, 2, 5, 10, 20 and only dies by 50.
+    # The same points solved with truth heading give a white residual -- lag 2
+    # to 100 all inside +-0.09 -- so the persistence is manufactured here, and
+    # it is what makes nv2 accumulate 0.142 m where its own hop noise supports
+    # 0.069. A slow tilt estimate is exactly a slow error in the plane every
+    # range is measured against. At tau 2 the correlation is gone (lag 2 +0.14)
+    # and that drive ends at 0.042.
+    #
+    # The whole basin holds on the harness -- 5 / 6 / 8 / 10 give 0.1624 /
+    # 0.1644 / 0.1639 / 0.1629, inside each other's noise -- so ATE cannot pick
+    # inside it. The truth-measured tilt error can, and it reads 0.39 / 0.40 /
+    # 0.45 degrees at 5 / 8 / 15: the two measurements now meet, where before
+    # ATE wanted 12-15 and the truth wanted 5-8. Taking 8 rather than 5 because
+    # the repeat spread separates them (1.85x against 2.18x) where the mean
+    # does not.
+    #
+    # tau 2 is better still on nv2 and worse overall (0.1773): it wins the two
+    # sharp curves outright (s10 0.2121 -> 0.1401, s20 0.1258 -> 0.0772) and
+    # loses the slow straight and both parks. No single tau holds both.
+    attitude_tau_sec: 6.0
+
+    # The trim above is proportional only, and a proportional loop against a
+    # biased rate settles at bias*tau instead of at zero. Measured against the
+    # truth attitude that offset is real, it is the estimator's dominant error,
+    # and it had never been looked for because the measurement that found the
+    # tau referenced estimate and truth to their own medians -- which is exactly
+    # the quantity, thrown away as "a calibration question".
+    #
+    # It is not calibration. Three recordings of one drive give pitch offsets of
+    # 0.234, 0.005 and 0.169 degrees, and the offset scales with tau (0.067 /
+    # 0.127 / 0.234 / 0.387 at 2 / 4 / 8 / 16 s) -- so it is a per-run gyro bias
+    # of up to 0.05 deg/s, and bias*tau is what it is.
+    #
+    # Why it dominates: a pitch error is a common-mode scale error on every
+    # range in the frame, with opposite sign on a forward and a rearward camera.
+    # It explains 67% of the variance in the measured front/rear travel split at
+    # -23% per degree, and that split runs 4 to 11 per cent. Meanwhile the
+    # per-point scatter accounts for under 2% of the solve's error: 645 to 920
+    # inliers buy 0.5-1.2 mm where the actual error is 2-250 mm, an effective
+    # sample size of one to three. The error is per frame, not per point.
+    #
+    # So the bias becomes a state, which is the argument the heading filter has
+    # always made -- a bias is not noise and has to be a state or it cannot be
+    # cancelled -- applied one axis up.
+    attitude_bias_tau_sec: 8.0
+    # What admits a sample to the integral, and it is a DIRECTION, not a
+    # magnitude. attitude_gravity_tolerance gates on |f| and that is the wrong
+    # quantity here: a lateral acceleration a moves |f| by only a^2/2g while
+    # tilting the apparent vertical by atan(a/g), so at 0.3 it admits 13.9
+    # degrees of false tilt. A weak proportional pull survives that; an integral
+    # accumulates it. Ungated, the straights improve by up to 43% and the tight
+    # manoeuvres lose 60-85% as the integral winds up chasing the vehicle's own
+    # acceleration. Gated on the innovation, both hold.
+    attitude_bias_gate_rad: 0.010
+    # And a bound, because a MEMS gyro's bias is small. 0.0005 rad/s is 0.029
+    # deg/s, below the largest measured bias (0.05), so it clips -- and clipping
+    # measures better than not: 0.0002 / 0.0003 / 0.0005 / 0.0007 / 0.001 /
+    # 0.002 give ATE 0.1019 / 0.1000 / 0.0993 / 0.0995 / 0.1013 / 0.1033. A
+    # bound that is too generous lets a manoeuvre that slips the gate cost more
+    # than a real bias ever would.
+    attitude_bias_limit_rps: 0.0005
+    # Left at 0.3. The gate is on the magnitude of the specific force, and for
+    # a lateral acceleration the magnitude only grows as a^2/2g while the
+    # apparent vertical tilts by atan(a/g) -- so 0.3 admits 2.43 m/s2, which is
+    # 13.9 deg of false roll. Tightening it is monotonically worse anyway
+    # (0.15/0.08/0.04/0.02 give 0.2465/0.2486/0.2504/0.2500) because it starves
+    # the correction faster than it protects it, and against the truth pose the
+    # whole 0.1-1.2 range scores within 0.02 deg at any tau. The gate is not
+    # where this filter is losing.
+    #
+    # 0.3 -> 0.10 on 2026-08-26. The note above is right that the magnitude gate
+    # is the wrong shape and right that tightening it used to be monotonically
+    # worse (0.15 / 0.08 / 0.04 / 0.02 all cost). What changed is what the trim
+    # is for. It is no longer only pulling the attitude towards gravity; it also
+    # feeds the bias integral, and a bias estimate is worth far more per sample
+    # than a proportional pull, so admitting fewer and cleaner samples now pays
+    # where it did not. Re-swept: 0.05 / 0.10 / 0.30 / 0.60 give ATE 0.1105 /
+    # 0.0996 / 0.0993 / 0.1053, and 0.10 takes the worst drive 0.1697 -> 0.1579.
+    # Gate the accelerometer's opinion of down on the vehicle's own horizontal
+    # acceleration, in m/s^2, rather than on the specific force's magnitude.
+    # The magnitude is the wrong quantity: a horizontal `a` moves |accel| by
+    # only a^2/2g while tilting the apparent vertical by atan(a/g), so the
+    # `attitude_gravity_tolerance: 0.10` below still admits a = 1.40 and **8.1
+    # degrees** of false tilt. 0.60 admits 3.5 degrees and says so.
+    #
+    # Tightening it much further starves the correction faster than it protects
+    # it -- 1.0 deg scores 1.335 and 0.5 deg 2.189 on the composite -- which is
+    # the same wall the magnitude gate hit.
+    attitude_horizontal_tolerance: 0.60
+    attitude_gravity_tolerance: 0.10
+    # How much the ground has to move before a solve is worth attempting.
+    # Declared at 40.0 in odometry_node.py and absent from here until
+    # 08-07, which meant the code default was running and nothing said so.
+    #
+    # It is the single largest handle on the occupancy map, because the map is
+    # built from solved poses and this decides how many there are. On approach,
+    # scored with --poses estimate:
+    #
+    #     px  keyframes  IoU    path  obstacle  car    explored
+    #     40    198      0.350   280   0.368    0.448   0.376
+    #     20    340      0.395   680   0.534    0.633   0.462
+    #     10    540      0.431   279   0.583    0.672   0.528
+    #      5    604      0.432    94   0.575    0.649   0.536
+    #
+    # At 40 the map finds barely a third of the obstacle cells. 10 edges 5 on
+    # obstacle recall but carries three times the cells wrongly occupied on the
+    # driven path, which is the one error a coaching system must not make.
+    #
+    # Cost is keyframe count, not keyframe price: 35-36 ms/keyframe throughout,
+    # 198 -> 604 keyframes. The Orin Nano port measures 477 ms/keyframe and
+    # 88% of real time at this setting -- it fits, with 12% to spare.
+    #
+    # Note this is what adaptive_solve_interval reads. frame_decimation below
+    # is dead while that stays true.
+    # 3.0 at processing_width 2560, where 5.0 costs samples: the estimator
+    # published 114 poses against the 121 it manages at 1600 and 1920, and a
+    # solve that does not happen is a stretch of the drive carried on the
+    # previous one. Lowering the bar restores all seven with the accuracy
+    # unchanged -- 2D ATE 0.039 -> 0.042 m, drift 0.09 -> 0.11%, RPE 0.81 ->
+    # 0.76% -- so it buys back the resolution of the trajectory for nothing.
+    #
+    # Reaching for solve_max_frames instead does not work: 20 or 12 change how
+    # much of the drive falls inside the scored window (gt 20.0 m -> 21.8) and
+    # the rows stop being comparable.
+    #
+    # The paragraph above is what 3.0 was reasoned from, and it was never
+    # written down -- the code default ran. Set explicitly at 12.0 on 08-25.
+    # The measurements above were taken at processing_width 2560, where the
+    # tracker was not actually downscaling and a pixel meant something else;
+    # at 640 the same parallax is a quarter of the pixels.
+    #
+    #   px      2.0    3.0    4.5    6.0    8.0   10.0   11.0   12.0
+    #   mean  .1905  .1895  .1880  .1872  .1886  .1962  .1791  .1807
+    #   SD    .1652  .1588  .1521  .1507  .1549  .1842  .1381  .1390
+    #   MAX   .6583  .6369  .6159  .6061  .6247  .7337  .5540  .5522
+    #
+    #   px     13.0   14.0   15.0   16.0   18.0   26.0
+    #   mean  .1807  .1802  .1943  .1971  .1999  .2233
+    #   SD    .1390  .1340  .1795  .1850  .1505  .1341
+    #   MAX   .5522  .5350  .7140  .7347  .6169  .4994
+    #
+    # A longer trigger is a longer baseline, which is the direction
+    # solve_min_frames already argues for: the plane fit is conditioned by how
+    # far the ground moved, and at 3 px it moves less than the inlier gate.
+    # Seven of eleven drives improve, led by 8 m/s at -13%; park and curve_s10
+    # pay 2-5%. Repeat spread is unchanged at 2.00 -> 2.05.
+    #
+    # The basin is 11-14 and the walls are sharp -- 10 and 15 are 9% worse,
+    # which is a solve landing on frame N or N+1. So this was checked against
+    # two orthogonal settings rather than taken on the sweep alone: at the old
+    # curvature gain it wins 0.1946 -> 0.1813, and at the old softness widths
+    # 0.2237 -> 0.2114. The win is not an artefact of the rest of the file.
+    solve_trigger_disparity_px: 12.0
+
+    # Forbid the "did not move" alignment mode by how far the filter says the
+    # vehicle went, in metres of slack around it. Off until 08-25.
+    #
+    # It was measured and shelved as neutral before the ground solve's own
+    # errors were corrected. What sent it back for another look is a count: at
+    # 8 m/s the front camera's median published flow is **0.19 px**, against
+    # 5.24 at 4 m/s and 4.05 at 2, and only 42% of its features move more than
+    # a pixel. A flow that cannot find its feature hands back the point it
+    # started from, and a point that did not move passes the forward-backward
+    # check perfectly -- zero out is zero back -- so that is the one failure
+    # the gate above cannot see. When those are the majority they *are* the
+    # consensus, and the solve reads short.
+    #
+    #   gate    0.0     0.20    0.40    0.60
+    #   mean   .1703   .1693   .1683   .1683
+    #   SD     .1308   .1250   .1260   .1265
+    #   MAX    .5325   .5125   .5127   .5138
+    #
+    # Flat over 0.2-0.6 and the repeat spread does not move at all (2.05x).
+    # The per-drive profile is the reason to take it: **eight of the eleven
+    # drives come out bit-identical**, and only the three that were struggling
+    # move -- 8 m/s -3.7%, curve_s20 -1.6%, park_obst -1.2%. It fires where the
+    # stationary mode is a real risk and nowhere else.
+    #
+    # Gating the features directly instead was tried and is much worse: a floor
+    # on pixel flow relative to the frame's median scores .1878 / .2712 / .3389
+    # at 0.3 / 0.5 / 0.85 with the repeat spread reaching 14.91x, because at
+    # low speed the far ground is legitimately slow. The mode is what wants
+    # forbidding, not the feature.
+    inertial_gate_m: 0.40
+
+    # Solve the ground once from both cameras' points, rather than solving each
+    # camera apart and averaging the two answers.
+    #
+    # The average treats each camera's answer as a measurement and weighs them
+    # by inlier count. But the measurement is the ground, not the answer: both
+    # cameras' points come out of pixels_to_ground already in base_link, and
+    # both describe the same hop of the same rigid body. Pooling them is one
+    # consensus over twice the points, spanning the front band 2.2-5.2 m and
+    # the rear -2.3-0.65 m at once, which conditions the fit better than either
+    # can alone.
+    #
+    #   MEAN .1807 -> .1703, SD .1390 -> .1308, MAX .5522 -> .5325,
+    #   repeat 2.05x unchanged.
+    #
+    # Five drives improve meaningfully, led by park -17% and curve_s10 -17%;
+    # four are flat and curve_s05 and curve_s20 pay 2%. It holds on orthogonal
+    # settings: at the old solve trigger .1895 -> .1795, at the old softness
+    # widths .2237 -> .2057.
+    #
+    # **Only where the map could not answer.** Pooling over the map path as
+    # well scores .2778 with the repeat spread at 3.73x, because overwriting a
+    # map-anchored hop with a two-frame one throws away the thing that bounds
+    # the random walk. The scale stays right either way (1.006 against the
+    # average's 1.001) -- what is lost is the map, not the geometry. Pooling
+    # the map path too would need the two cameras to share anchors, and that
+    # loses for its own reasons: see the anchor_link_radius_m notes.
+    # Measured 08-28: this changes nothing. With it on and off the nine-drive
+    # metrics come out bit-identical, because the map path takes every frame
+    # this would have served. Left as it is rather than removed, so that the
+    # next person to reach for it reads this instead of measuring it again.
+    # 1.0 was set against 20 Hz frames, where it caps the vehicle at 20 m/s.
+    # The solve is triggered by accumulated parallax rather than by frame, so
+    # at 60 Hz one solve closes several frames and the interval it covers is
+    # not 1/60 s -- at 8 m/s the steps reach 1.15 m and the gate threw three of
+    # them away, taking the travel with them: scale 0.894, RMSE 2.428 m. The
+    # arrears widening below only helps once a rejection has already happened,
+    # so it does not reach this. 1.5, 2.0 and 3.0 all give the same answer
+    # (0.315 m), which says this is a floor to clear rather than a value to
+    # tune; 2.0 leaves margin without inventing one.
+    max_translation_per_frame_m: 1.0
+    max_yaw_per_frame_rad: 0.35
+    twist_lowpass_tau: 0.06
+    # The lowest plane the sweep may believe. 0.15 matched height_gate.py's
+    # cut for the LiDAR reference, which is where it came from, but the two
+    # answer different questions and the sweep does not need to agree.
+    #
+    # Every one of the 542 cells this map wrongly occupies on the driven
+    # corridor stands on flat road: overhead depth puts them at a median of
+    # 0.004 m, and their labels are Roads 397, RoadLines 143, Sidewalks 2. A
+    # quarter of them are painted markings -- high contrast, which is exactly
+    # what a correlation sweep locks onto, and it locks on at the lowest plane
+    # it is allowed to consider.
+    #
+    # Raising the floor to 0.20 removes them without costing an obstacle.
+    # approach, estimated poses, deployment settings:
+    #
+    #     0.15   corridor ghosts 750   obstacle 0.906   car 0.940
+    #     0.20                   473            0.906         0.940
+    #     0.25                   394            0.905         0.939
+    #     0.30                   390            0.905         0.939
+    #
+    # Scored against the overhead truth reference instead, 0.20 also takes
+    # precision 0.249 -> 0.269 and IoU 0.174 -> 0.178, both of which peak here.
+    # Going further keeps trimming ghosts but starts costing real returns.
+    obstacle_max_height_m: 2.5
+
+    # One keyframe triangulation that survives the parallax, reprojection and
+    # height gates is enough to call a cell occupied. Demanding a second hit on
+    # the same 10 cm cell cost most of the recall, and a coaching system would
+    # rather warn about an obstacle it half believes than stay silent.
+    # Measured against the LiDAR reference grid: at 0.65 a single triangulation
+    # is enough, which scored precision 0.28 and recall 0.30. Raise it towards
+    # 0.85 to demand a second hit, which scored precision 0.62 and recall 0.10.
+
+    # The velocity filter predicts, and the accelerometer feeds it.
+    #
+    # This was decided four times and only the fourth is evidence. On
+    # approach_fish8 acceleration looked catastrophic (0.037 -> 0.477 m), but
+    # that bag runs 600 Hz physics under a 100 Hz IMU and its accelerometer
+    # correlates with the truth at r=0.067 -- it is not a signal
+    # (IMU_가속도_유효성.md). On approach_clean60_release it looked good
+    # (0.175 -> 0.108 m) on one run per arm, which is not a measurement. On
+    # approach_hd60 it looked bimodal, but that was measured through a harness
+    # that delivered a different subset of frames to every run
+    # (재현성_조사.md).
+    #
+    # Fourth: one tracker, two estimators hanging off it, identical track and
+    # IMU input to both, five and four repeats (tools/ab_odometry.py):
+    #
+    #   off  0.0707 0.0707 0.0727 0.0762 0.0785   median 0.0727
+    #   on   0.0608 0.0616 0.0632 0.0651          median 0.0624
+    #
+    # The distributions do not overlap -- the worst run with acceleration
+    # beats the best run without it -- and the gap is 14%. On a recording
+    # whose accelerometer means something, it earns its place.
+    # Fuse what the two instruments measure -- acceleration, and displacement
+    # between two image times -- rather than dividing the vision translation
+    # by the interval and calling it a velocity. Measured on both recordings
+    # whose accelerometer is a signal:
+    #
+    #   approach_hd60             VIO 0.052/0.054/0.056   loose 0.072/0.075/0.076
+    #   approach_clean60_release  VIO 0.082/0.084         loose 0.118/0.118
+    #
+    # Two bags, same direction, 28-30%. On a recording whose accelerometer is
+    # noise the acceleration is refused upstream and the two are a wash, so
+    # this default costs nothing there.
+
+    # False. The filter replaced the cameras' hop with its own output, and its
+    # own output is worse: measured per hop, the cameras' fused answer scatters
+    # 0.21% while what the filter substituted scatters 5.76% -- 27x -- and the
+    # substitution is wholesale, `motion->x = fused.x()`.
+    #
+    # Turning it off under parameters tuned with it on loses (0.0236% ->
+    # 0.0253%), which is why it survived three earlier sweeps. Given the axes
+    # reports:
+    #
+    #     filter on   ate% 0.0236  worst 0.0420  walk 1.17
+    #     filter off  ate% 0.0222  worst 0.0338  walk 0.92
+    #
+    # walk below 1.0 is the part that matters. It says the trajectory
+    # accumulates less than independent hops predict, where the filter had it
+    # at 1.17 -- the filter was manufacturing the correlation it was there to
+    # suppress. Two sweeps, 9,900 combinations, 150 of them clearing the
+    # acceptance rule: this is a region, not a point.
+    use_inertial_prediction: false
+    inertial_max_acceleration_mps2: 12.0
+    inertial_acceleration_median_window: 1
+    inertial_integration_method: rk4
+
+    # Velocity filter. The process noise has to be large enough that a frame's
+    # worth of covariance growth is comparable to the vision measurement noise,
+    # or the filter grows over-confident and starts gating out solves that were
+    # right: at 2 m/s that cost drift 1.3 % -> 38 %.
+    # q^2*dt, so this is a spectral density in m/s^2/sqrt(Hz). 1.55 here is
+    # the same process noise per step that 12.0 gave under the old (q*dt)^2
+    # form at the simulation's 60 Hz -- sqrt(0.04*60) -- and unlike 12.0 it
+    # keeps meaning the same thing when the IMU rate changes.
+    #
+    # 1.55 -> 8.0 on 2026-08-26, and the useful part is that 1.55 had only ever
+    # been swept *downward*. 0.6 and 0.3 were tried and are much worse, which
+    # was read as 1.55 being the optimum; nobody had gone up. 3 / 5 / 8 / 15 /
+    # 40 give ATE 0.1538 / 0.1562 / 0.1496 / 0.1587 / 0.1634 against 0.1764, a
+    # basin wide enough that 8 is not a fitted point.
+    #
+    # It is worth 15% on the mean and 52% on the worst case (0.5138 -> 0.2481),
+    # and nearly all of that is the 8 m/s drive. That is the shape to expect:
+    # process noise has to cover every error the model does not carry, not the
+    # accelerometer's alone, and the unmodelled part grows with speed.
+    #
+    # Measured against truth the instrument itself is far quieter than any of
+    # these -- integrate it over T seconds, compare the velocity change with
+    # truth's, and rms/sqrt(T) reads 0.006 to 0.823 across the eleven drives,
+    # highest on the 8 m/s drive by three to five times. So the *ranking* the
+    # measurement gives is the ranking the sweep wants, and only the scale
+    # disagrees. Read that as the knob naming the wrong quantity: what it sets
+    # is how soon the filter leans on vision, and vision is the better sensor
+    # here by a margin the accelerometer's own noise never described.
+    #
+    # Four drives pay a little (str_4.0, curve_s20, and both parks, 2-27%).
+    # A value that follows speed would take those back; a single number cannot.
+    # ------------------------------------------------------------------
+    # Measured inert, 2026-09-12. Coordinate descent over the nine-drive bench
+    # on the deployed configuration: each of these was moved to both ends of a
+    # range at least twice its value and the scored output came back **bit
+    # identical** -- ATE, final error and RPE to every digit.
+    #
+    #   ground_align_softness_m      0.010 .. 0.026
+    #   ground_pair_softness_m       0.020 .. 0.090   (0.02 moves 0.0004%)
+    #   ground_max_distance_m        6.0 .. 10.0
+    #   attitude_tau_sec             4.0 .. 9.0
+    #   attitude_bias_tau_sec        4.0 .. 16.0
+    #   twist_lowpass_tau            0.02 .. 0.15
+    #   single_camera_variance       0.1 .. 2.0
+    #   max_translation_per_frame_m  1.0 .. 2.0   (0.4 does bite: it is a cap)
+    #   filter_acceleration_noise    2.0 .. 30.0
+    #   filter_reference_inliers     100 .. 900
+    #   filter_innovation_gate       5.0 .. 16.0
+    #   max_scale_error              0.02 .. 0.08  (±1%, under the noise floor)
+    #
+    # Twelve of the forty-seven numeric estimator axes this file carries. They
+    # are not tuned values and must not be read as any: something tighter binds
+    # first (`solve_max_distance_m` 5.8 and `anchor_max_range_m` 5.7 bound
+    # `ground_max_distance_m` 8.0), or a gate never trips, or the path is not
+    # reached -- `use_inertial_prediction` is false, so the whole velocity
+    # filter is constructed and never run, and `anchor_attitude` is true, so the
+    # attitude filter's tilt never reaches the ground projection.
+    #
+    # The code stays. They are wired and masked rather than dead, and a change
+    # elsewhere can make any of them live again; that is exactly why they are
+    # listed with the date and the configuration they were inert under.
+    #
+    # `filter_vision_noise` is gone from this file: it reaches only the velocity
+    # filter, so it is inert by construction rather than by measurement.
+    filter_acceleration_noise: 8.0
+    filter_reference_inliers: 300.0
+    filter_innovation_gate: 9.0
+    # ------------------------------------------------------------------
+
+    # Anchor memory is a fixed-gain filter, so its time constant is counted in
+    # frames rather than seconds: 0.35 is roughly three frames of history,
+    # which is 0.15 s at 20 Hz but only 0.05 s at 60 Hz. On the 60 Hz kit that
+    # leaves the map no more history than the previous frame, which is the
+    # two-frame solve the anchor map exists to replace. Removing the floor
+    # makes each anchor a true running mean of every sighting it has had.
+    # Unused while the estimator weights each sighting by its own precision,
+    # which it always does; it is the fallback for callers that pass no
+    # weights. Equal weighting is what this used to be, and it is what put a
+    # 2.7 mrad rotation into the ground solve's heading.
+    # Left at the declared 4000. Raising it looked worth trying once each
+    # camera carried 2000 features, but 4000/8000/16000 give 0.188/0.321/0.169
+    # m at parking speed and RMSE and final error move opposite ways, which is
+    # this bag's noise rather than an effect.
+    # ------------------------------------------------------------------
+    # Joint sweep, 2026-08-28.
+    #
+    # Every value below was running on its code default, which is to say it was
+    # never written down. The staged sweep (13k configurations over 86 axes,
+    # then 2.3k more with anchor sharing forced on) settled them together, and
+    # they are grouped here rather than scattered because they were measured
+    # jointly: several of them only pay in each other's company, and reading
+    # any one of them as an independent finding would be wrong.
+    #
+    # Nine drives, ATE with the nv trio counted once as its median:
+    # this file before  0.0541  (worst 0.1039)
+    # with this block   0.0256  (worst 0.1034)
+    # ------------------------------------------------------------------
+
+    # `photometric_scale` was here and is gone (2026-09-11). It was the one
+    # fitted multiplier left in this file, kept -- as the note said in as many
+    # words -- "because removing it costs, not because it is understood".
+    #
+    # What it was hiding: the photometric length bias is a property of the road
+    # surface. Measured against truth with the estimator out of the loop, the
+    # bench's nine drives sit on two stretches of Town01 -- dark asphalt with
+    # bay and lane markings (v2 v3 v4 s15 s4) reading -0.03 to +0.10%, and plain
+    # light concrete with no markings at all (s8 cs05 cs10 cs20) reading +0.17
+    # to +0.20%. 0.22 points apart at the same speed, uniform along each drive.
+    # A constant scale is physical only as a camera-height error, and a height
+    # error cannot know what is painted on the road.
+    #
+    # So the multiplier's optimum was a property of the bench's 5:4 surface mix,
+    # not of the rig. Removing it costs 134% of ATE on the set it was fitted to
+    # and 1.5% on the two held-out park drives -- which are a third surface
+    # again, and where 0.9988 made one worse and left the other unchanged to
+    # four figures. The full account is in estimator.hpp where it was declared.
+    photometric_min_score: 0.0
+
+    # Attitude from the anchors' displacement on the projection surface rather
+    # than from the filter. Load-bearing: turning it off takes str_v2 from
+    # 0.0223 to 0.1114, five times worse.
+    anchor_attitude: true
+
+    # Weigh the two cameras by their own vote spread rather than by inlier
+    # count. The counts are 645-920 either way and say almost nothing about
+    # which answer is better; the spread does.
+    fuse_cameras_by_spread: true
+    single_camera_variance: 0.5
+
+    # A road-warp point is placed by a fit over a whole region, a corner by one
+    # patch of flow. Two to one is the sweep's reading of that difference.
+
+    ground_pair_passes: 2
+    fusion_model: velocity
+
+    # Anchor population. 2000 with the sharing radius below, not the 4000
+    # default and not 8000, which is dominated on every metric. The map is a
+    # rare corrector rather than the estimator, so capacity buys less than the
+    # policy that fills it.
+    max_ground_anchors: 2000
+    anchor_trial_observations: 4
+    anchor_drift_variance_per_m: 0.10
+
+    # The joint re-tune of 2026-09-04, run on the re-recorded bench set -- the
+    # first recordings whose physics substep is fine enough for the reported
+    # angular velocity to integrate to the actual rotation. 111 axes swept in
+    # three stages (per-axis, factorial over the strongest twelve, random
+    # around the best), then the edges pushed out and the interiors halved.
+    # Nine-drive headline 0.0371 -> 0.0250 with the trio counted once; with the
+    # gyro heading in place of truth it reads 0.0254, a 2% difference, so the
+    # self-contained deployment keeps the score. Repeat spread 1.02, walk 1.15.
+    #
+    # `anchor_weight_by_variance` is the one qualitatively new element: it was
+    # written in 1c3f002 and had never been in any sweep's axis list, and it
+    # appears in every one of the top ten combinations.
+    anchor_weight_by_variance: true
+    fusion_gain_mode: 0
+    ground_height_from_tilt: false
+
+    # Learn a range-dependent correction to the ground solve's scale.
+    #
+    # Off until now, and it is what the inertial filter was standing in for.
+    # The along-track bias is not constant: it reads -0.061% of the hop at
+    # 1.4 m/s and -0.307% at 7.5 m/s, always short, on every drive. A single
+    # scale cannot answer that -- the sweep leaves `vision_scale` and
+    # `photometric_scale` exactly where they were across 10,000 combinations --
+    # and the filter was papering over it at the cost of correlating the hops.
+    # The regression's own slope, with no gain in front of it.
+    #
+    # 1.8 stood here and the sweep is flat across it: 1.0 through 2.6 move
+    # ATE/거리 between 0.0226% and 0.0260%, which is the harness's own noise.
+    # A number that the score cannot distinguish from unity is not measuring
+    # anything, and taking the slope as measured is the statement the
+    # regression already makes.
+    pair_scale_gain: 1.0
+    remember_sighting_poses: true
+    # Anchor sharing between the two cameras. The rear drives over ground the
+    # front laid anchors on, so the link is one-directional in practice and
+    # cross-source only is what the founder-based rule reduces to. 0.02 m is a
+    # tight radius by design: the gap between two maps' placements is the
+    # association radius when it is loose, and a measurement only when it is
+    # not.
+    anchor_link_radius_m: 0.02
+    # A source may not rebind an anchor it founded, only adopt another camera's.
+    #
+    # Allowing it wins on the nine bench drives -- worst ATE/거리 0.0376% ->
+    # 0.0306% -- and loses on the two held-out park manoeuvres, where the mean
+    # goes 0.1822% -> 0.2065% and the final error 0.1723% -> 0.2150%. The bench
+    # is nine forward drives at 1.5 to 8 m/s and the park drives are 13 and 30 m
+    # of slow manoeuvring with reversing, so what splits is the regime.
+    #
+    # The only evidence that a new identity is an old anchor's feature
+    # re-detected is that it lands within `anchor_link_radius_m`, two
+    # centimetres. Driving forward the vehicle passes over the ground once and
+    # that evidence is strong; manoeuvring it works the same patch over and over
+    # at walking pace and two centimetres holds several distinct features, and a
+    # wrong rebind fuses two points into an anchor that describes neither. That
+    # is a correctness failure, not a noisier measurement, so the held-out
+    # result decides it.
+    #
+    # Refusing ambiguous rebinds -- more than one adoptable anchor inside the
+    # radius -- was built to get both and earns nothing either way: 0.1858%
+    # against 0.1822% on park, 0.0371% against 0.0376% on the bench worst.
+    anchor_link_cross_source_only: true
+    anchor_link_adopter_writes: false
+
+    # The point the body pitches about, ahead of base_link (the rear axle).
+    # 1.8992 m is read from CARLA -- `vehicle.toyota.prius`, centre of mass at
+    # +0.5000 in the actor frame with the rear axle at -1.3992 -- and not
+    # fitted. The read validates twice: the wheelbase comes out 2.8192, the
+    # value already in the bridge's sensor mapping, and the actor origin lands
+    # 1.3992 m ahead of the rear axle, the same 1.399 m the frame-tree audit
+    # measured from the other side.
+    #
+    # It changed nothing on the nine drives -- a sweep from -1.0 to 3.0 m gave
+    # ATE identical to four decimals -- because the pivot's only first-order
+    # effect is vertical, and nothing was reading the vertical. Something is
+    # now: `photometric_null_tilt` needs the lever `-(x_cam - x_pivot)/h`, and
+    # at 1.8992 that term is three quarters of the whole column. It also does
+    # nothing on these recordings for a second reason, below.
+    #
+    # The value was 1.4 while this note argued for 1.8992, which is the read
+    # rather than a fit. Corrected.
+    pitch_centre_x_m: 1.8992
+    # Solve on every sixteenth pair. Tracking runs on every frame regardless,
+    # so this sets how far apart the two views a solve compares are, not how
+    # much of the camera is thrown away. At 2 m/s and 60 Hz that is 53 cm.
+    # Measured, RMSE in metres: 4 -> 0.872, 8 -> 0.829, 12 -> 0.125,
+    # 16 -> 0.124, 20 -> 0.162, 24 -> 0.334, 32 -> 8.5 (tracking gives out).
+    #
+    # TUNED FOR PARKING SPEED. What matters is the ground travelled between
+    # the two views, so at 8 m/s the same 53 cm is reached at 4.
+    frame_decimation: 4
+    # Lossless input so a sweep compares configurations rather than whichever
+    # frames survived the run. Costs throughput; the simulator waits instead of
+    # dropping.
+    # Set to /vision/tracks to take tracks from monoscale_tracker instead of
+    # doing optical flow here. Track messages now carry their frame width and
+    # height, and _on_tracks scales the intrinsics into that pixel frame. The
+    # earlier geometry mismatch described here has therefore been resolved.
+    #
+    # Left empty only because the existing launch still starts the original
+    # Python frontend and does not launch the separate tracker. The current
+    # deployment candidate overrides this to /vision/tracks and runs the C++
+    # tracker at 640 px, 1600 features and a 4x3 grid; see
+    # docs/오도메트리_인수인계.md. Do not interpret this empty default as the
+    # best-performing Orin configuration.
+    track_topic_prefix: ''
+    input_reliability: reliable
+    input_queue_depth: 200
+
+    # Occupancy mapping is deferred while odometry accuracy is the priority.
+    # It cost 15 of the 24 ms each frame pair took and contributes nothing to
+    # the pose. Set this to 0.04 to rebuild the grid at the camera rate again.

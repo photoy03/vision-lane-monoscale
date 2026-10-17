@@ -1,0 +1,19 @@
+# Human-readable snapshot only. Runtime still loads the unchanged NPZ below.
+schema_version: 1
+runtime_calibration: front.npz
+# Same intrinsics in OpenCV FileStorage form, for standalone lane_detection launches.
+opencv_calibration: front_opencv.yaml
+distortion_model: equidistant
+image_width: 2560
+image_height: 1440
+K: [1124.8539494230718, 0.0, 1239.9860488395623, 0.0, 1127.7212520984583, 653.1232644848533, 0.0, 0.0, 1.0]
+D: [-0.026746544589302992, 0.025439551135889072, -0.020583591860473614, 0.0010514108516609898]
+calibration_rms_px: 1.12086869545683
+front:
+  rig: rig.yaml
+rear:
+  rig: rear_rig.yaml
+  intrinsics_policy: reuse_front_when_rear_calibration_argument_empty
+  independently_calibrated_here: false
+  mount_status: provisional_user_input_not_newly_measured
+# The NPZ used_paths list describes historical calibration images, not runtime dependencies.

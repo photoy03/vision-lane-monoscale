@@ -1,0 +1,751 @@
+// Persistent ground features and the map they are matched against.
+//
+// The two-frame estimator asked one question per frame: where did these points
+// go since last time? When tracking degraded the wrong answer could win, and it
+// did, badly, above about 2 m/s.
+//
+// This keeps each feature's position in the world, averaged over every frame it
+// has been seen in, and matches the current view against that instead. A
+// feature that mistracks now disagrees with its own history rather than voting
+// with it, which is the same reason scan-to-map beats scan-to-scan in LiDAR
+// odometry.
+//
+// The two priors that make this stack work are untouched: the ground plane
+// still supplies metric scale, and yaw still comes from the IMU.
+
+#ifndef MONOSCALE_CORE__ANCHORS_HPP_
+#define MONOSCALE_CORE__ANCHORS_HPP_
+
+#include <cstdint>
+#include <array>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include <Eigen/Dense>
+
+#include "monoscale_core/geometry.hpp"
+
+namespace monoscale
+{
+
+using Identities = Eigen::Matrix<int64_t, Eigen::Dynamic, 1>;
+
+struct AnchorSettings
+{
+  int max_anchors = 4000;
+  int max_age_frames = 40;
+  double update_gain = 0.35;
+  // How far an anchor's sightings may scatter about its stored position, m^2,
+  // before it is judged not to be a landmark. Absolute and not scaled by the
+  // geometry, for the reason `consistent_at` sets out.
+  double max_variance = 0.09;
+  int trial_observations = 4;
+  // Off, an anchor is trusted for having been seen often, which was the
+  // original rule. On, it also has to keep landing in the same place.
+  bool select_by_consistency = true;
+  // How close a sighting must land to an existing anchor for a camera that has
+  // not seen it before to adopt it rather than found its own. This is what
+  // makes the map shared in fact and not just in storage: the front camera
+  // drives over ground the rear one sees 4.5 m later, and without this the
+  // second sighting starts a second anchor carrying whatever pose error the
+  // estimate had at that moment. 0 keeps each camera to its own anchors.
+  double link_radius_m = 0.0;
+  // ...and only past this range as well. Both conditions, not either.
+  //
+  // Bearing alone is wrong and the mistake is expensive: the rear camera looks
+  // *along* 105-180 degrees and covers 92-95% of the ground there, so anchors
+  // one to three metres astern are its working set, not dead weight. Killing by
+  // bearing alone took curve_s10 from 0.0821 to 0.5330 while helping only the
+  // 8 m/s straight. What is genuinely unreachable is astern *and* beyond the
+  // solve band.
+  double forget_beyond_range_m = 0.0;
+  // Ground cell size and how many anchors one cell may hold. Zero is off.
+  //
+  double polar_sector_deg = 0.0;
+  double polar_ring_m = 0.0;
+  int polar_rings = 0;
+  int polar_quota = 0;
+  // How many solves an anchor must go unseen before it may be evicted.
+  //
+  // One -- "not updated in this solve" -- is not a test for death. About 1600
+  // of the 8000 slots are updated per solve, so it offers up 6400, and most of
+  // those are live features that merely fell outside the band this time. The
+  // front camera's ground *approaches*, so a point too far now comes into the
+  // band later; evicting it throws that away. Measured with the one-solve test,
+  // walk went 1.93 -> 8.4 and ATE more than doubled: the experiment destroyed
+  // live anchors rather than recycling dead ones.
+  int64_t evict_unseen_solves = 1;
+  // Whether an adopting camera may move the anchor it adopted. Off, only the
+  // camera that founded it writes to it, and to everyone else it is a fixed
+  // landmark. That is the whole point of sharing: the gap between where the
+  // second camera sees the ground and where the first one put it is a
+  // measurement of how far the pose has drifted since, and the registration
+  // spends it on the pose. Let the adopter write and the same gap is spent
+  // moving the map instead, which is drift laundered into the landmark.
+  bool link_adopter_writes = false;
+  // Refuse to adopt an anchor this source founded itself. The point of the link
+  // is that one camera meets ground another one mapped; binding a fresh
+  // sighting to a position this same camera laid down earlier is a different
+  // thing wearing the same mechanism.
+  //
+  // Named by the founder rather than by which camera is which, because which
+  // camera leads is a property of the direction of travel and not of the rig.
+  // Reverse and the rear camera is the one seeing new ground -- an index would
+  // then have the rule exactly backwards, and nothing in the benchmark would
+  // notice, because `segment_gears` is 'drive' on every recording in it.
+  bool link_cross_source_only = false;
+  // Solve the bearing residuals for a rotation about base_link with no sideways
+  // slide, rather than for a free rotation and translation of the lens.
+  //
+  // base_link is the rear axle centre, which on a vehicle that does not slip is
+  // the one point with no lateral velocity. Leaving that freedom in the model
+  // costs the yaw everything: a lens rotation and a lens slide look alike
+  // through a patch a metre wide, and the fit trades them -- measured at
+  // r = -0.82 to -0.89 between the two. Taking the slide out leaves the yaw
+  // with nothing to hide behind. Conditioned over the front camera's band the
+  // yaw's sigma goes 0.1515 -> 0.0339 dropping the slide, and 0.0116 dropping
+  // the roll as well; the rear, being 0.82 m from the axle rather than 3.694,
+  // barely moves, which is the same asymmetry the physics has.
+  bool bearing_nonholonomic = false;
+  // Metres ahead of the vehicle at which an anchor's information is valued.
+  // An anchor is not used where it is now; it is used where it will be when the
+  // solve next reaches it. Valued at the current position a feature entering
+  // the band from ahead scores nothing, which is exactly the anchor about to
+  // become the most informative one there is. Negative values look astern,
+  // which is the control this wants.
+  //
+  // Metres rather than seconds so the law does not change with speed: the band
+  // is geometry and so is this.
+  double lookahead_m = 0.0;
+  // The same thing in seconds of travel, added to the metres above and resolved
+  // against the speed each frame. Which of the two is right is an open
+  // question: an anchor's usable life is a fixed stretch of band, which argues
+  // metres, but how long the solve takes to reach it is a time.
+  double lookahead_sec = 0.0;
+  // Variance of a tracked bearing, rad^2. Measured, not chosen: half a pixel at
+  // the 640-wide processing width is 1.9e-3 rad against fx_eff 262.95 px/rad.
+  double bearing_variance = 3.6e-6;
+  // Gain of the slow average. Smaller is a longer memory; it must be slower
+  // than the fast one or the ratio carries no information.
+  double trend_gain = 0.05;
+
+  // Identities at or above this go to the front of the admission queue.
+  //
+  // A full map frees only the handful of slots ageing gives back, and the queue
+  // that competes for them carries ~1500 corner candidates a frame. A road-grid
+  // point is not refused, it is outvoted: measured, every source founds anchors
+  // at the same ~2% rate, so a lattice offering 117 candidates over a drive
+  // founds none while one offering 1774 founds 38. Feeding more of them fixes
+  // admission and breaks the solve, because a lattice is one homography sampled
+  // many times. This is the other way round -- offer few and let those few in.
+  //
+  // 0 leaves the queue in whatever order the frame built it.
+  int64_t priority_identity_floor = 0;
+
+  // Admit the most informative candidates rather than whichever the frame
+  // happened to list first.
+  //
+  // A saturated map frees a handful of slots per update and ~1500 corner
+  // candidates queue for them, so which 2% get in is decided by array order --
+  // which is to say, not decided. Sorting by `longitudinal_information_at`
+  // spends the scarce slots on the ground that will carry the solve, evaluated
+  // at the lookahead point like every other use of that law.
+  bool admit_by_information = false;
+  // Admit the clearest candidates -- the ones the tracker's corner response
+  // says are really landmarks -- rather than the first ones the frame listed.
+  // Ranking by position was measured worse than not ranking at all; this ranks
+  // by whether the patch is distinct, which the estimator has never had.
+  bool admit_by_clarity = false;
+
+  // How many consecutive sightings a candidate must survive before it may take
+  // a slot. 1 founds on first sight, which is what this map has always done.
+  //
+  // Standard KLT practice does not do that: VINS-Mono only puts a feature into
+  // the optimisation once it has been observed several times, and an MSCKF
+  // triangulates a track only when it ends with enough observations and
+  // baseline. Neither spends state on a feature that has proven nothing. Ours
+  // does, and on the fast straight 46% of the anchors it founds are never seen
+  // again -- so nearly half the map's capacity is committed to features that
+  // did not survive one frame, and committed in the first ten metres, after
+  // which nothing else can get in.
+  int found_after_observations = 1;
+  // Compute the rebuild but do not apply it.
+  bool rebuild_measure_only = false;
+  // How fast an anchor's worth decays with the distance driven since it was
+  // founded. Zero keeps the hard age cutoff on its own.
+  double drift_variance_per_m = 0.0;
+};
+
+// World positions of ground features, refined over the frames they survive.
+//
+// Storage is dense arrays with a free list. The identity table is the only
+// index: identities are handed out from zero upwards by the tracker, so they
+// index an array directly and nothing has to be kept sorted. The Python this
+// replaces also carried a dictionary of live slots, which existed to serve its
+// properties rather than the solve.
+class GroundAnchorMap
+{
+public:
+  // `sources` is how many cameras write into this map. One map shared by all
+  // of them is the point: the front camera drives over ground the rear one
+  // sees 4.5 m later, and with a map each that second sighting founded a
+  // second anchor instead of refining the first.
+  explicit GroundAnchorMap(
+    const AnchorSettings & settings = AnchorSettings(), int sources = 1);
+
+  // How many anchors currently hold a position.
+  int size() const {return live_;}
+  // Where the live anchors are, relative to a pose. Returns how many sit within
+  // `band` of it, and the spread of all of them along and across its heading.
+  // The map holds thousands of slots; this says how many of them the next solve
+  // could possibly use.
+  // Every live anchor as (range, bearing off the heading, weight, sightings,
+  // identity), for asking where the map's capacity actually sits and what kind
+  // of observation put it there.
+  void polar(
+    double x, double y, double yaw,
+    std::vector<std::array<double, 7>> & out) const;
+  void extent(
+    double x, double y, double yaw, double band, int & within, double & along,
+    double & across) const;
+  int64_t frame() const {return frame_;}
+  int64_t discarded() const {return discarded_;}
+  // How many times a camera adopted an anchor another camera had founded.
+  int64_t adopted() const {return adopted_;}
+  // Mean gap between where a camera saw the ground and where the anchor it
+  // adopted already sat, and that same gap divided by the sighting's range.
+  // A scale error grows with range so the second stays flat; a translation
+  // error does not so the first stays flat. That is how they are told apart.
+  double link_gap_m() const {return adopted_ > 0 ? link_gap_ / adopted_ : 0.0;}
+  double link_gap_per_m() const {return adopted_ > 0 ? link_ratio_ / adopted_ : 0.0;}
+  double link_range_m() const {return adopted_ > 0 ? link_range_ / adopted_ : 0.0;}
+  // The crossing read as a length. The rear camera meets ground the front one
+  // anchored some metres back, and the along-track part of their disagreement
+  // is the pose error accumulated over exactly that stretch -- a scale
+  // measurement over a four metre baseline instead of a 1.5 m sighting.
+  int64_t crossings() const {return crossings_;}
+  double crossing_along_m() const {return crossings_ > 0 ? along_ / crossings_ : 0.0;}
+  double crossing_travel_m() const {return crossings_ > 0 ? gap_travel_ / crossings_ : 0.0;}
+  // Least squares of the along-track gap on how far the vehicle came between
+  // the two sightings. The **slope** is the scale error; the **intercept** is
+  // the standing difference between the two cameras' projections, which does
+  // not grow with distance and would otherwise be read as scale.
+  double crossing_slope() const
+  {
+    const double n = static_cast<double>(crossings_);
+    const double det = n * travel_squared_ - gap_travel_ * gap_travel_;
+    return std::abs(det) > 1e-9 ? (n * cross_ - gap_travel_ * along_) / det : 0.0;
+  }
+  double crossing_intercept() const
+  {
+    const double n = static_cast<double>(crossings_);
+    const double det = n * travel_squared_ - gap_travel_ * gap_travel_;
+    return std::abs(det) > 1e-9
+           ? (travel_squared_ * along_ - gap_travel_ * cross_) / det : 0.0;
+  }
+  // Where the vehicle is, so a crossing can be resolved along its heading and
+  // dated by how far it has come.
+  // `weight_yaw` is the heading an anchor's worth is judged from, and it should
+  // be a filtered one. Every anchor's bearing turns with the vehicle at once,
+  // so an unfiltered heading collapses the whole map's weight together on a
+  // swerve the vehicle may be about to come back out of. The bearing is a claim
+  // about where anchors will be useful; it should not follow a transient.
+  void set_frame_pose(double path, double yaw, double weight_yaw)
+  {
+    path_ = path;
+    yaw_ = yaw;
+    weight_yaw_ = weight_yaw;
+  }
+  void set_frame_pose(double path, double yaw) {set_frame_pose(path, yaw, yaw);}
+  // Where the vehicle is, so an anchor's worth can be asked of its geometry
+  // rather than only of its history.
+  // Where an anchor's worth is valued: `lookahead_m` plus `lookahead_sec` of
+  // travel at the speed handed in. Resolved here so the map does not have to
+  // know how fast the vehicle is going.
+  // The vehicle does not travel along its current heading, it travels along an
+  // arc, so projecting the evaluation point down the tangent puts it off the
+  // road on anything that turns. `turn_rate` is the yaw rate in rad/s and must
+  // be a *filtered* one: the raw per-hop rate carries the solve's own noise,
+  // and squaring that into a position two seconds out is how a prediction
+  // becomes worse than no prediction.
+  void set_lookahead(double speed, double turn_rate)
+  {
+    const double distance =
+      settings_.lookahead_m + settings_.lookahead_sec * std::max(speed, 0.0);
+    if (!(distance > 0.0)) {
+      look_f_ = 0.0;
+      look_l_ = 0.0;
+      return;
+    }
+    // How long the vehicle takes to cover it, and how far it turns in that time.
+    const double seconds = speed > 1e-3 ? distance / speed : 0.0;
+    const double swept = turn_rate * seconds;
+    if (std::abs(swept) < 1e-6) {
+      look_f_ = distance;
+      look_l_ = 0.0;
+      return;
+    }
+    const double radius = distance / swept;
+    look_f_ = radius * std::sin(swept);
+    look_l_ = radius * (1.0 - std::cos(swept));
+  }
+  void set_frame_position(double x, double y, double height)
+  {
+    at_x_ = x; at_y_ = y; lens_height_ = height;
+    if (settings_.polar_quota > 0) {rebuild_polar_counts();}
+  }
+
+  // Mask of which ids already have a world position.
+  void anchored(int source, const Identities & ids, Mask & out) const;
+  // Single-source shorthand, which is what a one-camera map is.
+  void anchored(const Identities & ids, Mask & out) const {anchored(0, ids, out);}
+
+  // World positions and weights together, from one lookup. The solve wants
+  // both for the same features, and asking twice means searching the index
+  // twice for an answer that could not have changed in between.
+  // How much each remembered pose contributes to an alignment's answer.
+  //
+  // The alignment's translation is a weighted mean over anchors, and each
+  // anchor is a weighted mean over the poses that saw it. Composing the two,
+  // `t_k = sum_i beta_i t_i + c_k`, and this returns the sparse `beta`, indexed
+  // by pose. `alignment` is `AnchorAlignment::weight`; it is normalised here.
+  //
+  // Diagnostic. Nothing in the solve consumes it -- it exists to ask whether
+  // stating the map's output in that form, and letting the window it spans move,
+  // would change the answer. Measured 2026-09-15 on straight120_v2 and
+  // curve_s20, 661 alignments: **it would not.** The effective number of poses,
+  // 1 / sum(beta^2), is **1.05** at the median on both drives, and the largest
+  // single beta is **0.977** -- three quarters of alignments put over 0.9 of
+  // their answer on one pose, and in 79-82% of them that pose is the
+  // immediately previous one. The constraint spans 22 poses and 111 indices,
+  // and weighs almost all of it at lag zero.
+  //
+  // So `t_k = sum_i beta_i t_i + c_k` is the correct general form and it
+  // collapses, on this data, to `t_k = t_{k-1} + c_k`: a hop. A fixed-lag
+  // smoother over that window has 2.3% of one correction to distribute over
+  // twenty-odd poses. The tail is real -- the tenth percentile of the largest
+  // beta is 0.20-0.27 and N_eff reaches 34 -- but it is a tenth of a third of
+  // the hops.
+  void pose_weights(
+    int source, const Identities & ids, const Weights & alignment,
+    std::vector<std::pair<int32_t, double>> & out) const;
+
+  void anchor_view(
+    int source, const Identities & ids, Points2 & world_out, Weights & weights_out) const;
+  void anchor_view(const Identities & ids, Points2 & world_out, Weights & weights_out) const
+  {
+    anchor_view(0, ids, world_out, weights_out);
+  }
+
+  // Fold in this frame's sightings.
+  //
+  // `allow_new` separates observing the map from defining it. Every frame
+  // refines the anchors it can see, but a new anchor is born at whatever pose
+  // the estimate held at that instant, so seeding from every frame fills the
+  // map with points inheriting short-baseline error.
+  //
+  // `information` is how much each sighting is worth, and it is not optional in
+  // spirit. A point on the ground eight metres out is pinned down far less
+  // precisely than the same point at one metre -- the same angular error is
+  // worth eight times as many centimetres -- and averaging the two as equals
+  // leaves the anchor displaced along its own bearing. Over a frame full of
+  // features that displacement does not cancel: it reads as a rotation, and the
+  // ground solve asks for 2.7 mrad of heading that is not there. Weighted by
+  // precision it asks for 0.24. Pass an empty vector to weight equally.
+  // Move the map on by one frame. Ageing is per frame, not per camera, so
+  // this is called once even though every camera then writes into the map.
+  void advance() {++frame_;}
+
+  void update(
+    int source, const Identities & ids, const Points2 & world_points, bool allow_new,
+    const Weights & information, const Weights & clarity = Weights());
+
+  // The same, remembering where each sighting was taken from. An anchor is a
+  // running average, and folding a sighting in destroys which pose it came
+  // from -- which is why a corrected trajectory cannot be pushed back into the
+  // map. Keeping `(pose index, body point)` per sighting is the smallest thing
+  // that makes the map re-derivable.
+  // `clarity` is how distinct each candidate's patch is, from the tracker's
+  // corner response. It orders admission when `admit_by_clarity` is set and is
+  // ignored otherwise; empty means the tracker is not publishing it.
+  void update(
+    int source, const Identities & ids, const Points2 & world_points, bool allow_new,
+    const Weights & information, const Points2 & body_points, int32_t pose_index,
+    const Weights & clarity = Weights());
+
+  // Recompute every anchor from the poses its sightings were taken at. `poses`
+  // is indexed by the same `pose_index` handed to `update`.
+  void rebuild(const std::vector<std::array<double, 3>> & poses);
+
+  // How many sightings are being remembered, for pricing the storage.
+  int64_t remembered() const {return remembered_;}
+  // How far apart in pose index the remembered sightings of a live anchor
+  // are, averaged. If this is a handful of frames the map holds no long
+  // baseline and nothing in it can pin a correction.
+  double sighting_span() const;
+
+  // A constraint between two poses: both saw the same anchor, so their
+  // separation is fixed by where each of them put it in its own body frame.
+  // This is the only measurement on this rig that ties two parts of the
+  // trajectory together -- the rear camera drives over ground the front camera
+  // mapped 4.5 m earlier -- and it is what a pose graph needs and dead
+  // reckoning cannot supply.
+  struct Revisit
+  {
+    int32_t from;
+    int32_t to;
+    double bx_from;
+    double by_from;
+    double bx_to;
+    double by_to;
+    double weight;
+  };
+  std::vector<Revisit> revisits() const;
+  // Mean distance a rebuild moves an anchor. With the poses unchanged this is
+  // how far the remembered sightings fail to reproduce the running average --
+  // the test of whether the storage is sufficient at all.
+  double rebuild_shift() const
+  {return rebuild_slots_ > 0 ? rebuild_shift_ / rebuild_slots_ : 0.0;}
+  void clear_rebuild_shift() {rebuild_shift_ = 0.0; rebuild_slots_ = 0;}
+  void update(
+    const Identities & ids, const Points2 & world_points, bool allow_new,
+    const Weights & information)
+  {
+    advance();
+    update(0, ids, world_points, allow_new, information);
+  }
+
+  // Position of one anchor, for tests and diagnostics.
+  std::optional<Eigen::Vector2d> position_of(int64_t identity) const;
+  std::optional<int> observations_of(int64_t identity) const;
+  std::optional<double> variance_of(int64_t identity) const;
+  // Seen often and landing in the same place each time is what counts.
+  std::optional<double> weight_of(int64_t identity) const;
+
+private:
+  int64_t slot_of(int source, int64_t identity) const;
+  int64_t cell_of(double x, double y) const;
+  void grid_insert(int64_t slot);
+  void grid_erase(int64_t slot);
+  // Nearest anchor within link_radius_m that this source has not bound yet.
+  int64_t adoptable(int source, double x, double y) const;
+  double weight_at(int64_t slot) const;
+  double longitudinal_information(int64_t slot) const;
+  double predicted_variance(int64_t slot) const;
+  // Position scatter of a live anchor, m^2. What `variance_` holds.
+  double scatter_at(int64_t slot) const;
+  // Slot is live, past trial, and still agreeing with itself: what the solve
+  // will actually register against.
+  bool usable_at(int64_t slot) const;
+  // Whether its measured scatter stays inside `max_variance`.
+  bool consistent_at(int64_t slot) const;
+  // The same, for a position that has no slot yet -- what a candidate birth
+  // would be worth if it were admitted.
+  double longitudinal_information_at(double x, double y) const;
+  void forget(int64_t slot);
+  void prune();
+
+  AnchorSettings settings_;
+  Points2 position_;
+  Eigen::Matrix<int64_t, Eigen::Dynamic, 1> observation_;
+  Eigen::VectorXd variance_;
+  Eigen::Matrix<int64_t, Eigen::Dynamic, 1> seen_;
+  // How much this anchor's position is worth knowing, summed over every
+  // sighting that went into it.
+  Eigen::VectorXd information_;
+  // The slow companion to `variance_`, for the trend. Same units.
+  Eigen::VectorXd variance_slow_;
+  // Candidates that have not earned a slot yet: identity -> (run, last frame).
+  // The run resets when a candidate misses a frame, so what it counts is a
+  // track that survived, not a track that reappeared.
+  std::vector<std::unordered_map<int64_t, std::pair<int32_t, int64_t>>> pending_;
+  Eigen::Matrix<int64_t, Eigen::Dynamic, 1> identifier_;
+  std::vector<int64_t> free_;
+  // Slot of each identity, per source. Track identities restart per camera, so
+  // one table each.
+  //
+  // Sparse, not a vector indexed by the identity. Identities only ever go up --
+  // 467,085 of them in 601 frames at road speed -- so a dense table grows with
+  // every feature the drive has ever detected rather than with the ones it is
+  // still holding, and an hour of driving would ask for hundreds of megabytes
+  // of mostly -1. The road alignment's identities start at 1 << 40 and made
+  // that fatal rather than merely wasteful.
+  std::vector<std::unordered_map<int64_t, int64_t>> by_id_;
+  // Which identity each source has bound to a slot, -1 where none. A slot may
+  // carry one per source: that is what makes it a shared landmark rather than
+  // two anchors in the same place.
+  Eigen::Matrix<int64_t, Eigen::Dynamic, Eigen::Dynamic> owner_;
+  // Which source founded each slot; only it may move the anchor.
+  Eigen::Matrix<int64_t, Eigen::Dynamic, 1> founder_;
+  // Per slot, a ring of the most recent sightings: which pose they were taken
+  // from and where the point sat in that pose's body frame.
+  static constexpr int kRemember = 16;
+  Eigen::Matrix<int32_t, Eigen::Dynamic, Eigen::Dynamic> sight_pose_;
+  Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> sight_body_;
+  Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> sight_weight_;
+  // Which source took each sighting. A revisit is only a loop closure if the
+  // two ends came from different cameras; one camera's own sightings restate
+  // the odometry that already links those poses.
+  Eigen::Matrix<int32_t, Eigen::Dynamic, Eigen::Dynamic> sight_source_;
+  // Per slot and per source, the single strongest sighting that source ever
+  // took of it. A loop closure needs one observation from each camera, not the
+  // recent ones: the ring holds sixteen frames and one camera fills it before
+  // the other arrives, so the ring alone can never hold both ends.
+  Eigen::Matrix<int32_t, Eigen::Dynamic, Eigen::Dynamic> best_pose_;
+  Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> best_body_;
+  Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> best_weight_;
+  Eigen::Matrix<int32_t, Eigen::Dynamic, 1> sight_count_;
+  // Identities this source is tracking in the frame being processed. Held
+  // across the `update` call so `adoptable` can ask whether an anchor's owner
+  // is still live rather than how long ago it was seen.
+  std::unordered_set<int64_t> live_ids_;
+  int64_t remembered_ = 0;
+  // Anchors sighted since the last rebuild, and the flag that keeps the list
+  // free of duplicates when both cameras see one in the same frame.
+  std::vector<int64_t> touched_;
+  std::vector<char> dirty_;
+  double rebuild_shift_ = 0.0;
+  int64_t rebuild_slots_ = 0;
+  int sources_ = 1;
+  // The evaluation point relative to the vehicle, forward and left.
+  double look_f_ = 0.0;
+  double look_l_ = 0.0;
+  double weight_yaw_ = 0.0;
+  double at_x_ = 0.0;
+  double at_y_ = 0.0;
+  double lens_height_ = 0.0;
+  // Set once the map has reached capacity, and never cleared.
+  bool saturated_ = false;
+  // Coarse spatial index over live anchors, one bucket per link-radius cell.
+  std::unordered_map<int64_t, std::vector<int64_t>> grid_;
+  int polar_cell_of(double x, double y) const;
+  void rebuild_polar_counts();
+  std::vector<int> polar_;
+  int live_ = 0;
+  int64_t frame_ = 0;
+  int64_t discarded_ = 0;
+  int64_t adopted_ = 0;
+  double link_gap_ = 0.0;
+  double link_ratio_ = 0.0;
+  double link_range_ = 0.0;
+  double along_ = 0.0;
+  double gap_travel_ = 0.0;
+  double travel_squared_ = 0.0;
+  double cross_ = 0.0;
+  int64_t crossings_ = 0;
+  double path_ = 0.0;
+  double yaw_ = 0.0;
+  // Path length when each anchor was founded, so a crossing knows how far the
+  // vehicle came between the two sightings.
+  Eigen::VectorXd founded_path_;
+};
+
+struct AnchorAlignment
+{
+  Eigen::Vector2d translation;
+  // The weight each anchor actually carried into that translation, at the mode
+  // the fit settled on: `map weight * soft gate`, unnormalised. `inliers` is
+  // the hard mask beside it and is not the same thing -- under a soft gate a
+  // point outside the threshold still votes, with a small weight.
+  //
+  // Here because the translation is a weighted mean of the anchors, and each
+  // anchor is itself a weighted mean of the poses that saw it. Compose the two
+  // and this solve's output is a linear functional of the recent trajectory:
+  // `t_k = sum_i beta_i t_i + c_k`. Recovering `beta` needs these weights, and
+  // nothing else in the result exposes them.
+  Weights weight;
+  Mask inliers;
+  // RMS residual of the inlying votes: how precise this camera's answer was.
+  double spread = 0.0;
+  // How many of those votes are independent, from their own mutual
+  // correlation. Equal to the inlier count only when they are uncorrelated,
+  // and they are not.
+  double effective_inliers = 0.0;
+  double yaw = 0.0;
+  // One standard deviation of that heading, or infinity when the fit was not
+  // asked to solve for it.
+  double yaw_sigma = std::numeric_limits<double>::infinity();
+
+  // How the inlying residuals lean along their own bearing from the camera,
+  // regressed against range and normalised by `radial_reference`. `spread` is
+  // these same residuals squared into one number, which is what the fit needs;
+  // this is the part that squaring destroys.
+  //
+  // It measures the mounting pitch, and only that. Measured by replaying one
+  // drive with the mounting deliberately turned, it runs -0.0035, -0.0014,
+  // -0.0008, +0.0003, +0.0017, +0.0025, +0.0043 over pitch errors of -1 to +1
+  // degree: monotone, and about 0.004 per degree.
+  //
+  // The camera's height does not appear here, and cannot. A height believed to
+  // be h(1+d) puts every ground point at r(1+d), and the anchors are built from
+  // that same projection, so the whole map is scaled with it and a rigid fit is
+  // satisfied. The trajectory is wrong -- a 2% error took ATE from 0.111 m to
+  // 0.336 -- and this residual never moves. Height is observable against the
+  // accelerometer or not at all.
+  //
+  // What lets pitch through where height cannot is that its error depends on
+  // range: dr = -e(h + r*r/h) against d*r. An anchor is averaged over the
+  // frames its feature survived and the feature crosses the field, so each
+  // sighting carried a different range error into that average and they do not
+  // cancel. A quadratic term was fitted for as well, orthogonalised against
+  // this one; over the range the ground band actually spans there is no support
+  // left for it and it came back noise, so the linear term carries the whole
+  // signal.
+  double radial_linear = 0.0;
+  double radial_reference = 0.0;
+  // The same radial residual split into the two things that can cause it.
+  //
+  // A camera believed to sit at the wrong height puts every ground point wrong
+  // by `R dh/h` -- linear in range, and zero underneath the lens. A camera
+  // believed to be at the wrong pitch puts it wrong by `(R^2+h^2)/h dtheta` --
+  // quadratic, and `h dtheta` underneath the lens rather than zero. The single
+  // linear fit above cannot tell them apart and reports both as height.
+  //
+  // Diagnostic only. The two bases are 98-99% collinear over any range this rig
+  // sees (condition number 25-50), so this is worth something only because the
+  // signal is large: over 0.5-5.8 m a milliradian of pitch moves the far
+  // anchors 37.7 mm against the near ones, where over the photometric band's
+  // 0.34-1.14 m it moves them 1.34 mm.
+  double radial_height = 0.0;
+  double radial_pitch = 0.0;
+
+  // The same residuals read on the sphere instead of on the ground.
+  //
+  // Two reasons it is the better domain. A ground residual is the bearing
+  // residual multiplied by (R^2 + h^2)/h, which over this band runs from 4 mm
+  // at a metre to 73 mm at 5.8, so an unweighted least squares on the ground
+  // is weighted by the wrong thing and the far anchors carry the fit. On the
+  // sphere the noise is the sensor's own and does not depend on range at all.
+  //
+  // And the signatures separate: an attitude error turns every bearing by the
+  // same `-w x b` whatever its range, while a translation error moves it by
+  // `-(I - b b^T) t / rho`, which falls away with distance. No scale error can
+  // imitate a rigid rotation of the field -- scaling the anchors about the lens
+  // leaves every bearing exactly where it was -- so the angle comes out
+  // independent of whatever the map's own scale is doing. The height does not,
+  // which is why only the angles are reported here.
+  double bearing_roll = 0.0;
+  double bearing_pitch = 0.0;
+  double bearing_yaw = 0.0;
+  // How many bearings the fit stood on, 0 where it did not run.
+  int bearing_terms = 0;
+  // The two in-plane translations the same fit solved for. Carried out only to
+  // ask whether they are taking the yaw with them: a yaw about the lens and a
+  // sideways slide look alike through a patch held four metres off the rotation
+  // centre, and if that degeneracy is what costs the yaw its precision, these
+  // two move against it solve by solve.
+  double bearing_tx = 0.0;
+  double bearing_ty = 0.0;
+};
+
+// Translation that places the current ground view onto its world anchors.
+//
+// With yaw taken as known each correspondence votes for one translation, so the
+// solve is a robust average rather than a search.
+//
+// `refine_yaw` asks it to solve for heading as well. Off, the heading handed in
+// stands. On, this becomes an iterated update in the sense FAST-LIO uses: the
+// inliers chosen under one pose re-solve the pose, and the new pose reselects
+// the inliers. Yaw and translation are not separable -- a heading error a
+// hundredth of a radian wide drags the ground a centimetre sideways at every
+// metre of range -- so the heading comes out of the same fit, as the 2D
+// Procrustes rotation between the inlier sets.
+//
+// What comes back is the fit's own answer and how much that answer is worth,
+// not a blend. Blending here belongs to the caller: a hard bound on the
+// correction helped at 8 m/s and ruined 2.5, and weighting the share by
+// precision was no better on any drive, because the gyro's error is a bias
+// rather than noise. Cancelling a bias means estimating it, which is a state,
+// which is the caller's business.
+// `origin` is where the camera sits in the frame `body_points` are given in.
+// The range that separates a height error from a tilt one is measured from the
+// lens, not from the axle, and on this vehicle those are three metres apart.
+// Leaving it at zero costs nothing but `radial_linear`.
+//
+// `radial_min_range` drops the nearest ground from that regression and from
+// nothing else -- those points still vote for the pose. They have to go because
+// a pixel there is worth five millimetres and optical flow loses them first, and
+// weighting by precision hands them the fit. Measured on the front camera, whose
+// ground band starts at 0.6 m: the lean over mounting errors of -0.5, 0 and +0.5
+// degrees ran -0.0003, +0.0007, -0.0005 with them in, which says nothing, and
+// -0.0040, -0.0008, +0.0010 with the first 1.5 m left out.
+std::optional<AnchorAlignment> align_to_anchors(
+  const Points2 & body_points, const Points2 & world_points, const Weights & weights,
+  double yaw, double threshold, int min_inliers, bool refine_yaw,
+  const Eigen::Vector2d & origin = Eigen::Vector2d::Zero(),
+  double radial_min_range = 0.0,
+  double lens_height = 0.0,
+  // Width of the Gaussian that replaces the hard inlier gate, in metres.
+  // 0 keeps the gate. See the note in the implementation.
+  double softness = 0.0,
+  // Where to start the search. Without one the fit begins at the median vote,
+  // which at low speed sits near zero simply because most of the hop is
+  // smaller than the residuals around it -- and an iteration started there
+  // settles into "did not move". Seeded with the previous hop, the same data
+  // settles on the answer next to it instead.
+  const Eigen::Vector2d * translation_prior = nullptr,
+  // How many starting points the mode search tries. 1 keeps the median only.
+  int restarts = 1,
+  // Refuse the solve unless the winning mode beats the best rival mode by
+  // this factor. 0 accepts whatever wins.
+  double ambiguity = 0.0,
+  // Reject modes further than this from the inertial expectation. 0 disables.
+  const Eigen::Vector2d * inertial_hop = nullptr,
+  double inertial_gate = 0.0,
+  // Per point, how much wider than the configured gate and softness this
+  // residual is allowed to be. Empty means one for everything. A bearing
+  // measurement's metric error scales with its range, so a landmark twenty
+  // metres out needs ten times the tolerance of one at two to be judged on the
+  // same angle.
+  const Weights & residual_scale = Weights(),
+  // Solve the bearing residuals for a rotation about base_link with no sideways
+  // slide. See AnchorSettings::bearing_nonholonomic for why.
+  bool bearing_nonholonomic = false,
+  // Width, in radians of bearing, of the cell inside which two anchors are the
+  // same measurement. 0 is off.
+  //
+  // Anchors that fall closer together than the instrument resolves are not
+  // independent: they enter the weighted mean N times and outvote a genuinely
+  // separate direction. Measured on the fast straight, 4000 anchors occupy 119
+  // pixel-wide bearing cells with 525 in the busiest, and half of them sit in
+  // five cells -- so the map is, in bearing, five to thirteen measurements
+  // wearing four thousand's worth of weight.
+  //
+  // That they are redundant rather than merely close was measured before this
+  // was built: 68-81% of the alignment residual's variance is between cells,
+  // the frame-wide mean residual is 17% of its RMS (so not common mode), and a
+  // rigid translation-plus-rotation in bearing explains only 3-4% of it, with
+  // the within-cell correlation surviving its removal. So the cells carry
+  // independent information and the anchors inside one do not.
+  //
+  // Set it to the bearing noise, not to a tuned number: sigma_b is half a pixel
+  // at the processing width, 1.9e-3 rad here.
+  double bearing_cell_rad = 0.0,
+  // How correlated two anchors in one cell actually are. 1 treats them as one
+  // measurement; 0 disables the correction. Measured within-cell correlation is
+  // 0.807 / 0.738 / 0.680 on straight_s8 / straight120_v2 / curve_s05.
+  double bearing_cell_rho = 1.0);
+
+struct CameraTranslation
+{
+  double x = 0.0;
+  double y = 0.0;
+  int count = 0;
+  double spread = 0.0;
+};
+
+// Combine per-camera translations by how precise each one was.
+//
+// Weight is count over spread squared, the inverse variance of that camera's
+// mean, so a camera that sees less ground but agrees with itself tightly is not
+// drowned out by one that sees more and scatters. Weighting by count alone let
+// the rear camera, which sits higher and sees more road, outvote the front
+// twelve to one.
+std::optional<CameraTranslation> fuse_by_precision(
+  const std::vector<CameraTranslation> & estimates);
+
+}  // namespace monoscale
+
+#endif  // MONOSCALE_CORE__ANCHORS_HPP_

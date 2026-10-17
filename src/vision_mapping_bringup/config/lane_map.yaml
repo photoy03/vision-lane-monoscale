@@ -1,0 +1,11 @@
+# Vehicle overrides only. Node defaults live in the owning package:
+#   lane_map/config/map_fusion.yaml (lane_map_fusion); map extent/frame: map.yaml
+# launch_arguments: command-line knobs. An empty value means "use the package default".
+launch_arguments:
+  launch_lane_fusion: 'true'
+  map_fusion_mode: legacy
+  compare_lane_registration: 'false'
+  # Who builds the lane map: map (default since 2026-10-17: lane_detection only detects;
+  # lane_map matches poses, tracks and accumulates) or detection (the previous path,
+  # where lane_detection also tracks and accumulates).
+  lane_mapping_owner: map

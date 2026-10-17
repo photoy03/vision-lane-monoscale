@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>lane_map</name><version>0.3.0</version>
+  <description>CPU line landmark fusion addon; never modifies odometry or TF.</description>
+  <maintainer email="jaehun@todo.todo">jaehun</maintainer><license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend><depend>sensor_msgs</depend><depend>std_msgs</depend>
+  <depend>geometry_msgs</depend><depend>nav_msgs</depend><depend>vision_lane_interfaces</depend><depend>libopencv-dev</depend>
+  <depend>visualization_msgs</depend>
+  <depend>monoscale_pose</depend>
+  <exec_depend>launch_ros</exec_depend><exec_depend>ament_index_python</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

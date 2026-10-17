@@ -1,0 +1,60 @@
+/**:
+  ros__parameters:
+    input_topic: /parking/cpp/marking_segments
+    input_frame: base_link
+    map_frame: lane_map
+    camera_id: front
+    camera_ids: [front]
+    warmup_frames: 120
+    keyframe_translation_m: 0.10
+    keyframe_yaw_deg: 1.5
+    max_input_age_sec: 0.5
+    # observer_pose is already aligned to the image acquisition stamp.
+    # Processing delay is measured separately instead of invalidating it here.
+    reject_late_input: false
+    # Vehicle-centered rolling line map: data outside this radial distance is
+    # physically discarded, matching the occupancy map's 60 m retention rule.
+    rolling_distance_m: 60.0
+    # Match the documented GitHub occupancy lattice: the first pose is (0,0)
+    # and both axes span [-30,+30) m. 'rolling' keeps the prior radius mode.
+    extent_mode: 'github_fixed'
+    match_angle_deg: 5.0
+    match_offset_m: 0.15
+    match_overlap_m: 0.20
+    match_overlap_ratio: 0.25
+    # Default remains the original overlap-only algorithm. The launch file
+    # enables this only for the separate continuation/compare node.
+    continuation_mode: false
+    continuation_gap_m: 0.30
+    # Render-only duplicate suppression. Keep conservative until candidates
+    # are checked against manually labelled parking marks.
+    duplicate_render_offset_m: 0.20
+    duplicate_candidate_offset_m: 0.50
+    # Turn this off when occupancy and lanes share the odometry `map` frame.
+    # A private lane-only correction would break their spatial agreement.
+    enable_pose_registration: true
+    support_bin_m: 0.10
+    confirm_keyframes: 3
+    min_segment_length_m: 0.65
+    max_segment_length_m: 12.0
+    min_confidence: 0.50
+    max_landmarks: 1000
+    tentative_ttl_sec: 8.0
+    # Distance pruning is the primary lifetime rule. Five minutes prevents a
+    # temporary odometry outage from making the already mapped lanes vanish.
+    confirmed_ttl_sec: 300.0
+    # Delete only the 10 cm support pieces that overlap a persistent obstacle.
+    # Three distinct map stamps avoid one noisy occupancy frame erasing paint.
+    # Keep this opt-in until the live occupancy false-positive rate is
+    # validated. In the first joint run it removed 135 valid lane support bins.
+    occupancy_filter_enabled: false
+    occupancy_topic: '/perception/occupancy_grid_map'
+    occupancy_threshold: 70
+    occupancy_confirm_updates: 3
+    occupancy_inflation_m: 0.15
+    map_x_min_m: -30.0
+    map_x_max_m: 30.0
+    map_y_min_m: -30.0
+    map_y_max_m: 30.0
+    map_resolution_m: 0.05
+    map_publish_hz: 5.0

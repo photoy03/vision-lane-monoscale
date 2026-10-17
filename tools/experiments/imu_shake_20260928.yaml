@@ -1,0 +1,36 @@
+schema_version: 1
+output_root: docs/evaluation_runs/imu_shake_20260928
+calibration: src/vision_mapping_bringup/config/calibration/front.npz
+front_rig: src/vision_mapping_bringup/config/rig.yaml
+rear_rig: src/vision_mapping_bringup/config/rear_rig.yaml
+domain_id: 83
+minimum_free_gib: 3.0
+repeats: 3
+sample_count: 12
+bags:
+  - id: dual24
+    path: ../vision_lane_measurements/20260924_215434_dual_camera_01/bag
+  - id: lane25
+    path: ../vision_lane_measurements/20260925_215144_lane_shake_check/bag
+  - id: occum26
+    path: ../vision_lane_measurements/20260926_162131_occum_test/bag
+  - id: input28
+    path: ../vision_lane_measurements/20260928_181330_dual_input_check_01/bag
+variants:
+  B0: {}
+  T1:
+    tracker_executor_threads: '2'
+  Q1:
+    tracker_input_queue_depth: '1'
+  H1:
+    tracker_imu_yaw_history_sec: '15.0'
+  G0:
+    tracker_gyro_prediction_mode: shadow
+  G1:
+    tracker_gyro_prediction_mode: seed
+thresholds:
+  residual_p95_improvement_fraction: 0.15
+  low_turn_max_degradation_fraction: 0.05
+  tracker_p95_max_degradation_fraction: 0.05
+  age_p95_target_improvement_fraction: 0.20
+  odom_gap_p95_max_degradation_fraction: 0.05

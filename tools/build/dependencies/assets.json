@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "files": {
+    "src/vision_mapping_bringup/config/calibration/front.npz": "7c82891ee611d762a003e9243990cc07e3264abf5e738ee5fc5ebd4211c4b79f",
+    "src/vision_mapping_bringup/config/rig.yaml": "9ffe6c2a01cdfb8e58219150a585ae4b6bdf1a5746fdcd62263e2335d103f7cd",
+    "src/vision_mapping_bringup/config/rear_rig.yaml": "fddda382587e9ad5f39104cff717f926aa63519a6bc2746a4a3fc2006f716064",
+    "src/vision_mapping_bringup/config/calibration/rear.npz": "7c82891ee611d762a003e9243990cc07e3264abf5e738ee5fc5ebd4211c4b79f",
+    "src/vision_mapping_bringup/config/calibration/front_opencv.yaml": "705603b187014b9d5e821d9cc943b11d1600676e559a7784e54fd1086c1d3825"
+  },
+  "required_paths": [
+    "src/vision_mapping_bringup/launch/live.launch.py",
+    "src/vision_mapping_bringup/launch/replay.launch.py",
+    "src/vision_mapping_bringup/launch/sensors.launch.py",
+    "src/vision_mapping_bringup/launch/monoscale.launch.py",
+    "src/vision_mapping_bringup/launch/lanes.launch.py",
+    "src/vision_mapping_bringup/launch/measurement.launch.py",
+    "src/vision_mapping_bringup/config/calibration/info.yaml",
+    "src/vision_mapping_bringup/config/pose.yaml",
+    "src/vision_mapping_bringup/config/lane_detection.yaml",
+    "src/vision_mapping_bringup/rviz/mapping.rviz",
+    "tests/fixtures/carla/ioniq_carla_bridge/config/sensor_kit_calibration.yaml",
+    "tests/fixtures/carla/ioniq_carla_bridge/config/sensor_mapping_fisheye_live.yaml",
+    "third_party/MONOSCALE_LICENSE",
+    "third_party/MONOSCALE_README.md",
+    "third_party/V4_PROVENANCE.json"
+  ],
+  "expected_packages": [
+    "monoscale_core", "monoscale_tracker", "monoscale_odometry", "monoscale_pose",
+    "monoscale_occupancy_grid_map", "monoscale_ublox",
+    "vision_lane_interfaces", "lane_detection",
+    "lane_map", "map_assembly", "vision_mapping_bringup"
+  ]
+}

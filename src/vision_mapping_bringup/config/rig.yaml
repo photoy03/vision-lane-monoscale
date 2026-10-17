@@ -1,0 +1,14 @@
+# One physical rig description feeds both MonoScale and C++ lane projection.
+# These defaults are the uploaded MonoScale temporary-pillar measurements,
+# NOT a claim that they match your real vehicle. Measure before moving tests.
+camera_height_m: 0.80
+camera_forward_m: 0.08
+camera_left_m: 0.0
+pitch_deg: 30.0
+roll_deg: 0.0
+yaw_deg: 0.0
+
+# MonoScale consumes IMU axes directly, without a TF-based rotation.
+# Keep true ONLY when the incoming data is x-forward/y-left/z-up.
+imu_axes_aligned_with_base: true
+imu_position_m: [-0.03, 0.0, 0.805]

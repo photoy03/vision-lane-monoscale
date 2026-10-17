@@ -1,0 +1,16 @@
+# The one shared map definition for the lane map (lane_map_fusion) and the
+# occupancy grid (monoscale_occupancy_grid_map): same frame, same extent box,
+# same rolling radius. Resolutions differ per layer on purpose.
+map:
+  frame: map
+  # github_fixed: fixed box below, anchored at the first pose. rolling: keep
+  # only what lies within rolling_radius_m of the vehicle.
+  x_min_m: -30.0
+  x_max_m: 30.0
+  y_min_m: -30.0
+  y_max_m: 30.0
+  rolling_radius_m: 60.0
+  lane_resolution_m: 0.05
+  occupancy_resolution_m: 0.1
+launch_arguments:
+  map_extent_mode: github_fixed

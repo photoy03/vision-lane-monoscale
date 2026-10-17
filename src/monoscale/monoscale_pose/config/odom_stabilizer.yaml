@@ -1,0 +1,57 @@
+# lane_odom_stabilizer defaults (values validated in the live/replay pipeline).
+# vision_mapping_bringup loads this file first and applies only vehicle overrides.
+lane_odom_stabilizer:
+  ros__parameters:
+    input_odom_topic: /localization/monoscale_raw
+    output_odom_topic: /localization/kinematic_state
+    input_parent_frame: odom
+    parent_frame: map
+    child_frame: base_link
+    publish_tf: true
+    max_abs_tilt_deg: 8.0
+    max_linear_speed_mps: 5.0
+    max_angular_speed_deg_s: 120.0
+    max_translation_step_m: 0.3
+    max_yaw_step_deg: 10.0
+    stationary_linear_speed_mps: 0.08
+    stationary_angular_speed_deg_s: 3.0
+    stationary_tau_sec: 0.2
+    reset_gap_sec: 0.75
+    vision_tracks_topic: /vision/tracks/front
+    imu_topic: /sensing/imu/imu_data
+    imu_frame_id: imu_link
+    vision_yaw_sign: 1.0
+    yaw_correction_enabled: true
+    yaw_bias_tau_sec: 30.0
+    yaw_bias_limit_deg_s: 0.35
+    yaw_straight_rate_deg_s: 3.0
+    yaw_straight_hold_sec: 0.8
+    yaw_turn_blend: 0.01
+    yaw_max_visual_correction_deg: 0.12
+    yaw_max_visual_sigma_deg: 5.0
+    yaw_max_innovation_deg: 12.0
+    yaw_max_visual_rate_deg_s: 140.0
+    yaw_min_linear_speed_mps: 0.1
+    yaw_reset_gap_sec: 1.5
+    resample_to_vision_stamps: true
+    max_resample_span_sec: 0.25
+    max_stationary_resample_span_sec: 3.0
+    max_stationary_resample_translation_m: 0.05
+    max_stationary_resample_yaw_deg: 2.0
+    imu_stationary_max_curve_yaw_deg: 0.5
+    imu_stationary_max_endpoint_yaw_error_deg: 4.0
+    imu_straight_resampling_enabled: true
+    imu_straight_max_span_sec: 0.8
+    imu_straight_max_translation_m: 0.75
+    imu_straight_max_yaw_deg: 8.0
+    imu_straight_max_curve_yaw_deg: 3.0
+    imu_straight_max_lateral_m: 0.12
+    imu_straight_max_sample_gap_sec: 0.12
+    max_straight_resample_span_sec: 0.0
+    # IMU-rate fill between raw visual updates; on by default after the 2026-10-17
+    # 5-run replay comparison (lane frames without pose 0.76->0.50, pending resolved 0.25->0.64).
+    imu_fill_enabled: true
+    imu_fill_rate_hz: 20.0
+    imu_fill_max_span_sec: 3.0
+    imu_fill_max_closure_m: 0.25
+    imu_fill_max_closure_ratio: 0.3

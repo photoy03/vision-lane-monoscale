@@ -1,0 +1,18 @@
+# Preserved effective values; command-line launch arguments retain priority.
+launch_arguments:
+  # Required when launch_camera:=true (no default device). Prefer /dev/v4l/by-id/... names.
+  device: ''
+  width: '2560'
+  height: '1440'
+  fps: '30'
+  # Required when launch_f9r:=true. Prefer /dev/serial/by-id/... names.
+  imu_device: ''
+  imu_topic: /sensing/imu/imu_data
+  launch_camera: 'true'
+  launch_f9r: 'true'
+  calibration: ''
+  rig_file: ''
+  rear_enabled: 'false'
+  rear_device: ''
+  rear_rig_file: ''
+  rear_calibration: ''

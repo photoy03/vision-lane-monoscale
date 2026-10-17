@@ -1,0 +1,22 @@
+# Vehicle overrides only. Node defaults live in the owning package:
+#   monoscale_occupancy_grid_map/config/occupancy.param.yaml (monoscale_occupancy_grid_map); map extent/frame: map.yaml
+# launch_arguments: command-line knobs. An empty value means "use the package default".
+launch_arguments:
+  occupancy_topic: /perception/occupancy_grid_map
+  occupancy_processing_width: ''
+  occupancy_use_cuda: ''
+  occupancy_rolling_radius_m: ''
+  occupancy_keyframe_travel_m: ''
+  occupancy_occupied_probability: ''
+  occupancy_free_probability: ''
+  occupancy_free_cost_max: ''
+  occupancy_free_cap: ''
+  occupancy_free_to_occupied: ''
+  occupancy_occlusion_aware: ''
+  occupancy_max_pending_keyframes: ''
+  occupancy_max_odom_gap_sec: ''
+  occupancy_max_odom_translation_m: ''
+  occupancy_max_odom_yaw_deg: ''
+  occupancy_image_quality_gate_mode: ''
+  occupancy_image_quality_min_sharpness: ''
+  occupancy_filter_lanes: 'false'
