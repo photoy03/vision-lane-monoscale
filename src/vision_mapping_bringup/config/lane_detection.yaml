@@ -26,7 +26,10 @@ launch_arguments:
   lane_pending_blocked_head_grace_sec: ''
   lane_pending_drop_unresolvable: ''
   warmup_frames: ''
-  lane_warmup_sec: ''
-  lane_warmup_min_motion_m: ''
+  # Warm-up ends after 12 s once the car has moved 1 m net (or at warmup_frames,
+  # whichever comes first): observer_eval_lane_warmup_motion_results 2-2, adopted
+  # 2026-10-19 on the wm3 pair. Watch the 0928 lane false ratio (LANE_WARMUP_REPORT_KO).
+  lane_warmup_sec: '12.0'
+  lane_warmup_min_motion_m: '1.0'
   image_quality_gate_mode: monitor
   image_quality_min_sharpness: ''
