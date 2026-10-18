@@ -12,6 +12,7 @@
 #include <cmath>
 #include <deque>
 #include <functional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -1002,3 +1003,13 @@ TEST(LoneCameraSolve, NormallySpacedLatePeersAreAbsorbedAsBefore)
   EXPECT_EQ(d.lone_by_reason.count("gap@absorb"), 0u);
   EXPECT_TRUE(d.lone_frames.empty());
 }
+
+TEST(FusionModelName, OnlyImplementedModelsAreAccepted)
+{
+  EXPECT_EQ(monoscale::fusion_model_from_name("velocity"), monoscale::FusionModel::Velocity);
+  EXPECT_EQ(monoscale::fusion_model_from_name("displacement"), monoscale::FusionModel::Displacement);
+  EXPECT_THROW(monoscale::fusion_model_from_name("msckf"), std::invalid_argument);
+  EXPECT_THROW(monoscale::fusion_model_from_name("msckf6"), std::invalid_argument);
+  EXPECT_THROW(monoscale::fusion_model_from_name("velocty"), std::invalid_argument);
+}
+

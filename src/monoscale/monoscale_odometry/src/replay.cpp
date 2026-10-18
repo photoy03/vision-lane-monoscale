@@ -498,7 +498,11 @@ int main(int argc, char ** argv)
       until_seconds = std::stod(next());
     } else if (argument == "--truth-offset") {
       truth_offset_m = std::stod(next());
-    } else if (bag.empty()) {
+    } else if (argument.rfind("--", 0) == 0 || !bag.empty()) {
+      // Unknown flags and a second bag used to be dropped silently (upstream 2544bf5, D-19).
+      std::cerr << "monoscale_replay: unrecognised argument `" << argument << "`\n";
+      return 2;
+    } else {
       bag = argument;
     }
   }

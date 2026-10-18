@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace monoscale
@@ -59,16 +60,22 @@ double percentile_90(const Points2 & from, const Points2 & to)
 
 FusionModel fusion_model_from_name(const std::string & name)
 {
+  // Unknown names used to fall through to Displacement, and msckf/msckf6 have
+  // no filter behind them (they ran Velocity): both are refused now (upstream
+  // 2544bf5, D-19).
   if (name == "velocity") {
     return FusionModel::Velocity;
   }
-  if (name == "msckf") {
-    return FusionModel::Msckf;
+  if (name == "displacement") {
+    return FusionModel::Displacement;
   }
-  if (name == "msckf6") {
-    return FusionModel::Msckf6;
+  if (name == "msckf" || name == "msckf6") {
+    throw std::invalid_argument(
+            "fusion_model `" + name + "` is declared but not implemented; "
+            "use `velocity` or `displacement`");
   }
-  return FusionModel::Displacement;
+  throw std::invalid_argument(
+          "unknown fusion_model `" + name + "`; use `velocity` or `displacement`");
 }
 
 struct Estimator::Frame
