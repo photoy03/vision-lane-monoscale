@@ -1217,12 +1217,25 @@ int main(int argc, char ** argv)
   rclcpp::init(argc, argv);
   auto node = std::make_shared<SweepNode>();
   rclcpp::spin(node);
-  // The exit -11 at shutdown (caught twice by the handler above) is in Fast DDS
-  // 2.6's discovery thread, EDP::unpairWriterProxy, while this node deletes its
-  // readers as the other nodes leave at the same moment. The node writes no
-  // files, so stop the worker and leave without tearing the DDS entities down.
   node->stop();
+  // Shutdown (C-5 11-1, observer_eval_C5_sweep_exit): the normal destruction
+  // path is the default again. The exit -11 that std::_Exit used to dodge (Fast
+  // DDS 2.6 EDP::unpairWriterProxy, 2 of 7 replays on 2026-10-17) did not occur
+  // in 24 replays with this code (16 without the recorder at 2x, 8 with it at 1x)
+  // nor in the supervised clock-jump restarts; its cause was never confirmed.
+  // VISION_SWEEP_EXIT_MODE=legacy_exit goes back to leaving without tearing the
+  // DDS entities down; clean_late waits 2 s first (diagnosis only).
+  const char * mode = std::getenv("VISION_SWEEP_EXIT_MODE");
+  const std::string exit_mode = mode != nullptr ? std::string(mode) : std::string("clean");
+  if (exit_mode == "legacy_exit") {
+    rclcpp::shutdown();
+    std::fflush(nullptr);
+    std::_Exit(0);
+  }
+  if (exit_mode == "clean_late") {
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+  node.reset();
   rclcpp::shutdown();
-  std::fflush(nullptr);
-  std::_Exit(0);
+  return 0;
 }
