@@ -3,6 +3,7 @@
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
@@ -66,7 +67,9 @@ def main(args=None):
     node = MeasurementImageCompressor()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # ExternalShutdownException: the context was shut down from outside
+        # (launch stopping everything); a normal stop, not an error.
         pass
     finally:
         node.destroy_node()

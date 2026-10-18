@@ -436,50 +436,6 @@ class MapFusionNode : public rclcpp::Node {
     recovery_results_ << "}\n";
     if(++recovery_result_events_%32==0) recovery_results_.flush();
   }
-  static std::string json_string_duplicate_helper(const std::string& value) {
-    std::ostringstream out; out << '"';
-    for (const unsigned char c : value) {
-      switch (c) {
-        case '"': out << "\\\""; break;
-        case '\\': out << "\\\\"; break;
-        case '\n': out << "\\n"; break;
-        case '\r': out << "\\r"; break;
-        case '\t': out << "\\t"; break;
-        default: if (c < 0x20) out << '?'; else out << static_cast<char>(c);
-      }
-    }
-    out << '"'; return out.str();
-  }
-  static int64_t steady_now_ns_duplicate_helper() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(Steady::now().time_since_epoch()).count();
-  }
-  void record_recovery_result(const Recovered& msg, const std::string& event,
-      const std::string& reason, int64_t arrival_ns, int64_t start_ns, int64_t end_ns,
-      const ProcessResult* result) {
-    if(!recovery_results_) return;
-    recovery_results_ << std::setprecision(17)
-      << "{\"session_id\":" << json_string(msg.session_id)
-      << ",\"epoch\":" << msg.epoch << ",\"observation_id\":" << msg.observation_id
-      << ",\"camera_id\":" << json_string(msg.camera_id)
-      << ",\"source_frame\":" << json_string(msg.source_frame)
-      << ",\"calibration_id\":" << json_string(msg.calibration_id)
-      << ",\"source_stamp_ns\":" << ns(msg.header.stamp)
-      << ",\"input_frame\":" << json_string(msg.header.frame_id)
-      << ",\"pose_match\":" << json_string(msg.pose_match)
-      << ",\"event\":" << json_string(event) << ",\"reason\":" << json_string(reason)
-      << ",\"arrival_steady_ns\":" << arrival_ns
-      << ",\"process_start_steady_ns\":" << start_ns << ",\"process_end_steady_ns\":" << end_ns;
-    if(result) {
-      recovery_results_ << ",\"bank_mutated\":" << (result->bank_mutated?"true":"false")
-        << ",\"keyframe_created\":" << (result->keyframe_created?"true":"false")
-        << ",\"input_segments\":" << result->input_segments
-        << ",\"usable_segments\":" << result->usable_segments
-        << ",\"created\":" << result->created << ",\"merged\":" << result->merged
-        << ",\"continued\":" << result->continued << ",\"pruned\":" << result->pruned;
-    }
-    recovery_results_ << "}\n";
-    if(++recovery_result_events_%32==0) recovery_results_.flush();
-  }
   void on_recovered(const Recovered& recovered) {
     ++recovery_received_;
     const int64_t stamp=ns(recovered.header.stamp);

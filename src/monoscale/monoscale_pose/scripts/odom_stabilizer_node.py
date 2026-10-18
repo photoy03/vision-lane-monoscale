@@ -7,6 +7,7 @@ import json
 import math
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -668,7 +669,9 @@ def main(args=None):
     node = OdomStabilizer()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # ExternalShutdownException: the context was shut down from outside
+        # (launch stopping everything); a normal stop, not an error.
         pass
     finally:
         node.destroy_node()

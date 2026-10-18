@@ -221,8 +221,11 @@ class MapAssembler : public rclcpp::Node {
       state = std::string("stalled:") + (lane_stalled ? "lane" : "") +
               (lane_stalled && occupancy_stalled ? "+" : "") + (occupancy_stalled ? "occupancy" : "");
     publish_status(now_ns, state, newest_pose);
+    // queue_size (PipelineProgress.msg: inputs held inside the stage, not yet
+    // final) = the fused map held for provenance, 0 or 1. The snapshot
+    // histories are kept for choosing T, not waiting to be finalised.
     progress_pub_->publish(pipeline_progress::make_progress(now_ns, "map_assembler", output_topic_, last_t_,
-      static_cast<uint32_t>(lanes_.entries().size() + occupancy_.entries().size()), published_, 0));
+      gate_->holding() ? 1U : 0U, published_, 0));
   }
 
   void emit(const Candidate &c) {
@@ -287,6 +290,8 @@ class MapAssembler : public rclcpp::Node {
       << ",\"lane_history\":" << lanes_.entries().size() << ",\"occupancy_history\":" << occupancy_.entries().size()
       << ",\"lane_invalid\":" << lanes_.invalid() << ",\"occupancy_invalid\":" << occupancy_.invalid()
       << ",\"lane_complete_ns\":" << lanes_.last_complete() << ",\"occupancy_complete_ns\":" << occupancy_.last_complete()
+      << ",\"lane_received\":" << (lanes_.received() ? "true" : "false")
+      << ",\"occupancy_received\":" << (occupancy_.received() ? "true" : "false")
       << ",\"provenance_missing\":" << provenance_missing_ << ",\"provenance_held\":" << provenance_.size()
       << ",\"provenance_wait_started\":" << w.started << ",\"provenance_attached_late\":" << w.attached_late
       << ",\"provenance_expired_lower\":" << w.expired_lower << ",\"provenance_expired_upper\":" << w.expired_upper

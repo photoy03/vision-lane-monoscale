@@ -81,6 +81,8 @@ class LayerHistory {
   const std::optional<Entry> &latest() const { return latest_; }
   uint64_t invalid() const { return invalid_; }
   uint64_t timeline_resets() const { return timeline_resets_; }
+  // Whether this layer ever delivered a snapshot ("stalled" also covers never).
+  bool received() const { return have_any_; }
   int64_t last_complete() const { return last_complete_; }
 
  private:

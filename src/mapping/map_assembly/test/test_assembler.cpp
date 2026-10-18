@@ -201,6 +201,14 @@ int main() {
     gate.reset();
     assert(gate.counts().reset_discarded == 1);
   }
+  {  // received(): a layer that never delivered is told apart from one that stopped.
+    map_assembly::LayerHistory<int> layer;
+    assert(!layer.received() && layer.stalled(1, 1));
+    map_assembly::Meta m;
+    m.session = "s"; m.complete_through = 5; m.valid = true;
+    layer.add(10, m, std::make_shared<int>(1));
+    assert(layer.received());
+  }
   {  // Readiness: first start, starting -> ready once every layer and a pose came and a map went out.
     map_assembly::Readiness r(0, 5 * s);
     assert(std::string(r.phase_name()) == "starting" && r.restart_index() == 0);
