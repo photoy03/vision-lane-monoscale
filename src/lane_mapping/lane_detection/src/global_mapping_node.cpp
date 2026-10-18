@@ -6,6 +6,7 @@
 #include <cmath>
 #include <filesystem>
 #include <deque>
+#include <map>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -1024,6 +1025,7 @@ class GlobalMappingNode : public rclcpp::Node {
     if(run_epoch_==0)run_epoch_=1;
     last_received_image_ns_=0;
     last_processed_stamp_ns_=0;
+    frame_sequence_=0;
     last_odom_header_stamp_ns_=0;
     last_odom_arrival_steady_ns_=0;
     pending_last_map_stamp_ns_=0;
@@ -1038,7 +1040,7 @@ class GlobalMappingNode : public rclcpp::Node {
     if(sync_images_to_odom_||pending_observations_enabled_){
       const int64_t stamp=rclcpp::Time(header.stamp).nanoseconds();
       if(stamp<=0||header.frame_id!=camera_frame_){
-        ++sync_dropped_;
+        ++sync_dropped_;++header_rejected_;
         RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,
           "image rejected: expected frame=%s and positive stamp",camera_frame_.c_str());
         return;
@@ -1047,7 +1049,7 @@ class GlobalMappingNode : public rclcpp::Node {
         if(last_received_image_ns_-stamp>static_cast<int64_t>(clock_reset_threshold_sec_*1e9))
           reset_time_epoch("image clock regression");
         else{
-          ++sync_dropped_;
+          ++sync_dropped_;++out_of_order_rejected_;
           RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,"out-of-order image rejected");
           return;
         }
@@ -1055,9 +1057,13 @@ class GlobalMappingNode : public rclcpp::Node {
       last_received_image_ns_=stamp;
       if(sync_images_to_odom_){
         if(pending_images_.size()>=static_cast<size_t>(sync_queue_size_)){
+          // The head is the oldest numbered frame: settling it here keeps receive order.
+          const auto &head=pending_images_.front();
+          if(owner_map_)emit_frame_discard(head.header.stamp,head.sequence,"queue_overflow");
           pending_images_.pop_front();++sync_dropped_;
         }
-        pending_images_.push_back({header,std::move(message),std::move(compressed_message),Clock::now()});
+        PendingImage item{header,owner_map_?++frame_sequence_:0,std::move(message),std::move(compressed_message),Clock::now()};
+        pending_images_.push_back(std::move(item));
         sync_queue_high_water_=std::max<uint64_t>(sync_queue_high_water_,pending_images_.size());
         return;
       }
@@ -1069,10 +1075,46 @@ class GlobalMappingNode : public rclcpp::Node {
       if(last_received_image_ns_>0&&
          last_received_image_ns_-stamp>static_cast<int64_t>(clock_reset_threshold_sec_*1e9))
         reset_time_epoch("image clock regression");
+      // Frames off this camera's time line get no number and no message
+      // (docs/C1_CRITERIA_KO.md 6.2-1); per-camera stamps strictly increase.
+      if(stamp<=0){++header_rejected_;return;}
+      if(last_received_image_ns_>0&&stamp<=last_received_image_ns_){++out_of_order_rejected_;return;}
       last_received_image_ns_=std::max(last_received_image_ns_,stamp);
     }
+    begin_frame(owner_map_&&!sync_images_to_odom_&&!pending_observations_enabled_?++frame_sequence_:0);
     if(message)process_image_message(message);
     else process_compressed_image(compressed_message);
+    finish_frame(header.stamp);
+  }
+
+  // One numbered frame in flight at a time (single-threaded node).
+  void begin_frame(uint64_t sequence){
+    current_frame_sequence_=sequence;
+    frame_reported_=sequence==0;
+    frame_discard_reason_.clear();
+  }
+  // A frame that produced no OBSERVED message is settled as DISCARDED with its reason.
+  void finish_frame(const builtin_interfaces::msg::Time &stamp){
+    if(!frame_reported_)
+      emit_frame_discard(stamp,current_frame_sequence_,
+        frame_discard_reason_.empty()?"unreported":frame_discard_reason_);
+    current_frame_sequence_=0;
+    frame_reported_=true;
+  }
+  void emit_frame_discard(const builtin_interfaces::msg::Time &stamp,uint64_t sequence,const std::string &reason){
+    if(!observation_pub_||sequence==0)return;
+    vision_lane_interfaces::msg::RecoveredMarkingSegmentArray out;
+    out.header.stamp=stamp;
+    out.header.frame_id=base_frame_;
+    out.session_id=recovery_session_id_;out.epoch=run_epoch_;out.observation_id=0;
+    out.camera_id=camera_id_;out.source_frame=camera_frame_;out.calibration_id=recovery_calibration_id_;
+    out.pose_match="unresolved";
+    out.frame_sequence=sequence;
+    out.frame_outcome=vision_lane_interfaces::msg::RecoveredMarkingSegmentArray::FRAME_DISCARDED;
+    out.discard_reason=reason;
+    observation_pub_->publish(out);
+    ++frames_published_;
+    ++frame_discards_[reason];
   }
 
   void process_compressed_image(const sensor_msgs::msg::CompressedImage::SharedPtr &msg,
@@ -1081,6 +1123,7 @@ class GlobalMappingNode : public rclcpp::Node {
     const cv::Mat image=cv::imdecode(msg->data,cv::IMREAD_COLOR);
     if(image.empty()){
       ++compressed_decode_failures_;
+      frame_discard_reason_="decode";
       RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,
         "compressed image decode failed (count=%lu)",compressed_decode_failures_);
       return;
@@ -1094,6 +1137,7 @@ class GlobalMappingNode : public rclcpp::Node {
       const auto cv_ptr=cv_bridge::toCvShare(msg,"bgr8");
       process_frame(cv_ptr->image,msg->header,pose_override);
     }catch(const cv_bridge::Exception&e){
+      frame_discard_reason_="decode";
       RCLCPP_ERROR(get_logger(),"cv_bridge: %s",e.what());
     }
   }
@@ -1141,10 +1185,18 @@ class GlobalMappingNode : public rclcpp::Node {
     }
     // All callbacks use the default mutually-exclusive group. This never
     // blocks the odom callback while waiting for a future/exact sample.
+    begin_frame(pending.sequence);
     if(pending.message)process_image_message(pending.message,lookup);
     else process_compressed_image(pending.compressed_message,lookup);
+    finish_frame(pending.header.stamp);
   }
 
+  std::string discard_json() const {
+    std::ostringstream ss;
+    bool first=true;
+    for(const auto&[reason,count]:frame_discards_){ss<<(first?"":",")<<"\""<<reason<<"\":"<<count;first=false;}
+    return ss.str();
+  }
   void report_sync(){
     const int64_t now_steady_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
       Clock::now().time_since_epoch()).count();
@@ -1184,6 +1236,13 @@ class GlobalMappingNode : public rclcpp::Node {
       <<",\"pending_invalid_dropped\":"<<pending_invalid_dropped_
       <<",\"pending_epoch_dropped\":"<<pending_epoch_dropped_
       <<",\"pending_oldest_age_ms\":"<<pending_oldest_age_ms()
+      <<",\"frames_published\":"<<frames_published_
+      <<",\"frame_sequence\":"<<frame_sequence_
+      <<",\"header_rejected\":"<<header_rejected_
+      <<",\"out_of_order_rejected\":"<<out_of_order_rejected_
+      <<",\"quality_rejected_frames\":"<<quality_rejected_frames_
+      <<",\"quality_rejected_in_warmup\":"<<quality_rejected_in_warmup_
+      <<",\"frames_discarded\":{"<<discard_json()<<"}"
       <<",\"warming_up\":"<<(frame_<=static_cast<uint64_t>(startup_warmup_frames_)?"true":"false")<<"}";
     if(pending_csv_){
       pending_csv_<<frame_<<','<<run_epoch_<<','<<received_images_<<','<<(odom_received_-rejected_odom_)<<','<<sync_matched_<<','<<sync_timeout_<<','<<sync_predicted_<<','<<sync_dropped_<<','<<pending_observations_.size()<<','<<pending_queued_total_<<','<<pending_resolved_total_<<','<<pending_map_updates_total_<<','<<pending_ttl_dropped_<<','<<pending_unresolvable_dropped_<<','<<pending_overflow_dropped_<<','<<pending_invalid_dropped_<<','<<pending_duplicate_dropped_<<','<<pending_epoch_dropped_<<','<<pending_oldest_age_ms()<<','<<map_.updates()<<'\n';
@@ -1459,7 +1518,7 @@ class GlobalMappingNode : public rclcpp::Node {
 
   void process_frame(const cv::Mat&input,const std_msgs::msg::Header&header,
       std::optional<PoseLookup> pose_override=std::nullopt){
-    if(input.empty())return;
+    if(input.empty()){frame_discard_reason_="empty_image";return;}
     Profile pr;
     pr.frame=++frame_;
     const auto all=Clock::now();
@@ -1475,7 +1534,7 @@ class GlobalMappingNode : public rclcpp::Node {
     pr.input_age=std::max(0.0,(now()-stamp).seconds()*1000.0);
     if(!maps_ready_){
       maps_ready_=pipeline_.initialize_maps(calibration_,input.cols,input.rows);
-      if(!maps_ready_){RCLCPP_ERROR(get_logger(),"calibration load failed: %s",calibration_.c_str());return;}
+      if(!maps_ready_){frame_discard_reason_="calibration";RCLCPP_ERROR(get_logger(),"calibration load failed: %s",calibration_.c_str());return;}
       RCLCPP_INFO(get_logger(),"source=%dx%d -> metric BEV=%dx%d",input.cols,input.rows,static_cast<int>((p_.x_max-p_.x_min)/p_.mpp),static_cast<int>((p_.y_max-p_.y_min)/p_.mpp));
     }
 
@@ -1487,6 +1546,7 @@ class GlobalMappingNode : public rclcpp::Node {
     pr.pose_age=lookup.valid?lookup.age_sec*1000.0:-1.0;
     if(!lookup.valid&&!allow_local_without_odom_){
       RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,"waiting for timestamp-aligned odom; frame skipped");
+      frame_discard_reason_="no_pose";
       return;
     }
     const Pose2 pose=lookup.valid?lookup.pose:Pose2{};
@@ -1496,6 +1556,7 @@ class GlobalMappingNode : public rclcpp::Node {
       pr.sharpness<image_quality_min_sharpness_;
     if(pr.quality_rejected){
       ++quality_rejected_frames_;
+      if(warming_up_)++quality_rejected_in_warmup_;
       RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,
         "blurred/vibrating frame excluded from vectorization and map: sharpness=%.1f < %.1f; frame_delta=%.1f",
         pr.sharpness,image_quality_min_sharpness_,pr.frame_delta);
@@ -1506,6 +1567,8 @@ class GlobalMappingNode : public rclcpp::Node {
     cv::Mat debug_binary;
     const bool run=!pr.quality_rejected&&
       (frame_-1)%std::max(1,p_.vectorize_every_n)==0;
+    // Reason if no OBSERVED message goes out; warm-up wins (the frame is excluded either way).
+    frame_discard_reason_=warming_up_?"warmup":pr.quality_rejected?"quality":!run?"not_vectorized":"";
     if(run){
       Prep prep=preprocess_frame(input,&pr.bev,&pr.preprocess);
       if(publish_vectors_debug_)debug_binary=prep.binary;
@@ -1731,6 +1794,10 @@ class GlobalMappingNode : public rclcpp::Node {
     out.session_id=recovery_session_id_;out.epoch=run_epoch_;out.observation_id=++recovery_observation_seq_;
     out.camera_id=camera_id_;out.source_frame=camera_frame_;out.calibration_id=recovery_calibration_id_;
     out.pose_match="unresolved";
+    out.frame_sequence=current_frame_sequence_;
+    out.frame_outcome=current_frame_sequence_>0?
+      vision_lane_interfaces::msg::RecoveredMarkingSegmentArray::FRAME_OBSERVED:
+      vision_lane_interfaces::msg::RecoveredMarkingSegmentArray::FRAME_UNSPECIFIED;
     for(const auto&o:obs){
       vision_lane_interfaces::msg::MarkingSegment s;
       s.camera_id=camera_id_;s.family=o.family;
@@ -1740,6 +1807,7 @@ class GlobalMappingNode : public rclcpp::Node {
       s.source_stamp=out.header.stamp;out.segments.push_back(s);
     }
     observation_pub_->publish(out);
+    if(current_frame_sequence_>0){++frames_published_;frame_reported_=true;}
   }
   void publish_recovered_segments(
       const vision_lane::PendingLaneObservation<std::pair<std::vector<Observation>,uint64_t>>&item,
@@ -1830,7 +1898,14 @@ class GlobalMappingNode : public rclcpp::Node {
       <<",\"pending_epoch_dropped\":"<<pending_epoch_dropped_
       <<",\"pending_last_map_stamp_ns\":"<<pending_last_map_stamp_ns_
       <<",\"pending_oldest_age_ms\":"<<pending_oldest_age_ms()
-      <<",\"quality_rejected_total\":"<<quality_rejected_frames_<<"}";
+      <<",\"quality_rejected_total\":"<<quality_rejected_frames_
+      <<",\"images_received\":"<<received_images_
+      <<",\"frames_published\":"<<frames_published_
+      <<",\"frame_sequence\":"<<frame_sequence_
+      <<",\"header_rejected\":"<<header_rejected_
+      <<",\"out_of_order_rejected\":"<<out_of_order_rejected_
+      <<",\"quality_rejected_in_warmup\":"<<quality_rejected_in_warmup_
+      <<",\"frames_discarded\":{"<<discard_json()<<"}}";
     std_msgs::msg::String msg;msg.data=ss.str();status_pub_->publish(msg);
   }
 
@@ -1894,6 +1969,13 @@ class GlobalMappingNode : public rclcpp::Node {
   uint64_t pending_shutdown_dropped_{0};
   double image_quality_min_sharpness_{25.0};
   uint64_t quality_rejected_frames_{0};
+  // Per-frame completion on the map-mode observation stream (docs/C1_CRITERIA_KO.md):
+  // every numbered image gets exactly one message, OBSERVED or DISCARDED, in receive order.
+  uint64_t frame_sequence_{0},current_frame_sequence_{0},frames_published_{0};
+  uint64_t header_rejected_{0},out_of_order_rejected_{0},quality_rejected_in_warmup_{0};
+  bool frame_reported_{true};
+  std::string frame_discard_reason_;
+  std::map<std::string,uint64_t> frame_discards_;
   uint64_t compressed_decode_failures_{0};
   double global_tracker_reset_gap_sec_{0.50};
   int64_t last_global_tracker_stamp_ns_{0};
@@ -1909,6 +1991,7 @@ class GlobalMappingNode : public rclcpp::Node {
   int64_t last_received_image_ns_{0},last_processed_stamp_ns_{0};
   struct PendingImage {
     std_msgs::msg::Header header;
+    uint64_t sequence{0};
     sensor_msgs::msg::Image::SharedPtr message;
     sensor_msgs::msg::CompressedImage::SharedPtr compressed_message;
     Clock::time_point arrived;

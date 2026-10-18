@@ -32,6 +32,7 @@ using Recovered = vision_lane_interfaces::msg::RecoveredMarkingSegmentArray;
 #include "lane_map/registration.hpp"
 #include "lane_map/recovery_identity.hpp"
 #include "lane_map/lane_mapper.hpp"
+#include "lane_map/frame_completion.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
 #include "vision_lane_interfaces/map_snapshot.hpp"
 #include "vision_lane_interfaces/clock_generation.hpp"
@@ -55,7 +56,10 @@ class MapFusionNode : public rclcpp::Node {
     expected_session_id_=declare_parameter<std::string>("expected_recovery_session_id","");
     expected_calibration_id_=declare_parameter<std::string>("expected_calibration_id","");
     expected_source_frame_=declare_parameter<std::string>("expected_source_frame","front_fisheye_camera_optical_frame");
+    // Every listed camera must report frames before the lane layer completes anything
+    // (strict): do not list a camera that is not running.
     cameras_=declare_parameter<std::vector<std::string>>("camera_ids",std::vector<std::string>{"front"});
+    completion_=lane_completion::FrameCompletion(cameras_);
     warmup_=declare_parameter<int>("warmup_frames",120);
     min_travel_=declare_parameter<double>("keyframe_translation_m",.05);
     if(recovered_input_enabled_)warmup_=0;
@@ -191,12 +195,13 @@ class MapFusionNode : public rclcpp::Node {
     return m;
   }
   // Watermark = snapshot complete_through (see PipelineProgress.msg): with the
-  // mapper, just before the oldest observation still waiting for a pose, else
-  // the newest observation received; otherwise inputs are handled on arrival,
-  // so the newest one.
+  // mapper, just before the oldest observation still waiting for a pose and never
+  // past the per-frame completion frontier of the observation stream
+  // (lane_map/frame_completion.hpp, docs/C1_CRITERIA_KO.md); otherwise inputs are
+  // handled on arrival, so the newest one.
   int64_t complete_through() {
     const int64_t candidate=mapper_enabled_?
-      pipeline_progress::watermark_from(mapper_.oldest_pending_stamp_ns(),newest_input_stamp_):newest_input_stamp_;
+      pipeline_progress::watermark_from(mapper_.oldest_pending_stamp_ns(),completion_.frontier()):newest_input_stamp_;
     return watermark_.update(candidate);
   }
   void publish_progress() {
@@ -240,7 +245,8 @@ class MapFusionNode : public rclcpp::Node {
       ++time_line_drops_;  // still in flight from the time line before the clock jumped back
       return;
     }
-    if(msg.session_id!=expected_session_id_||msg.epoch==0||msg.observation_id==0||
+    const bool discarded_frame=msg.frame_outcome==Recovered::FRAME_DISCARDED&&msg.frame_sequence>0;
+    if(msg.session_id!=expected_session_id_||msg.epoch==0||(msg.observation_id==0&&!discarded_frame)||
        msg.source_frame!=expected_source_frame_||msg.calibration_id!=expected_calibration_id_||
        msg.header.frame_id!=input_frame_||stamp<=0||
        std::find(cameras_.begin(),cameras_.end(),msg.camera_id)==cameras_.end()) {
@@ -255,7 +261,17 @@ class MapFusionNode : public rclcpp::Node {
     }
     if(msg.epoch>mapper_epoch_) {
       if(mapper_epoch_!=0) mapper_.reset();
+      completion_.reset();  // new time line: every camera numbers from 1 again
       mapper_epoch_=msg.epoch;
+    }
+    // Completion first: a frame already settled is never applied (item 9).
+    const auto verdict=completion_.on_message(msg.camera_id,msg.frame_sequence,
+      static_cast<lane_completion::Outcome>(msg.frame_outcome),msg.discard_reason,stamp,watermark_.value());
+    if(verdict==lane_completion::Verdict::kAdvanceOnly) return;
+    if(verdict!=lane_completion::Verdict::kApply) {
+      write_mapper_events({{verdict==lane_completion::Verdict::kRejectSequenceBehind?
+        "LATE_REJECT_SEQUENCE":"LATE_REJECT_WATERMARK",msg.epoch,msg.observation_id,msg.camera_id,stamp,"none"}});
+      return;
     }
     std::vector<lane_tracking::Observation> observations;
     for(const auto& s:msg.segments) {
@@ -734,12 +750,39 @@ class MapFusionNode : public rclcpp::Node {
       <<",\"near_duplicate_candidates\":"<<rendered.near_duplicate_candidates
       <<",\"aligned_frames\":"<<bank_.aligned<<",\"held_frames\":"<<bank_.held
       <<",\"registration_rank\":"<<bank_.last.rank
-      <<",\"pose_correction\":"<<(bank_.settings().pose_registration?"true":"false")<<"}";
+      <<",\"pose_correction\":"<<(bank_.settings().pose_registration?"true":"false")
+      <<",\"completion\":"<<completion_json()<<"}";
     std_msgs::msg::String state;state.data=out.str();status_->publish(state);
     RCLCPP_INFO_THROTTLE(get_logger(),*get_clock(),3000,"LINE MAP: keyframes=%lu landmarks=%zu visible=%zu merged=%lu "
       "ambiguous=%lu invalid_pose/stamp=%lu/%lu range_pruned=%lu/%lu occupancy_pruned=%lu/%lu; odom unchanged",
       keyframes_,bank_.landmarks().size(),segments.size(),merged_,ambiguous_,bad_pose_,bad_stamp_,
       pruned_landmarks_,pruned_support_bins_,occupancy_pruned_landmarks_,occupancy_pruned_support_bins_);
+  }
+  std::string completion_json() {
+    const auto& c=completion_.counters();
+    std::ostringstream o;
+    o<<"{\"frames_observed\":"<<c.observed<<",\"frames_discarded_total\":"<<c.discarded
+     <<",\"frames_discarded\":{";
+    bool first=true;
+    for(const auto& [reason,count]:c.discard_reasons){o<<(first?"":",")<<"\""<<reason<<"\":"<<count;first=false;}
+    o<<"},\"transport_gap\":"<<c.transport_gap<<",\"legacy_messages\":"<<c.legacy
+     <<",\"late_rejected\":{\"sequence_behind\":"<<c.sequence_behind<<",\"stamp_behind_watermark\":"<<c.behind_watermark<<"}"
+     <<",\"late_changes\":"<<contract_.late_changes();
+    const int64_t pending=mapper_enabled_?mapper_.oldest_pending_stamp_ns():0;
+    const int64_t frontier=completion_.frontier();
+    o<<",\"frontier_ns\":"<<frontier<<",\"oldest_pending_ns\":"<<pending
+     <<",\"bound_by\":\""<<(pending>0&&pending-1<frontier?"pending":"frontier")<<"\""
+     <<",\"tracker_gap_resets\":"<<mapper_.counters().tracker_gap_resets
+     <<",\"mapper_nonmonotonic_drop\":"<<mapper_.counters().nonmonotonic_drop<<",\"cameras\":{";
+    first=true;
+    for(const auto& [camera,st]:completion_.cameras()){
+      o<<(first?"":",")<<"\""<<camera<<"\":{\"expected_sequence\":"<<st.expected<<",\"frontier_stamp_ns\":"<<st.frontier
+       <<",\"gap_frames\":"<<st.gap_frames<<",\"last_gap_sequence\":"<<st.last_gap_sequence
+       <<",\"last_gap_stamp_ns\":"<<st.last_gap_stamp<<"}";
+      first=false;
+    }
+    o<<"}}";
+    return o.str();
   }
   // The ROS clock jumped back (bag played again): everything on the old time
   // line goes, and inputs of the old epochs still in flight are dropped.
@@ -748,6 +791,7 @@ class MapFusionNode : public rclcpp::Node {
     bank_.reset();mapper_.reset();last_pose_.reset();last_header_=std_msgs::msg::Header{};
     last_received_stamp_=0;last_occupancy_stamp_=0;recovery_identities_.clear();
     newest_input_stamp_=0;watermark_=pipeline_progress::MonotonicWatermark{};contract_.reset();
+    completion_.reset();
     depends_on_occupancy_=false;occupancy_content_max_used_=0;
     stale_epoch_=std::max(mapper_epoch_,recovery_epoch_);
     ++time_line_resets_;
@@ -786,6 +830,7 @@ class MapFusionNode : public rclcpp::Node {
   int64_t occupancy_content_max_used_{0};
   pipeline_progress::MonotonicWatermark watermark_;
   int64_t newest_input_stamp_{0};
+  lane_completion::FrameCompletion completion_{{"front"}};
   std::string output_vector_topic_;
   rclcpp::Publisher<vision_lane_interfaces::msg::PipelineProgress>::SharedPtr progress_pub_;
   rclcpp::TimerBase::SharedPtr progress_timer_;

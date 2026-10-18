@@ -46,6 +46,7 @@ OUTPUT_TOPICS = (
     "/mapping/fused_map",
     "/mapping/fused_map/status",
     "/localization/kinematic_state/provenance",
+    "/parking/cpp/status",
 )
 READY_BASE = ("tracking front on", "v5.2 C++ node:", "CPU line map:",
               "lane odom filter:")
@@ -257,7 +258,7 @@ def main() -> int:
         "lane_pending_commit_budget",
         "tracker_opencv_threads", "tracker_executor_threads", "odom_executor_threads",
         "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
-        "lane_mapping_owner", "launch_fusion", "fusion_provenance_topic",
+        "lane_mapping_owner", "launch_fusion", "fusion_provenance_topic", "lane_map_observation_topic",
     }
     launch_overrides: dict[str, str] = {}
     for item in args.launch_arg:
@@ -266,7 +267,7 @@ def main() -> int:
             raise SystemExit(f"invalid or unsupported --launch-arg: {item!r}")
         if name in launch_overrides:
             raise SystemExit(f"duplicate --launch-arg: {name}")
-        pattern = r"(/[A-Za-z0-9_]+)+" if name == "fusion_provenance_topic" else r"[A-Za-z0-9_.-]+"
+        pattern = r"(/[A-Za-z0-9_]+)+" if name.endswith("_topic") else r"[A-Za-z0-9_.-]+"
         if not re.fullmatch(pattern, value):
             raise SystemExit(f"invalid value for --launch-arg {name}: {value!r}")
         if name in {"launch_occupancy", "launch_lane_fusion", "tracker_motion_prediction", "tracker_motion_warp",

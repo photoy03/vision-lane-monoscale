@@ -82,6 +82,18 @@ complete_through 이전 것은 1개만 남기고 정리)를 모아 조립한다.
 점유지도 발행의 시각/내용 경합(시각을 먼저 읽고 격자를 나중에 복사하던 것)은 고쳤다. 기존 /perception/occupancy_grid_map의 header 시각도
 이제 내용과 같은 잠금에서 정한 content_max(ns 정수)다. 격자 값은 그대로다.
 
+## 차선층 완결 (프레임별 완료 표시, 2026-10-18, docs/C1_CRITERIA_KO.md)
+- lane_detection(map 모드)은 번호 붙인 영상마다 /parking/cpp/lane_observations에 메시지를 정확히 하나씩, 받은 순서대로 낸다.
+  - 결과는 OBSERVED(그 프레임의 선, 0개 가능) 또는 DISCARDED(사유)다.
+  - 필드: frame_sequence(카메라·epoch별 1부터), frame_outcome, discard_reason
+  - stamp ≤ 0이거나 순서가 역전된 영상은 번호 없이 따로만 센다.
+- lane_map 완결 W = 단조(min(카메라별 연속 확정 frontier, mapper 대기 최오래 − 1))
+  - /pipeline/progress의 lane_detection W는 완결에 쓰지 않는다. 감시 지표 lane_complete_beyond_detection에만 쓴다.
+  - 반영 전에 거부한다: 번호가 뒤로 간 관측(sequence_behind), stamp ≤ W인 관측(stamp_behind_watermark, 옛 형식 메시지 포함)
+  - 번호 건너뜀은 전달 유실로 확정한다(transport_gap). 상태 JSON completion 블록에 집계한다.
+  - camera_ids에 실제로 보내지 않는 카메라를 적으면 W가 0에 머문다(엄격).
+- 통합 지도 소비자: 차선층이 valid이고 complete_through ≥ T인데 segments가 0이면 "그 시각까지 확정된 차선 없음"이다. warmup 동안 이런 묶음이 나간다(약 15 %). content_max = 0은 아직 내용이 없다는 뜻이다.
+
 ## 통합 지도 (map_assembly, 2026-10-17 추가, 기본 꺼짐)
 
 패키지 src/mapping/map_assembly. launch 인수 `launch_fusion:=true`로 켠다(launch_occupancy·launch_lane_fusion 필요). 제어용 pose·TF는 거치지 않는다.

@@ -53,7 +53,7 @@ def _mapper_parameters(ctx, lane):
         return {}
     return {
         'mapper_enabled': True,
-        'observation_topic': '/parking/cpp/lane_observations',
+        'observation_topic': ctx.args.arg('lane_map_observation_topic').strip() or '/parking/cpp/lane_observations',
         'odom_topic': ctx.topics.odom,
         'mapper_odom_buffer_sec': float(lane['odom_buffer_duration_sec']),
         'mapper_max_odom_age_sec': float(lane['max_odom_age_sec']),

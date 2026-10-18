@@ -195,10 +195,67 @@ def fused_metrics(fused: list, lanes: list, occupancy: list) -> dict[str, float]
     lags = sorted(arrival - _ns(msg.header.stamp) * 1e-9 for arrival, msg in fused)
     m["fused_lag_p50_ms"] = 1000.0 * lags[len(lags) // 2]
     m["fused_lag_p90_ms"] = 1000.0 * lags[int(0.9 * (len(lags) - 1))]
-    skew = sorted(abs(_ns(msg.lanes.meta.content_max) - _ns(msg.occupancy.meta.content_max)) * 1e-6
-                  for _, msg in fused)
-    m["fused_layer_content_skew_p50_ms"] = skew[len(skew) // 2]
-    m["fused_layer_content_skew_p90_ms"] = skew[int(0.9 * (len(skew) - 1))]
+    # A layer that is complete but still empty (content_max 0, e.g. lanes during
+    # warm-up) has no content time to compare; count those separately.
+    both = [msg for _, msg in fused if _ns(msg.lanes.meta.content_max) > 0 and _ns(msg.occupancy.meta.content_max) > 0]
+    m["fused_lane_layer_empty_ratio"] = sum(_ns(msg.lanes.meta.content_max) == 0 for _, msg in fused) / len(fused)
+    m["fused_occupancy_layer_empty_ratio"] = sum(_ns(msg.occupancy.meta.content_max) == 0 for _, msg in fused) / len(fused)
+    if both:
+        skew = sorted(abs(_ns(msg.lanes.meta.content_max) - _ns(msg.occupancy.meta.content_max)) * 1e-6
+                      for msg in both)
+        m["fused_layer_content_skew_p50_ms"] = skew[len(skew) // 2]
+        m["fused_layer_content_skew_p90_ms"] = skew[int(0.9 * (len(skew) - 1))]
+    return m
+
+
+def lane_completion_metrics(progress: list, lane_status: list, sync_status: list) -> dict[str, float]:
+    """C-1 lane completion (docs/C1_CRITERIA_KO.md 6.3 (b)).
+
+    lane_complete_beyond_detection: for each lane_map progress (published at t,
+    W_map), the first lane_detection progress published at or after t gives
+    W_det; count W_map > W_det (no value tolerance; lane_detection W is monotonic,
+    so a later value is never lower). Plus the completion counters of the last
+    lane_map status and the frame counters of the last lane_detection sync status.
+    """
+    m: dict[str, float] = {}
+    det = sorted((_ns(p.header.stamp), _ns(p.watermark)) for _, p in progress
+                 if p.node == "lane_detection" and p.watermark_valid)
+    lane = [(_ns(p.header.stamp), _ns(p.watermark)) for _, p in progress
+            if "lane_map" in p.node and p.watermark_valid]
+    if det and lane:
+        import bisect
+        stamps = [t for t, _ in det]
+        beyond = compared = 0
+        for t, w in lane:
+            i = bisect.bisect_left(stamps, t)
+            if i < len(det):
+                compared += 1
+                beyond += w > det[i][1]
+        m["lane_complete_beyond_detection"] = beyond
+        m["lane_complete_compared"] = compared
+    if lane_status:
+        found = re.search(r'"completion":(\{.*\})\}$', lane_status[-1][1].data)
+        if found:
+            c = json.loads(found.group(1))
+            m["lane_frames_observed"] = c["frames_observed"]
+            m["lane_frames_discarded"] = c["frames_discarded_total"]
+            for reason, count in c["frames_discarded"].items():
+                m[f"lane_frames_discarded_{reason}"] = count
+            m["lane_transport_gap"] = c["transport_gap"]
+            m["lane_legacy_messages"] = c["legacy_messages"]
+            m["lane_late_rejected_sequence_behind"] = c["late_rejected"]["sequence_behind"]
+            m["lane_late_rejected_stamp_behind_watermark"] = c["late_rejected"]["stamp_behind_watermark"]
+            m["lane_late_changes"] = c["late_changes"]
+            m["lane_tracker_gap_resets"] = c["tracker_gap_resets"]
+            m["lane_mapper_nonmonotonic_drop"] = c["mapper_nonmonotonic_drop"]
+    if sync_status:
+        s = json.loads(sync_status[-1][1].data)
+        for key in ("images_received", "frames_published", "frame_sequence", "header_rejected",
+                    "out_of_order_rejected", "quality_rejected_total", "quality_rejected_in_warmup"):
+            if key in s:
+                m[f"detection_{key}"] = s[key]
+        for reason, count in s.get("frames_discarded", {}).items():
+            m[f"detection_frames_discarded_{reason}"] = count
     return m
 
 
@@ -399,7 +456,7 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                   "/parking/cpp/marking_segments", "/parking/cpp/global_marking_segments_fused",
                   "/perception/occupancy_grid_map", "/parking/cpp/map_fusion/status",
                   "/pipeline/progress", "/localization/kinematic_state/provenance",
-                  "/mapping/fused_map/status", *SNAPSHOT_TOPICS]
+                  "/mapping/fused_map/status", "/parking/cpp/status", *SNAPSHOT_TOPICS]
         data = read_bag(outputs, topics)
         if data is not None:
             skipped = data.pop(UNREADABLE, [])
@@ -431,15 +488,28 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                 m["fused_segments_final"] = len(fused[-1][1].segments)
             # Lane-map latency: how old (capture time) each input was when
             # lane_map_fusion received it, from its status JSON.
-            delays = []
+            # lane_map_input_delay_*: every 5 Hz status sample (reference only: during
+            # pose gaps the last value repeats, so the p90 is bimodal across runs).
+            # lane_map_input_delay_changed_*: only samples whose value changed, i.e.
+            # moments a new input was applied (observer_eval_C1_results_KO.md 3.1).
+            delays, changed, previous = [], [], None
             for _, msg in data["/parking/cpp/map_fusion/status"]:
                 found = re.search(r'"last_input_delay_ms":([-\d.eE+]+)', msg.data)
                 if found and float(found.group(1)) > 0.0:
-                    delays.append(float(found.group(1)))
+                    value = float(found.group(1))
+                    delays.append(value)
+                    if value != previous:
+                        changed.append(value)
+                    previous = value
             if delays:
                 delays.sort()
                 m["lane_map_input_delay_p50_ms"] = delays[len(delays) // 2]
                 m["lane_map_input_delay_p90_ms"] = delays[int(0.9 * (len(delays) - 1))]
+            if changed:
+                changed.sort()
+                m["lane_map_input_delay_changed_n"] = len(changed)
+                m["lane_map_input_delay_changed_p50_ms"] = changed[len(changed) // 2]
+                m["lane_map_input_delay_changed_p90_ms"] = changed[int(0.9 * (len(changed) - 1))]
             # Per-stage watermark lag (node clock - watermark) and monotonicity
             # from /pipeline/progress (absent in runs recorded before it existed).
             by_node = {}
@@ -456,6 +526,8 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                 if lags:
                     m[f"watermark_{node}_lag_p50_ms"] = lags[len(lags) // 2]
                     m[f"watermark_{node}_lag_p90_ms"] = lags[int(0.9 * (len(lags) - 1))]
+            m.update(lane_completion_metrics(data["/pipeline/progress"], data["/parking/cpp/map_fusion/status"],
+                                             data["/parking/cpp/status"]))
             m.update(snapshot_metrics(data["/mapping/snapshot/lanes"], data["/mapping/snapshot/occupancy"]))
             provenance = data["/localization/kinematic_state/provenance"]
             if provenance:
