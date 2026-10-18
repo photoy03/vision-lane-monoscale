@@ -30,7 +30,6 @@ from monoscale_pose.odom_filter import (
     interpolate_pose,
     imu_straight_resample_safe,
     imu_stationary_resample_safe,
-    resampled_pose_sigmas,
     select_imu_resample_kind,
     imu_orientation_is_usable,
     use_imu_yaw_for_resample,
@@ -293,9 +292,8 @@ class OdomStabilizer(Node):
                 msg.orientation_covariance, (q.x, q.y, q.z, q.w)):
             self.imu_orientation_rejected += 1
             return
+        # imu_orientation_is_usable() already requires a finite norm² > 1e-18.
         qnorm = math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
-        if not math.isfinite(qnorm) or qnorm < 1e-9:
-            return
         stamp = float(msg.header.stamp.sec) + 1e-9 * float(msg.header.stamp.nanosec)
         if not math.isfinite(stamp) or stamp <= 0.0:
             return
@@ -501,7 +499,7 @@ class OdomStabilizer(Node):
         out.pose.covariance = interpolate_pose_covariance(
             previous_cov, current_cov, ratio, span, distance, kind)
 
-    def emit_odom(self, template, stamp_sec, pose, roll, pitch, provenance=("unknown", "", 0.0, 0.0)):
+    def emit_odom(self, template, stamp_sec, pose, roll, pitch, provenance):
         out = copy.deepcopy(template)
         # The standard covariance is passed through unchanged (MonoScale leaves it
         # all zero without an estimate); only PoseProvenance.covariance_valid says

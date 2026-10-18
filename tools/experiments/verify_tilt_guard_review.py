@@ -65,7 +65,8 @@ def main():
         p = msg.pose.pose.position
         pose = node.Pose2(p.x, p.y, yaw)
         # This is the actual production method, with only ROS publishers replaced.
-        node.OdomStabilizer.emit_odom(fake, copy.deepcopy(msg), stamp_ns / 1e9, pose, roll, pitch)
+        node.OdomStabilizer.emit_odom(fake, copy.deepcopy(msg), stamp_ns / 1e9, pose, roll, pitch,
+                                      ("unknown", "", 0.0, 0.0))
         out = emitted[-1]
         r, pch, y = node.quaternion_to_rpy(out.pose.pose.orientation)
         bounded.append([math.degrees(r), math.degrees(pch)])

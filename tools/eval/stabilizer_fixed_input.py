@@ -126,10 +126,15 @@ def main():
     handlers = {"odom": node.on_odom, "imu": node.on_imu, "vision": node.on_vision}
     for _, _, kind, msg in events:
         handlers[kind](msg)
-    counters = {name: getattr(node, name) for name in (
+    # Every branch counter (observer_eval_D18_stabilizer_list 3.1); a version that
+    # lacks one reports None, so older copies still run.
+    counters = {name: getattr(node, name, None) for name in (
         "accepted", "rejected", "resampled_published", "imu_fill_published",
         "stationary_resampled_published", "imu_straight_resampled_published",
-        "imu_stationary_resampled_published")}
+        "imu_stationary_resampled_published", "straight_resampled_published",
+        "imu_straight_sample_misses", "resample_gap_rejected",
+        "imu_fill_gaps_accepted", "imu_fill_gaps_rejected", "imu_straight_gap_accepted",
+        "imu_stationary_gap_accepted", "imu_stationary_gap_rejected")}
     records.append({"t": "counters", **counters,
                     "provenance_counts": getattr(node, "provenance_counts", None)})
     node.destroy_node()
