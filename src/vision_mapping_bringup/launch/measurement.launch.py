@@ -151,6 +151,22 @@ def _launch(context):
            for topic in extra_topics):
         raise ValueError("extra_topics must be comma-separated absolute topic names")
     topics.extend(extra_topics)
+
+    # Arrival statistics of the sensor inputs (D-18), recorded into the same bag.
+    stats_nodes = []
+    if flag("record_topic_stats"):
+        watched = [front_raw, front_info, "/sensing/imu/imu_data"]
+        if flag("record_rear_camera"):
+            watched += ["/sensing/camera/rear/fisheye/image_raw", "/sensing/camera/rear/fisheye/camera_info"]
+        watched += [topic for topic in topics if topic.startswith("/measurement/")]
+        topics.append("/recording/topic_stats")
+        stats_nodes.append(Node(
+            package="vision_mapping_bringup",
+            executable="recording_topic_stats.py",
+            name="recording_topic_stats",
+            output="screen",
+            parameters=[{"topics": list(dict.fromkeys(watched)), "period_sec": 10.0}],
+        ))
     topics = list(dict.fromkeys(topics))
 
     shared = Path(get_package_share_directory("vision_mapping_bringup"))
@@ -191,6 +207,7 @@ def _launch(context):
         "max_bag_duration_sec": max_duration_sec,
         "cache_size_mb": cache_mb,
         "compression_mode": compression_mode,
+        "record_topic_stats": flag("record_topic_stats"),
         "topics": topics,
         "stop_instruction": "Stop with Ctrl+C and wait for rosbag metadata finalization.",
     }
@@ -215,6 +232,7 @@ def _launch(context):
             f"topics={len(topics)}. Stop this launch with Ctrl+C and wait for metadata.yaml."
         )),
         *republishers,
+        *stats_nodes,
         recorder,
         *guards,
     ]
@@ -233,6 +251,7 @@ def generate_launch_description():
         "record_rear_camera": "false",
         "record_occupancy": "true",
         "record_debug_images": "false",
+        "record_topic_stats": "true",
         "max_bag_size_mb": "2048",
         "max_bag_duration_sec": "300",
         "cache_size_mb": "256",

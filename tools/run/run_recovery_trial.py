@@ -19,6 +19,7 @@ import time
 from typing import Any
 
 from replay_preflight import check_dumps, requested_parameters
+import outputs_compress
 
 try:
     import psutil
@@ -212,10 +213,16 @@ def main() -> int:
     parser.add_argument("--instrumentation", choices=("on", "off"), default="on")
     parser.add_argument("--record-outputs", choices=("on", "off"), default="off",
                         help="record pipeline output topics into <run>/outputs_bag")
-    parser.add_argument("--outputs-compression", choices=("zstd", "none"), default="zstd",
-                        help="zstd: compress outputs_bag per file when it closes (a full "
-                             "occupancy-grid stream is ~350 MB raw, a few MB compressed); "
-                             "none: plain sqlite3 like runs before 2026-10-17")
+    parser.add_argument("--outputs-compression", choices=("zstd", "none"), default="none",
+                        help="recorder-side compression. none (default since D-18): plain sqlite3; "
+                             "zstd: the recorder compresses each file as it closes, which twice left "
+                             "a cut file with exit code 0 (observer_eval_D18_recording)")
+    parser.add_argument("--compress-after", action="store_true",
+                        help="after a complete run, compress outputs_bag into outputs_bag_zstd with the "
+                             "zstd CLI (tools/run/outputs_compress.py); the plain bag is kept")
+    parser.add_argument("--delete-uncompressed-on-pass", action="store_true",
+                        help="with --compress-after: remove the plain outputs_bag once the compressed "
+                             "files decompress to the same sha256. User's call: no batch script sets it")
     parser.add_argument("--playback-rate", type=float, default=1.0,
                         help="bag playback rate; time metrics are only comparable at the same rate")
     parser.add_argument("--camera-input-suffix", action="append", default=[], metavar="CAMERA=SUFFIX",
@@ -227,6 +234,10 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
+    if args.delete_uncompressed_on_pass and not args.compress_after:
+        parser.error("--delete-uncompressed-on-pass needs --compress-after")
+    if args.compress_after and (args.record_outputs != "on" or args.outputs_compression != "none"):
+        parser.error("--compress-after needs --record-outputs on and --outputs-compression none")
     repo = args.repo.expanduser().resolve()
     bag = args.bag.expanduser().resolve()
     output_root = args.output_root.expanduser().resolve()
@@ -404,6 +415,9 @@ def main() -> int:
         "snapshot_format": 4,
         "rmw_implementation": env.get("RMW_IMPLEMENTATION", "") or "default(rmw_fastrtps_cpp)",
         "outputs_compression": args.outputs_compression if args.record_outputs == "on" else None,
+        "outputs_compress_after": ({"enabled": args.compress_after,
+                                    "delete_uncompressed_on_pass": args.delete_uncompressed_on_pass}
+                                   if args.record_outputs == "on" else None),
         "ros_domain_id": args.domain_id,
         "output_dir": str(output), "free_disk_gib_at_start": round(free_gib, 3),
         "config_hashes": {str(p): sha256(p) for p in (calibration, rig, rear_rig)},
@@ -647,6 +661,13 @@ def main() -> int:
             manifest["outputs_integrity"] = {"checked": True, "broken": broken}
             if broken:
                 manifest["status"] = "OUTPUTS_TRUNCATED"
+        if manifest["status"] == "COMPLETE" and args.compress_after:
+            # D-18: compression after the recorder has exited. A failure keeps both
+            # copies and marks the run; the plain bag is still readable.
+            packed = outputs_compress.compress(output / "outputs_bag", args.delete_uncompressed_on_pass)
+            manifest["outputs_compress"] = packed
+            if packed["status"] != "PASS":
+                manifest["status"] = packed["status"] if packed["status"] == "COMPRESS_MISMATCH" else "COMPRESS_FAILED"
         manifest["shutdown_summaries"] = [str(p) for p in output.glob("*.recovery_events.csv.summary.json")]
         manifest["fusion_result_ledgers"] = [str(p) for p in output.glob("registered_keyframes*.recovery_results.jsonl")]
         result_code = 0 if manifest["status"] == "COMPLETE" else 2
