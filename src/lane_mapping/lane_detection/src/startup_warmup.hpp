@@ -10,9 +10,11 @@
 //   first frame and at least `min_frames` were processed -- whichever of the two
 //   rules comes first. A backward clock jump, or a forward one of more than
 //   `rebase_gap_sec` while warming up, starts the time rule over.
-// min_motion_m (> 0, with seconds > 0): the time rule also needs that much
-//   measured travel since the warm-up started (observer_eval_lane_warmup_results
-//   2): a car standing at start-up keeps warming up, as with the frame rule.
+// min_motion_m (> 0, with seconds > 0): the time rule also needs the vehicle to
+//   be that far from where it stood when warm-up started (net displacement,
+//   supplied by the caller; observer_eval_lane_warmup_motion 2): a car standing
+//   at start-up keeps warming up, as with the frame rule, and standstill pose
+//   noise cannot add up to a distance.
 // seconds = 0 leaves the original rule untouched.
 #include <cstdint>
 
@@ -27,8 +29,8 @@ class StartupWarmup {
 
   // One processed frame (`frame` counts from 1). Returns whether it is still
   // warm-up; ended() tells whether warm-up ended at exactly this frame.
-  // travelled_m: measured travel so far (monotone; only differences are used).
-  bool update(uint64_t frame, int64_t stamp_ns, double travelled_m = 0.0) {
+  // displacement_m: net displacement since warm-up (re)started, from the caller.
+  bool update(uint64_t frame, int64_t stamp_ns, double displacement_m = 0.0) {
     ended_now_ = false;
     bool warming = frame <= static_cast<uint64_t>(frames_);
     if (seconds_ > 0.0) {
@@ -37,7 +39,6 @@ class StartupWarmup {
       if (!have_base_ || jumped) {
         if (jumped && stamp_ns < last_stamp_ns_) warming_ = true;  // clock went back: warm up again
         base_stamp_ns_ = stamp_ns;
-        base_travelled_m_ = travelled_m;
         frames_since_base_ = 0;
         have_base_ = true;
       }
@@ -47,18 +48,25 @@ class StartupWarmup {
       } else {
         const bool by_time = stamp_ns - base_stamp_ns_ >= static_cast<int64_t>(seconds_ * 1e9) &&
                              frames_since_base_ >= static_cast<uint64_t>(min_frames_) &&
-                             (min_motion_m_ <= 0.0 || travelled_m - base_travelled_m_ >= min_motion_m_);
-        warming = warming && !by_time;
-        if (frames_ > 0 && frame > static_cast<uint64_t>(frames_)) warming = false;
+                             (min_motion_m_ <= 0.0 || displacement_m >= min_motion_m_);
+        const bool by_frames = frames_ > 0 && frame > static_cast<uint64_t>(frames_);
+        warming = !by_time && !by_frames;
+        if (by_time) reason_ = min_motion_m_ > 0.0 ? "motion" : "time";
+        else if (by_frames) reason_ = "frames";
       }
     }
     have_last_ = true;
     last_stamp_ns_ = stamp_ns;
-    if (warming_ && !warming && (frames_ > 0 || seconds_ > 0.0)) ended_now_ = true;
+    if (warming_ && !warming && (frames_ > 0 || seconds_ > 0.0)) {
+      ended_now_ = true;
+      if (seconds_ <= 0.0) reason_ = "frames";
+    }
     warming_ = warming;
     return warming;
   }
   bool ended() const { return ended_now_; }
+  // Why warm-up last ended: "frames", "time" or "motion" (empty while warming).
+  const char * reason() const { return reason_; }
 
  private:
   int frames_;
@@ -68,7 +76,7 @@ class StartupWarmup {
   int64_t rebase_gap_ns_;
   bool warming_{true}, have_base_{false}, have_last_{false}, ended_now_{false};
   int64_t base_stamp_ns_{0}, last_stamp_ns_{0};
-  double base_travelled_m_{0.0};
+  const char * reason_{""};
   uint64_t frames_since_base_{0};
 };
 

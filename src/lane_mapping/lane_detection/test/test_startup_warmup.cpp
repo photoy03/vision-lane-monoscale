@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdint>
+#include <string>
 #include "startup_warmup.hpp"
 
 int main() {
@@ -67,27 +68,29 @@ int main() {
     }
     assert(end == 12);
   }
-  {  // Motion condition: a car standing still keeps warming up past the time
-     // rule until it has moved min_motion_m (here 1 m at 0.05 m/s from 20 s on).
+  {  // Motion condition: standing still for 20 s, then 0.05 m/s; the caller
+     // supplies net displacement, so warm-up ends at 1 m (40 s, frame 100).
     StartupWarmup w(120, 12.0, 20, 1.0);
     uint64_t end = 0;
-    double travelled = 0.0;
     for (uint64_t f = 1; f <= 119 && !end; ++f) {
       const double t = static_cast<double>(f) * 0.4;
-      if (t > 20.0) travelled += 0.05 * 0.4;
-      w.update(f, static_cast<int64_t>(t * 1e9), travelled);
+      w.update(f, static_cast<int64_t>(t * 1e9), t > 20.0 ? 0.05 * (t - 20.0) : 0.0);
       if (w.ended()) end = f;
     }
-    assert(end >= 99 && end <= 101);  // 20 s + 1 m / 0.05 m/s = 40 s = frame 100
+    assert(end >= 99 && end <= 101);
+    assert(std::string(w.reason()) == "motion");
   }
-  {  // Motion condition never met: the frame rule (120) still ends warm-up.
+  {  // Standing with pose noise (net displacement stays within 5 mm): the
+     // motion condition never holds, the frame rule (120) ends warm-up.
     StartupWarmup w(120, 12.0, 20, 1.0);
     uint64_t end = 0;
     for (uint64_t f = 1; f <= 200 && !end; ++f) {
-      w.update(f, static_cast<int64_t>(f) * s / 2, 0.0);
+      const double noise = 0.005 * ((f % 7) / 6.0);
+      w.update(f, static_cast<int64_t>(f) * s / 2, noise);
       if (w.ended()) end = f;
     }
     assert(end == 121);
+    assert(std::string(w.reason()) == "frames");
   }
   {  // Moving from the start: the time rule decides as without the condition.
     StartupWarmup w(120, 12.0, 20, 1.0);
@@ -97,6 +100,14 @@ int main() {
       if (w.ended()) end = f;
     }
     assert(end >= 28 && end <= 29);
+  }
+  {  // Time rule alone reports "time"; the original rule reports "frames".
+    StartupWarmup a(120, 12.0, 20);
+    for (uint64_t f = 1; f <= 40; ++f) a.update(f, static_cast<int64_t>(f) * s / 2);
+    assert(std::string(a.reason()) == "time");
+    StartupWarmup b(120, 0.0);
+    for (uint64_t f = 1; f <= 121; ++f) b.update(f, static_cast<int64_t>(f) * s);
+    assert(std::string(b.reason()) == "frames");
   }
   return 0;
 }

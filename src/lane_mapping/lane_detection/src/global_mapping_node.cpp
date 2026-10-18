@@ -748,6 +748,27 @@ class GlobalMappingNode : public rclcpp::Node {
       // Reliable with a deep queue: the pose authority publishes IMU-fill poses
       // in bursts, and a best-effort depth-5 queue dropped about a third of them.
       odom_sub_=create_subscription<nav_msgs::msg::Odometry>(odom_topic_,rclcpp::QoS(200).reliable(),std::bind(&GlobalMappingNode::on_odom,this,std::placeholders::_1));
+    if(startup_warmup_min_motion_m_>0.0){
+      // Warm-up motion only (observer_eval_lane_warmup_motion 2): a separate,
+      // minimal subscription to the same pose topic the lane map uses. It feeds
+      // nothing but the net displacement since warm-up started -- not the odom
+      // buffer, pose lookups or the profile's pose columns -- so detection and
+      // mapping see exactly what they saw before, in either mapping owner mode.
+      warmup_odom_sub_=create_subscription<nav_msgs::msg::Odometry>(odom_topic_,rclcpp::QoS(200).reliable(),
+        [this](const nav_msgs::msg::Odometry::SharedPtr m){
+          const int64_t t=rclcpp::Time(m->header.stamp).nanoseconds();
+          const double x=m->pose.pose.position.x,y=m->pose.pose.position.y;
+          if(!std::isfinite(x)||!std::isfinite(y))return;
+          ++warmup_odom_received_;
+          // Clock went back (replay restarted): measure from the new start.
+          if(!warmup_have_base_||t+1000000000LL<warmup_last_odom_ns_){
+            warmup_base_x_=x; warmup_base_y_=y; warmup_have_base_=true; warmup_displacement_m_=0.0;
+          }
+          warmup_last_odom_ns_=t;
+          if(warming_up_||warmup_displacement_m_==0.0)
+            warmup_displacement_m_=std::hypot(x-warmup_base_x_,y-warmup_base_y_);
+        });
+    }
 
     if(!profile_path_.empty()){
       csv_.open(profile_path_);
@@ -1532,14 +1553,14 @@ class GlobalMappingNode : public rclcpp::Node {
     const auto all=Clock::now();
     const rclcpp::Time stamp(header.stamp);
     last_processed_stamp_ns_=stamp.nanoseconds();
-    // Travel is measured from the poses of earlier frames (this frame's pose is
-    // looked up below), one frame behind at most.
-    warming_up_=warmup_.update(pr.frame,stamp.nanoseconds(),warmup_travelled_m_);
+    // Displacement comes from the warm-up's own odometry subscription (below).
+    warming_up_=warmup_.update(pr.frame,stamp.nanoseconds(),warmup_displacement_m_);
     if(warmup_.ended()){
       tracker_.reset();
       local_tracker_.reset();
       last_global_tracker_stamp_ns_=0;
-      RCLCPP_INFO(get_logger(),"camera warm-up complete: trackers reset; mapping now requires confirmed lines and aligned odom");
+      RCLCPP_INFO(get_logger(),"camera warm-up complete (%s, frame %lu, displacement %.2f m, warm-up odom %lu): trackers reset; mapping now requires confirmed lines and aligned odom",
+        warmup_.reason(),static_cast<unsigned long>(pr.frame),warmup_displacement_m_,static_cast<unsigned long>(warmup_odom_received_));
     }
     pr.input_age=std::max(0.0,(now()-stamp).seconds()*1000.0);
     if(!maps_ready_){
@@ -1553,12 +1574,6 @@ class GlobalMappingNode : public rclcpp::Node {
     // A prediction is valid for short-lived local tracking, but it is not a
     // measured pose and must never be advertised as safe for global fusion.
     pr.pose_valid=measured_pose;
-    if(measured_pose){
-      if(warmup_have_pose_)
-        warmup_travelled_m_+=std::hypot(lookup.pose.x-warmup_last_pose_.x,lookup.pose.y-warmup_last_pose_.y);
-      warmup_last_pose_=lookup.pose;
-      warmup_have_pose_=true;
-    }
     pr.pose_age=lookup.valid?lookup.age_sec*1000.0:-1.0;
     if(!lookup.valid&&!allow_local_without_odom_){
       RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,"waiting for timestamp-aligned odom; frame skipped");
@@ -1972,9 +1987,12 @@ class GlobalMappingNode : public rclcpp::Node {
   bool recovered_output_enabled_{false};
   std::string image_quality_gate_mode_{"monitor"};
   int sync_queue_size_{8},startup_warmup_frames_{0},startup_warmup_min_frames_{20};
-  double startup_warmup_sec_{0.0},startup_warmup_min_motion_m_{0.0},warmup_travelled_m_{0.0};
-  Pose2 warmup_last_pose_;
-  bool warmup_have_pose_{false};
+  double startup_warmup_sec_{0.0},startup_warmup_min_motion_m_{0.0},warmup_displacement_m_{0.0};
+  double warmup_base_x_{0.0},warmup_base_y_{0.0};
+  int64_t warmup_last_odom_ns_{0};
+  bool warmup_have_base_{false};
+  uint64_t warmup_odom_received_{0};
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr warmup_odom_sub_;
   vision_lane::StartupWarmup warmup_;
   int image_quality_sample_width_{640};
   int pending_observation_max_count_{128},pending_commit_budget_{2};
