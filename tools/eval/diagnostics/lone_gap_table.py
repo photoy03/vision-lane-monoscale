@@ -108,6 +108,21 @@ def track_callbacks(run: Path):
     return out
 
 
+def near_threshold(stamps, low_sec=2.5, high_sec=3.5, threshold_sec=3.0):
+    """Intervals between consecutive raw stamps that lie in [low, high]: (below or at the
+    gap threshold, above it). A run whose count of 3 s gaps moves by one or two between
+    repeats usually has intervals sitting right at the threshold (E-1)."""
+    below = above = 0
+    for a, b in zip(stamps, stamps[1:]):
+        gap = (b - a) * 1e-9
+        if low_sec <= gap <= high_sec:
+            if gap <= threshold_sec:
+                below += 1
+            else:
+                above += 1
+    return below, above
+
+
 def analyse(run: Path, min_gap_sec: float):
     raw, status, info = read_outputs(run)
     stamps = [s for s, _ in raw]
@@ -142,8 +157,10 @@ def analyse(run: Path, min_gap_sec: float):
         gaps.append(row)
     last = status[-1][1] if status else {}
     kept = [g for g in gaps if not g["input_hole"]]
+    near_below, near_above = near_threshold(stamps, threshold_sec=min_gap_sec)
     return {
         "run": run.name, "raw_outputs": len(stamps), "gaps": gaps, "gaps_n": len(gaps),
+        "near_threshold_2p5_3p5": {"at_or_below": near_below, "above": near_above},
         "gaps_excl_hole": len(kept), "max_gap_excl_hole_s": max([g["gap_s"] for g in kept] or [0.0]),
         "final": {k: last.get(k) for k in ("lone_frames", "lone_solves", "lone_by_reason", "lone_late_peer",
                                            "lone_candidate_evicted", "ready_rejections", "lone_reseeds",
@@ -171,10 +188,12 @@ def main():
             lines.append(f"| {r['run']} | {g['start_s']} | {g['gap_s']} | {g['images_front']} | {g['images_rear']} | "
                          f"{g['tracks_front']} | {g['tracks_rear']} | {'yes' if g['input_hole'] else ''} | " + " | ".join(str(g[c]) for c in COUNTERS) +
                          f" | {g['solve_info_inside']} | {g['solve_info_alone']} |")
-    lines += ["", "| run | gaps | excl. hole | max excl. hole (s) | final |", "|---|---|---|---|---|"]
+    lines += ["", "| run | gaps | excl. hole | max excl. hole (s) | 2.5-3.5 s (<= thr / > thr) | final |",
+              "|---|---|---|---|---|---|"]
     for r in results:
+        near = r["near_threshold_2p5_3p5"]
         lines.append(f"| {r['run']} | {r['gaps_n']} | {r['gaps_excl_hole']} | {r['max_gap_excl_hole_s']} | "
-                     f"{json.dumps(r['final'], ensure_ascii=False)} |")
+                     f"{near['at_or_below']} / {near['above']} | {json.dumps(r['final'], ensure_ascii=False)} |")
     text = "\n".join(lines) + "\n"
     print(text)
     if a.report:
