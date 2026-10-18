@@ -14,7 +14,10 @@ launch_arguments:
   occupancy_free_to_occupied: ''
   occupancy_occlusion_aware: ''
   occupancy_max_pending_keyframes: ''
-  occupancy_camera_liveness: ''
+  # On by default (observer_eval_C2_6_liveness_default): a camera that stops
+  # delivering no longer freezes the occupancy layer for good. With lone camera
+  # solve off the layer still stops while the pose is down.
+  occupancy_camera_liveness: 'true'
   occupancy_camera_dead_sec: ''
   occupancy_max_odom_gap_sec: ''
   occupancy_max_odom_translation_m: ''
