@@ -264,7 +264,7 @@ def main() -> int:
         "tracker_opencv_threads", "tracker_executor_threads", "odom_executor_threads",
         "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
         "lane_mapping_owner", "launch_fusion", "fusion_provenance_topic", "lane_map_observation_topic", "odom_lone_camera_solve",
-        "occupancy_camera_liveness", "occupancy_camera_dead_sec",
+        "occupancy_camera_liveness", "occupancy_camera_dead_sec", "lane_warmup_sec", "lane_warmup_min_motion_m",
     }
     launch_overrides: dict[str, str] = {}
     for item in args.launch_arg:

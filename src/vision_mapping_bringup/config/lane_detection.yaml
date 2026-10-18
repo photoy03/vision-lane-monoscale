@@ -27,5 +27,7 @@ launch_arguments:
   lane_pending_blocked_head_grace_sec: ''
   lane_pending_drop_unresolvable: ''
   warmup_frames: ''
+  lane_warmup_sec: ''
+  lane_warmup_min_motion_m: ''
   image_quality_gate_mode: monitor
   image_quality_min_sharpness: ''

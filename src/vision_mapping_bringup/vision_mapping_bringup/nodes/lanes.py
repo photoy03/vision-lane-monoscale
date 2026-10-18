@@ -16,6 +16,8 @@ def detection_parameters(ctx):
         'profile_csv_path': str(run / 'profile.csv'),
         **args.given((
             ('warmup_frames', 'startup_warmup_frames', int),
+            ('lane_warmup_sec', 'startup_warmup_sec', float),
+            ('lane_warmup_min_motion_m', 'startup_warmup_min_motion_m', float),
             ('image_quality_gate_mode', 'image_quality_gate_mode', str),
             ('lane_sync_wait_sec', 'sync_max_wait_sec', float),
             ('lane_prediction_wait_sec', 'odom_prediction_wait_sec', float),

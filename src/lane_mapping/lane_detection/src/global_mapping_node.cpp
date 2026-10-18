@@ -56,6 +56,7 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include "lane_map/pending_lane_observations.hpp"
 #include "lane_map/pending_readiness.hpp"
+#include "startup_warmup.hpp"
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -657,6 +658,12 @@ class GlobalMappingNode : public rclcpp::Node {
     pending_observations_=vision_lane::PendingLaneObservationQueue<std::pair<std::vector<Observation>,uint64_t>>(
       static_cast<size_t>(pending_observation_max_count_));
     startup_warmup_frames_=declare_parameter<int>("startup_warmup_frames",0);
+    // Time rule (LANE_WARMUP_DESIGN_KO.md): 0 keeps the frame rule alone.
+    startup_warmup_sec_=declare_parameter<double>("startup_warmup_sec",0.0);
+    startup_warmup_min_frames_=declare_parameter<int>("startup_warmup_min_frames",20);
+    startup_warmup_min_motion_m_=declare_parameter<double>("startup_warmup_min_motion_m",0.0);
+    warmup_=vision_lane::StartupWarmup(startup_warmup_frames_,startup_warmup_sec_,startup_warmup_min_frames_,
+      startup_warmup_min_motion_m_);
     image_quality_gate_mode_=declare_parameter<std::string>("image_quality_gate_mode","monitor");
     std::transform(image_quality_gate_mode_.begin(),image_quality_gate_mode_.end(),
       image_quality_gate_mode_.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
@@ -665,7 +672,8 @@ class GlobalMappingNode : public rclcpp::Node {
     if(sync_images_to_odom_&&(input_mode_!="topic"||use_static_))
       throw std::runtime_error("sync_images_to_odom requires topic mode and use_static_pose=false");
     if(!std::isfinite(sync_max_wait_sec_)||sync_max_wait_sec_<=0||sync_queue_size_<1||
-       startup_warmup_frames_<0||!std::isfinite(max_odom_age_sec_)||max_odom_age_sec_<=0||
+       startup_warmup_frames_<0||!std::isfinite(startup_warmup_sec_)||startup_warmup_sec_<0||
+       startup_warmup_min_frames_<0||!std::isfinite(startup_warmup_min_motion_m_)||startup_warmup_min_motion_m_<0||!std::isfinite(max_odom_age_sec_)||max_odom_age_sec_<=0||
        !std::isfinite(max_odom_interpolation_gap_sec_)||max_odom_interpolation_gap_sec_<=0||
        !std::isfinite(global_tracker_reset_gap_sec_)||global_tracker_reset_gap_sec_<=0||
        !std::isfinite(odom_prediction_wait_sec_)||odom_prediction_wait_sec_<0||
@@ -1243,7 +1251,7 @@ class GlobalMappingNode : public rclcpp::Node {
       <<",\"quality_rejected_frames\":"<<quality_rejected_frames_
       <<",\"quality_rejected_in_warmup\":"<<quality_rejected_in_warmup_
       <<",\"frames_discarded\":{"<<discard_json()<<"}"
-      <<",\"warming_up\":"<<(frame_<=static_cast<uint64_t>(startup_warmup_frames_)?"true":"false")<<"}";
+      <<",\"warming_up\":"<<((startup_warmup_sec_>0.0?warming_up_:frame_<=static_cast<uint64_t>(startup_warmup_frames_))?"true":"false")<<"}";
     if(pending_csv_){
       pending_csv_<<frame_<<','<<run_epoch_<<','<<received_images_<<','<<(odom_received_-rejected_odom_)<<','<<sync_matched_<<','<<sync_timeout_<<','<<sync_predicted_<<','<<sync_dropped_<<','<<pending_observations_.size()<<','<<pending_queued_total_<<','<<pending_resolved_total_<<','<<pending_map_updates_total_<<','<<pending_ttl_dropped_<<','<<pending_unresolvable_dropped_<<','<<pending_overflow_dropped_<<','<<pending_invalid_dropped_<<','<<pending_duplicate_dropped_<<','<<pending_epoch_dropped_<<','<<pending_oldest_age_ms()<<','<<map_.updates()<<'\n';
       pending_csv_.flush();
@@ -1524,8 +1532,10 @@ class GlobalMappingNode : public rclcpp::Node {
     const auto all=Clock::now();
     const rclcpp::Time stamp(header.stamp);
     last_processed_stamp_ns_=stamp.nanoseconds();
-    warming_up_=pr.frame<=static_cast<uint64_t>(startup_warmup_frames_);
-    if(startup_warmup_frames_>0&&pr.frame==static_cast<uint64_t>(startup_warmup_frames_)+1){
+    // Travel is measured from the poses of earlier frames (this frame's pose is
+    // looked up below), one frame behind at most.
+    warming_up_=warmup_.update(pr.frame,stamp.nanoseconds(),warmup_travelled_m_);
+    if(warmup_.ended()){
       tracker_.reset();
       local_tracker_.reset();
       last_global_tracker_stamp_ns_=0;
@@ -1543,6 +1553,12 @@ class GlobalMappingNode : public rclcpp::Node {
     // A prediction is valid for short-lived local tracking, but it is not a
     // measured pose and must never be advertised as safe for global fusion.
     pr.pose_valid=measured_pose;
+    if(measured_pose){
+      if(warmup_have_pose_)
+        warmup_travelled_m_+=std::hypot(lookup.pose.x-warmup_last_pose_.x,lookup.pose.y-warmup_last_pose_.y);
+      warmup_last_pose_=lookup.pose;
+      warmup_have_pose_=true;
+    }
     pr.pose_age=lookup.valid?lookup.age_sec*1000.0:-1.0;
     if(!lookup.valid&&!allow_local_without_odom_){
       RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,"waiting for timestamp-aligned odom; frame skipped");
@@ -1955,7 +1971,11 @@ class GlobalMappingNode : public rclcpp::Node {
   vision_lane::PendingReadinessIndex pending_readiness_;
   bool recovered_output_enabled_{false};
   std::string image_quality_gate_mode_{"monitor"};
-  int sync_queue_size_{8},startup_warmup_frames_{0};
+  int sync_queue_size_{8},startup_warmup_frames_{0},startup_warmup_min_frames_{20};
+  double startup_warmup_sec_{0.0},startup_warmup_min_motion_m_{0.0},warmup_travelled_m_{0.0};
+  Pose2 warmup_last_pose_;
+  bool warmup_have_pose_{false};
+  vision_lane::StartupWarmup warmup_;
   int image_quality_sample_width_{640};
   int pending_observation_max_count_{128},pending_commit_budget_{2};
   double pending_observation_ttl_sec_{8.0},pending_observation_unresolvable_grace_sec_{2.0},clock_reset_threshold_sec_{0.50};
