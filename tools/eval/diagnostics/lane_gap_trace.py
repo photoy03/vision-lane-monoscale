@@ -11,7 +11,7 @@ For each run and each centre time t (capture clock), over [t - W, t + W]:
   map         registered keyframes and their local segments
 Runs are read only.
 
-  python3 tools/eval/lane_gap_trace.py --at 1790586851.402 [--at ...] [--window 5] RUN [RUN ...] [--json out]
+  python3 tools/eval/diagnostics/lane_gap_trace.py --at 1790586851.402 [--at ...] [--window 5] RUN [RUN ...] [--json out]
 """
 import argparse
 import collections

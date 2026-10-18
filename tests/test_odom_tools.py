@@ -43,7 +43,7 @@ def load(name, path):
 from workspace_paths import package_source
 
 policy = load('odom_policy', ROOT / 'src/vision_mapping_bringup/vision_mapping_bringup/odom_policy.py')
-summary = load('summary', ROOT / 'tools/eval/summarize_odom.py')
+summary = load('summary', ROOT / 'tools/eval/metrics/summarize_odom.py')
 
 
 class OdomTests(unittest.TestCase):

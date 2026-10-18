@@ -198,7 +198,7 @@ PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m pytest -q tests --ignore=tests/tes
 PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 tests/test_launch_pipeline.py
 ```
 
-같은 bag도 스레드 타이밍 때문에 실행마다 결과가 조금씩 다르므로, 변경 전후 비교는 `tools/eval/repeat_compare.py`로 여러 번 재생해 평균과 표준편차로 봅니다. 사용법은 [docs/RUN_KO.md](docs/RUN_KO.md#반복-재생-비교)에 있습니다.
+같은 bag도 스레드 타이밍 때문에 실행마다 결과가 조금씩 다르므로, 변경 전후 비교는 `tools/eval/metrics/repeat_compare.py`로 여러 번 재생해 평균과 표준편차로 봅니다. 사용법은 [docs/RUN_KO.md](docs/RUN_KO.md#반복-재생-비교)에 있습니다.
 
 ## 문서
 

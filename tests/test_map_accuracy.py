@@ -1,4 +1,4 @@
-"""C-0 map accuracy metrics on synthetic labels and maps (tools/eval/map_accuracy.py)."""
+"""C-0 map accuracy metrics on synthetic labels and maps (tools/eval/metrics/map_accuracy.py)."""
 import math
 import sys
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/eval"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/eval/metrics"))
 import map_accuracy as ma  # noqa: E402
 
 

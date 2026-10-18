@@ -3,7 +3,7 @@
 
 Groups /mapping/fused_map/status by run_id (one per supervised start), prints the
 phase transitions, and counts fused maps published before each process was ready.
-  python3 tools/eval/readiness_timeline.py RUN [--json out]
+  python3 tools/eval/metrics/readiness_timeline.py RUN [--json out]
 """
 import argparse
 import json

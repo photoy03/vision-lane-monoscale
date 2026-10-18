@@ -2,9 +2,9 @@
 """Run a replay N times and/or compare groups of replay runs by mean/std per metric.
 
 Examples (source /opt/ros/humble and this workspace's install/setup.bash first):
-  python3 tools/eval/repeat_compare.py --bag <session>/bag --repeats 3 \
+  python3 tools/eval/metrics/repeat_compare.py --bag <session>/bag --repeats 3 \
       --run-prefix base --output-root <runs> --report <runs>/base.md
-  python3 tools/eval/repeat_compare.py --group before=<runs>/base_1,<runs>/base_2 \
+  python3 tools/eval/metrics/repeat_compare.py --group before=<runs>/base_1,<runs>/base_2 \
       --group after=<runs>/new_1,<runs>/new_2 --report <runs>/before_after.md
 
 Bags are only read. Run-to-run spread is reported so differences can be judged
@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 
-TOOLS = Path(__file__).resolve().parents[1]
+TOOLS = Path(__file__).resolve().parents[2]
 REFERENCE_ODOM = "/localization/kinematic_state"
 
 

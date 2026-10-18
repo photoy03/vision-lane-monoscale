@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """C-0 map accuracy against human labels on front camera frames (item 11).
 
-Labels (tools/eval/c0_labeler.py) live on undistorted front frames and do not
+Labels (tools/eval/metrics/c0_labeler.py) live on undistorted front frames and do not
 depend on the code version. For one replay run and one labelled frame at t the
 run's maps are moved into base_link with that run's pose(t)
 (/localization/kinematic_state, bracket <= 0.25 s; none = "no_pose" in every

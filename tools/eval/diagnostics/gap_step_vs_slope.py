@@ -8,7 +8,7 @@ planar displacement of the raw odometry between the piece's ends is compared wit
 the recorded /localization/kinematic_state of the measurement bag (read-only).
 A raw pose at a piece end is interpolated between the samples around it.
 
-  python3 tools/eval/gap_step_vs_slope.py --bag BAG --reference RUN RUN [RUN ...] [--json out]
+  python3 tools/eval/diagnostics/gap_step_vs_slope.py --bag BAG --reference RUN RUN [RUN ...] [--json out]
 """
 import argparse
 import json

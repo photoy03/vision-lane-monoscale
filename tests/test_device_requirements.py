@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('equivalence', ROOT / 'tools/eval/verify_path_equivalence.py')
+spec = importlib.util.spec_from_file_location('equivalence', ROOT / 'tools/eval/checks/verify_path_equivalence.py')
 equivalence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(equivalence)
 

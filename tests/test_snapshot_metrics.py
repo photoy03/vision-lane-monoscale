@@ -1,11 +1,11 @@
-"""Map snapshot contract checks in tools/eval/repeat_compare.py (ROS-free)."""
+"""Map snapshot contract checks in tools/eval/metrics/repeat_compare.py (ROS-free)."""
 import importlib.util
 from array import array
 from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('repeat_compare', ROOT / 'tools/eval/repeat_compare.py')
+spec = importlib.util.spec_from_file_location('repeat_compare', ROOT / 'tools/eval/metrics/repeat_compare.py')
 repeat_compare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(repeat_compare)
 

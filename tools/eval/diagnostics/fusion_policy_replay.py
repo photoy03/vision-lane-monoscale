@@ -24,7 +24,7 @@ Limits:
 - "valid-pose stall" counts only sets that carry a pose: what a consumer that
   needs the vehicle pose sees.
 
-  python3 tools/eval/fusion_policy_replay.py RUN [RUN ...] --report out.md
+  python3 tools/eval/diagnostics/fusion_policy_replay.py RUN [RUN ...] --report out.md
 """
 from __future__ import annotations
 

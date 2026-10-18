@@ -9,7 +9,7 @@ threshold) for at least --min-sec (3 s). For each run, the raw odometry
 window ends; drift = displacement and yaw change scaled to 3 s. A window is
 "lone" in a run when solve_info reported a one-camera output inside it.
 
-  python3 tools/eval/stationary_drift.py --bag MEASUREMENT_BAG RUN [RUN ...] [--json out.json]
+  python3 tools/eval/diagnostics/stationary_drift.py --bag MEASUREMENT_BAG RUN [RUN ...] [--json out.json]
 """
 from __future__ import annotations
 

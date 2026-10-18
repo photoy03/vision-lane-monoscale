@@ -7,7 +7,7 @@ This module only assembles the launch: configuration lives in config.py, the
 rig/calibration and camera parameter formats in camera.py, cross-node argument
 checks in validation.py, run-folder snapshots in run_files.py, and the nodes in
 nodes/{sensors,monoscale,lanes,fusion}.py. The node order below is part of the
-launch contract (verified by tools/eval/verify_path_equivalence.py).
+launch contract (verified by tools/eval/checks/verify_path_equivalence.py).
 """
 from types import SimpleNamespace
 

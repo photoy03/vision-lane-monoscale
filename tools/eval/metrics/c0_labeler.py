@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal labeller for the C-0 frames (labelme-compatible JSON beside the images).
 
-Usage: python3 tools/eval/c0_labeler.py <label folder> [frame_id,frame_id,...]
+Usage: python3 tools/eval/metrics/c0_labeler.py <label folder> [frame_id,frame_id,...]
        (folder made by c0_samples.py; the optional list limits the session to those frames)
 Guide: docs in the label folder, LABEL_GUIDE_KO.md.
 

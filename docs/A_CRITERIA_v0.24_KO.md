@@ -5,7 +5,7 @@ A = v0.20(f6e0423), B = 최종본(A-1 + A-2 반영). 참고 묶음: tl0928_1..3(
 모든 재생: 0928 bag, 1배속, Fast DDS, 같은 QoS·파라미터, launch_fusion=true, 백그라운드 부하 없음, 실행마다 다른 ROS_DOMAIN_ID 없이 96 고정(동시 실행 없음).
 
 ## A-1 공분산 원복
-(a) 고정 입력 단위 시험(tools/eval/stabilizer_fixed_input.py, 0928 raw + IMU, 6가지 경우: 채움 on/off × 상류 공분산 기록값(0)/유효/섞임)
+(a) 고정 입력 단위 시험(tools/eval/diagnostics/stabilizer_fixed_input.py, 0928 raw + IMU, 6가지 경우: 채움 on/off × 상류 공분산 기록값(0)/유효/섞임)
 - pose 좌표·stamp·twist·출력 수·종류별 수가 v0.20과 **동일**
 - 달라지는 것은 "보간·채움, 무효 입력"의 공분산(v0.20 −1 → 0 행렬)뿐
 - raw 통과는 상류 값 보존, 유효 입력 보간·채움은 v0.20과 같은 전파 값

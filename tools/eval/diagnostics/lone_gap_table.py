@@ -2,7 +2,7 @@
 """C-2 5a retest (observer_eval_C2_5a_results 5): one row per raw odometry gap of a
 recorded run, with the odometry status counters' increase inside it.
 
-  python3 tools/eval/lone_gap_table.py RUN [RUN ...] [--report out.md] [--json out.json]
+  python3 tools/eval/diagnostics/lone_gap_table.py RUN [RUN ...] [--report out.md] [--json out.json]
 
 Gaps: consecutive /localization/monoscale_raw stamps more than --min-gap-sec apart.
 Images: decoded front/rear images captured inside the gap (front_decode.csv, rear_decode.csv).

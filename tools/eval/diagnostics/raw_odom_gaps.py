@@ -22,7 +22,7 @@ and labels it:
                      stood still (yaw rate and acceleration spread at the standing level)
 Labels are not exclusive; the first that applies in the order above is the primary one.
 
-  python3 tools/eval/raw_odom_gaps.py RUN [RUN ...] [--report out.md]
+  python3 tools/eval/diagnostics/raw_odom_gaps.py RUN [RUN ...] [--report out.md]
 """
 from __future__ import annotations
 
