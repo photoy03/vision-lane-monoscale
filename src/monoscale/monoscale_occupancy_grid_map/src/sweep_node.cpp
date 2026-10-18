@@ -42,6 +42,7 @@
 #include "vision_lane_interfaces/pipeline_progress.hpp"
 #include "vision_lane_interfaces/map_snapshot.hpp"
 #include "vision_lane_interfaces/clock_generation.hpp"
+#include "vision_lane_interfaces/image_quality.hpp"
 #include "vision_lane_interfaces/msg/occupancy_snapshot.hpp"
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
@@ -141,6 +142,10 @@ public:
       "image_quality_gate_mode", "reject");
     image_quality_min_sharpness_ = declare_parameter<double>(
       "image_quality_min_sharpness", 25.0);
+    // Shared sharpness measure (D-17). The defaults keep the occupancy scale: the
+    // processing image as is (0) with ksize 1. 640/3 is the lane scale (stage 2, A/B).
+    image_quality_sample_width_ = declare_parameter<int>("image_quality_sample_width", 0);
+    image_quality_laplacian_ksize_ = declare_parameter<int>("image_quality_laplacian_ksize", 1);
     const bool use_cuda = declare_parameter<bool>("use_cuda", true);
     const double rolling_radius = declare_parameter<double>("rolling_radius_m", 60.0);
     const double keyframe_travel = declare_parameter<double>("keyframe_travel_m", 0.25);
@@ -224,6 +229,10 @@ public:
       !std::isfinite(max_odom_interpolation_yaw_deg_) ||
       max_odom_interpolation_yaw_deg_ <= 0.0 || max_odom_interpolation_yaw_deg_ > 180.0 ||
       !std::isfinite(image_quality_min_sharpness_) || image_quality_min_sharpness_ < 0.0 ||
+      image_quality_sample_width_ < 0 ||
+      (image_quality_sample_width_ > 0 && image_quality_sample_width_ < 64) ||
+      (image_quality_laplacian_ksize_ != 1 && image_quality_laplacian_ksize_ != 3 &&
+      image_quality_laplacian_ksize_ != 5 && image_quality_laplacian_ksize_ != 7) ||
       !std::isfinite(occupied_probability) || occupied_probability <= 0.5 ||
       occupied_probability >= 1.0 || !std::isfinite(free_probability) ||
       free_probability <= 0.0 || free_probability >= 0.5 ||
@@ -492,12 +501,8 @@ private:
     cv::Mat resized;
     cv::resize(gray, resized, cv::Size(), scale, scale, cv::INTER_AREA);
     if (image_quality_gate_mode_ != "off") {
-      cv::Mat laplacian;
-      cv::Laplacian(resized, laplacian, CV_32F);
-      cv::Scalar mean;
-      cv::Scalar deviation;
-      cv::meanStdDev(laplacian, mean, deviation);
-      const double sharpness = deviation[0] * deviation[0];
+      const double sharpness = image_quality::sharpness(
+        resized, image_quality_sample_width_, image_quality_laplacian_ksize_);
       last_sharpness_ = sharpness;
       if (image_quality_gate_mode_ == "reject" && sharpness < image_quality_min_sharpness_) {
         ++blur_rejected_;
@@ -1098,6 +1103,8 @@ private:
   double max_odom_interpolation_translation_m_ = 0.10;
   double max_odom_interpolation_yaw_deg_ = 3.0;
   double image_quality_min_sharpness_ = 25.0;
+  int image_quality_sample_width_ = 0;
+  int image_quality_laplacian_ksize_ = 1;
   int max_pending_keyframes_ = 2;
 
   monoscale_occupancy::SweepSettings settings_;

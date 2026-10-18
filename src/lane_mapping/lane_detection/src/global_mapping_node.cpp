@@ -53,6 +53,7 @@
 #include "monoscale_pose/pose_timeline.hpp"
 #include "lane_map/lane_tracker.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
+#include "vision_lane_interfaces/image_quality.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include "lane_map/pending_lane_observations.hpp"
 #include "lane_map/pending_readiness.hpp"
@@ -603,8 +604,10 @@ class GlobalMappingNode : public rclcpp::Node {
       calibration_=(std::filesystem::path(ament_index_cpp::get_package_share_directory(
         "lane_detection"))/"config"/calibration_).string();
     }
+    // Launch passes both from vision_mapping_bringup camera.py; these defaults are only for
+    // running the node without launch (the frame used to be front_camera_optical_frame, D-17).
     camera_id_=declare_parameter<std::string>("camera_id","front");
-    camera_frame_=declare_parameter<std::string>("camera_frame","front_camera_optical_frame");
+    camera_frame_=declare_parameter<std::string>("camera_frame","front_fisheye_camera_optical_frame");
     map_frame_=declare_parameter<std::string>("map_frame","map");
     base_frame_=declare_parameter<std::string>("base_frame","base_link");
     recovered_output_enabled_=declare_parameter<bool>("recovered_output_enabled",false);
@@ -929,20 +932,9 @@ class GlobalMappingNode : public rclcpp::Node {
 
   std::pair<double,double> measure_image_quality(const cv::Mat&input){
     if(image_quality_gate_mode_=="off")return {0.0,0.0};
-    cv::Mat sample;
-    if(input.cols>image_quality_sample_width_){
-      const double scale=image_quality_sample_width_/static_cast<double>(input.cols);
-      cv::resize(input,sample,{},scale,scale,cv::INTER_AREA);
-    }else sample=input;
     cv::Mat gray;
-    if(sample.channels()==3)cv::cvtColor(sample,gray,cv::COLOR_BGR2GRAY);
-    else if(sample.channels()==4)cv::cvtColor(sample,gray,cv::COLOR_BGRA2GRAY);
-    else gray=sample;
-    cv::Mat laplacian;
-    cv::Laplacian(gray,laplacian,CV_32F,3);
-    cv::Scalar mean,stddev;
-    cv::meanStdDev(laplacian,mean,stddev);
-    const double sharpness=stddev[0]*stddev[0];
+    // Shared measure (D-17); the lane values are a 640 px sample and ksize 3.
+    const double sharpness=image_quality::sharpness(input,image_quality_sample_width_,3,&gray);
     double delta=0.0;
     if(!last_quality_gray_.empty()&&last_quality_gray_.size()==gray.size()){
       cv::Mat difference;

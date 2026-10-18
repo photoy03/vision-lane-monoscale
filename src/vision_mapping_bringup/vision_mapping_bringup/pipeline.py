@@ -77,7 +77,7 @@ def _launch(context, group='all'):
 
     # Sensors first; the rear camera also extends the shared camera lists.
     nodes = sensors.drivers(ctx)
-    ctx.camera_names = ['front']
+    ctx.camera_names = [camera.FRONT_ID]
     ctx.image_topics = [ctx.topics.image]
     ctx.info_topics = ['/sensing/camera/front/fisheye/camera_info']
     ctx.rear_enabled = args.flag('rear_enabled') or bool(args.arg('rear_device'))
@@ -86,7 +86,7 @@ def _launch(context, group='all'):
         if ctx.shadow:
             raise ValueError('Disable imu_accel_shadow for the two-camera profile')
         camera.load_rear(args, share, setup)
-        ctx.camera_names.append('rear')
+        ctx.camera_names.append(camera.REAR_ID)
         ctx.image_topics.append('/sensing/camera/rear/fisheye/image_raw')
         ctx.info_topics.append('/sensing/camera/rear/fisheye/camera_info')
         ctx.rear_parameters = sensors.rear_parameters(ctx)

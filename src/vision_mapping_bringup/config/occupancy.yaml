@@ -24,4 +24,8 @@ launch_arguments:
   occupancy_max_odom_yaw_deg: ''
   occupancy_image_quality_gate_mode: ''
   occupancy_image_quality_min_sharpness: ''
+  # Shared sharpness measure (D-17). Empty keeps the occupancy scale (processing
+  # image, ksize 1); 640 and 3 measure on the lane scale (stage 2, A/B only).
+  occupancy_image_quality_sample_width: ''
+  occupancy_image_quality_laplacian_ksize: ''
   occupancy_filter_lanes: 'false'

@@ -46,6 +46,8 @@ class MapFusionNode : public rclcpp::Node {
   MapFusionNode():Node("lane_map_fusion"),bank_(settings()),mapper_(mapper_settings()) {
     input_frame_=declare_parameter<std::string>("input_frame","base_link");
     map_frame_=declare_parameter<std::string>("map_frame","lane_map");
+    // Launch passes the camera names and frame from vision_mapping_bringup camera.py; the
+    // defaults here are only for running the node without launch (D-17).
     camera_=declare_parameter<std::string>("camera_id","front");
     recovered_input_enabled_=declare_parameter<bool>("recovered_input_enabled",false);
     // mapping_owner=map: lane_detection only detects; this node attaches poses,

@@ -1,5 +1,6 @@
 """Visual odometry, the pose authority and the occupancy grid (launch group: monoscale)."""
-from vision_mapping_bringup.camera import FRONT_FRAME, REAR_FRAME, monoscale_front, occupancy_camera
+from vision_mapping_bringup.camera import (FRONT_FRAME, FRONT_ID, REAR_FRAME, REAR_ID, monoscale_front,
+                                          occupancy_camera)
 from vision_mapping_bringup.config import node_parameters
 from vision_mapping_bringup.odom_policy import odom_policy
 
@@ -23,7 +24,7 @@ def tracker(ctx):
                 # Upstream's default is the rear camera.  For this single
                 # camera launch, use front; otherwise road-step estimation
                 # never receives a frame from its selected camera.
-                'motion_reference': 'rear' if ctx.rear_enabled else 'front',
+                'motion_reference': REAR_ID if ctx.rear_enabled else FRONT_ID,
                 'use_cuda': False,
                 'executor_threads': 1, 'opencv_threads': 2,
                 **ctx.tracker_overrides,
@@ -89,7 +90,7 @@ def occupancy(ctx):
     # Camera lists/lenses come from the rig below, not the package's sample mounts.
     defaults = {key: value for key, value in
                 node_parameters('occupancy.yaml', 'monoscale_occupancy_grid_map').items()
-                if key not in ('cameras', 'image_topics', 'info_topics', 'front', 'rear')}
+                if key not in ('cameras', 'image_topics', 'info_topics', FRONT_ID, REAR_ID)}
     parameters = {
         **defaults,
         'use_sim_time': ctx.sim_time,
@@ -118,16 +119,18 @@ def occupancy(ctx):
             ('occupancy_max_odom_translation_m', 'max_odom_interpolation_translation_m', float),
             ('occupancy_max_odom_yaw_deg', 'max_odom_interpolation_yaw_deg', float),
             ('occupancy_image_quality_gate_mode', 'image_quality_gate_mode', str),
-            ('occupancy_image_quality_min_sharpness', 'image_quality_min_sharpness', float))),
+            ('occupancy_image_quality_min_sharpness', 'image_quality_min_sharpness', float),
+            ('occupancy_image_quality_sample_width', 'image_quality_sample_width', int),
+            ('occupancy_image_quality_laplacian_ksize', 'image_quality_laplacian_ksize', int))),
         'extent_mode': args.arg('map_extent_mode'),
         **{name: float(world[key]) for name, key in (
             ('map_x_min_m', 'x_min_m'), ('map_x_max_m', 'x_max_m'),
             ('map_y_min_m', 'y_min_m'), ('map_y_max_m', 'y_max_m'),
             ('map_resolution_m', 'occupancy_resolution_m'))},
-        **occupancy_camera('front', ctx.setup.front, FRONT_FRAME),
+        **occupancy_camera(FRONT_ID, ctx.setup.front, FRONT_FRAME),
     }
     if ctx.rear_enabled:
-        parameters.update(occupancy_camera('rear', ctx.setup.rear, REAR_FRAME))
+        parameters.update(occupancy_camera(REAR_ID, ctx.setup.rear, REAR_FRAME))
     return ctx.make_node(
         package='monoscale_occupancy_grid_map', executable='sweep_node',
         name='monoscale_occupancy_grid_map', output='screen',
