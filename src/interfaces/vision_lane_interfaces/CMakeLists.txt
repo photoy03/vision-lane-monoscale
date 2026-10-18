@@ -15,10 +15,15 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LocalOccupancyGrid.msg"
   "msg/PipelineProgress.msg"
   "msg/MapSnapshotMeta.msg"
+  "msg/MapSnapshotMetaV1.msg"
   "msg/LaneMapSnapshot.msg"
+  "msg/LaneMapSnapshotV1.msg"
   "msg/OccupancySnapshot.msg"
+  "msg/OccupancySnapshotV1.msg"
   "msg/FusedMap.msg"
+  "msg/FusedMapV3.msg"
   "msg/FusedMapV2.msg"
+  "msg/PoseProvenanceV1.msg"
   "msg/PoseProvenance.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs std_msgs
 )

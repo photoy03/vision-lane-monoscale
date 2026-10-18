@@ -47,6 +47,8 @@ OUTPUT_TOPICS = (
     "/mapping/fused_map/status",
     "/localization/kinematic_state/provenance",
     "/parking/cpp/status",
+    "/localization/monoscale_raw/status",
+    "/localization/monoscale_raw/solve_info",
 )
 READY_BASE = ("tracking front on", "v5.2 C++ node:", "CPU line map:",
               "lane odom filter:")
@@ -216,6 +218,9 @@ def main() -> int:
                              "none: plain sqlite3 like runs before 2026-10-17")
     parser.add_argument("--playback-rate", type=float, default=1.0,
                         help="bag playback rate; time metrics are only comparable at the same rate")
+    parser.add_argument("--camera-input-suffix", action="append", default=[], metavar="CAMERA=SUFFIX",
+                        help="fault injection: the republisher of CAMERA (front/rear) reads <bag topic><SUFFIX>; "
+                             "a relay (tools/run/camera_cut_relay.py) must feed it")
     parser.add_argument("--rmw", choices=("", "rmw_fastrtps_cpp", "rmw_cyclonedds_cpp"), default="",
                         help="ROS middleware for every process of this run (empty: inherit)")
     parser.add_argument("--sample-plan", type=Path, help="frozen sample_manifest.json")
@@ -258,7 +263,8 @@ def main() -> int:
         "lane_pending_commit_budget",
         "tracker_opencv_threads", "tracker_executor_threads", "odom_executor_threads",
         "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
-        "lane_mapping_owner", "launch_fusion", "fusion_provenance_topic", "lane_map_observation_topic",
+        "lane_mapping_owner", "launch_fusion", "fusion_provenance_topic", "lane_map_observation_topic", "odom_lone_camera_solve",
+        "occupancy_camera_liveness", "occupancy_camera_dead_sec",
     }
     launch_overrides: dict[str, str] = {}
     for item in args.launch_arg:
@@ -271,6 +277,7 @@ def main() -> int:
         if not re.fullmatch(pattern, value):
             raise SystemExit(f"invalid value for --launch-arg {name}: {value!r}")
         if name in {"launch_occupancy", "launch_lane_fusion", "tracker_motion_prediction", "tracker_motion_warp",
+                    "odom_lone_camera_solve", "occupancy_camera_liveness",
                     "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness"}:
             if value.lower() not in {"true", "false"}:
                 raise SystemExit(f"{name} must be true or false")
@@ -346,10 +353,16 @@ def main() -> int:
         "lane_detection/compressed_image_replay_node"
     if not republisher.is_file():
         raise SystemExit(f"C++ compressed-image replay node is not built: {republisher}")
-    front_repub = [str(republisher), "--ros-args", "-p", f"input_topic:={TOPICS[0]}",
+    suffix = {}
+    for item in args.camera_input_suffix:
+        camera, _, value = item.partition("=")
+        if camera not in ("front", "rear") or not re.fullmatch(r"_[A-Za-z0-9_]+", value):
+            raise SystemExit(f"invalid --camera-input-suffix: {item!r}")
+        suffix[camera] = value
+    front_repub = [str(republisher), "--ros-args", "-p", f"input_topic:={TOPICS[0]}{suffix.get('front', '')}",
                    "-p", "output_topic:=/sensing/camera/front/fisheye/image_raw", "-p", "use_sim_time:=true",
                    "-r", "__node:=recovery_front_republisher"]
-    rear_repub = [str(republisher), "--ros-args", "-p", f"input_topic:={TOPICS[1]}",
+    rear_repub = [str(republisher), "--ros-args", "-p", f"input_topic:={TOPICS[1]}{suffix.get('rear', '')}",
                   "-p", "output_topic:=/sensing/camera/rear/fisheye/image_raw", "-p", "use_sim_time:=true",
                   "-r", "__node:=recovery_rear_republisher"]
     if args.instrumentation == "on":
@@ -377,6 +390,7 @@ def main() -> int:
         "schema_version": 1, "run_id": args.run_id,
         "pending_recovery": args.pending == "on", "bag_path_read_only": str(bag),
         "launch_overrides": launch_overrides,
+        "camera_input_suffix": suffix,
         "stage_diagnostics": args.instrumentation == "on",
         "sample_plan": str(sample_plan) if sample_plan else None,
         "sample_plan_sha256": sha256(sample_plan) if sample_plan else None,
@@ -385,8 +399,9 @@ def main() -> int:
         "recorded_output_topics": list(OUTPUT_TOPICS) if args.record_outputs == "on" else [],
         "playback_rate": args.playback_rate,
         # Layout of /mapping/snapshot/* and /mapping/fused_map: 2 = clock_generation,
-        # 3 = FusedMap pose provenance (older FusedMap is read as FusedMapV2).
-        "snapshot_format": 3,
+        # 3 = FusedMap pose provenance (older FusedMap is read as FusedMapV2),
+        # 4 = MapSnapshotMeta.excluded_cameras (older layouts: *V1 snapshots, FusedMapV3).
+        "snapshot_format": 4,
         "rmw_implementation": env.get("RMW_IMPLEMENTATION", "") or "default(rmw_fastrtps_cpp)",
         "outputs_compression": args.outputs_compression if args.record_outputs == "on" else None,
         "ros_domain_id": args.domain_id,
@@ -488,14 +503,17 @@ def main() -> int:
             path = dump_dir / (node.strip("/").replace("/", "_") + ".yaml")
             # Node discovery through the CLI is occasionally late ("Node not
             # found" or a timeout) right after launch; retry before giving up.
-            for attempt in range(3):
+            # Three tries were not always enough on a loaded host (2026-10-19:
+            # /global_mapping_cpp and /lane_map_fusion needed all three in
+            # passing runs and failed in some), so up to eight.
+            for attempt in range(8):
                 try:
                     dump = run_capture(repo, ["ros2", "param", "dump", "--no-daemon", node], env, timeout=45.0)
                 except subprocess.TimeoutExpired:
                     dump = subprocess.CompletedProcess([], 124, "param dump timed out\n")
                 if dump.returncode == 0:
                     break
-                time.sleep(2.0)
+                time.sleep(3.0)
             manifest.setdefault("parameter_dump_attempts", {})[node] = attempt + 1
             path.write_text(dump.stdout, encoding="utf-8")
             manifest["parameter_dumps"][node] = {"exit_code": dump.returncode, "path": str(path)}
@@ -581,7 +599,7 @@ def main() -> int:
             if manifest["sample_process_exit_code"] != 0:
                 raise RuntimeError("map sampler did not finish cleanly; inspect sampler.log")
         if recorder_proc is not None:
-            manifest["process_exit_codes"]["recorder"] = stop_owned(recorder_proc, 30.0)
+            manifest["process_exit_codes"]["recorder"] = stop_owned(recorder_proc, 180.0)
             recorder_proc = None
         manifest["process_exit_codes"]["front_republisher"] = stop_owned(front_proc)
         manifest["process_exit_codes"]["rear_republisher"] = stop_owned(rear_proc)
@@ -591,6 +609,19 @@ def main() -> int:
         launch_proc = None
         manifest["status"] = ("COMPLETE" if all(code == 0 for code in manifest["process_exit_codes"].values())
                               else "NONZERO_EXIT")
+        # The recorder can exit 0 with its compressed file cut short (seen
+        # 2026-10-17 and 2026-10-19). A run whose outputs cannot be read is not
+        # complete; the batch scripts then try it again.
+        if manifest["status"] == "COMPLETE" and args.record_outputs == "on":
+            broken = []
+            for packed in sorted((output / "outputs_bag").glob("*.zstd")):
+                check = subprocess.run(["zstd", "-t", "-q", str(packed)], capture_output=True, text=True,
+                                       check=False)
+                if check.returncode != 0:
+                    broken.append(packed.name)
+            manifest["outputs_integrity"] = {"checked": True, "broken": broken}
+            if broken:
+                manifest["status"] = "OUTPUTS_TRUNCATED"
         manifest["shutdown_summaries"] = [str(p) for p in output.glob("*.recovery_events.csv.summary.json")]
         manifest["fusion_result_ledgers"] = [str(p) for p in output.glob("registered_keyframes*.recovery_results.jsonl")]
         result_code = 0 if manifest["status"] == "COMPLETE" else 2
@@ -611,7 +642,7 @@ def main() -> int:
         if player_proc is not None:
             manifest["process_exit_codes"]["player"] = stop_owned(player_proc, 5.0)
         if recorder_proc is not None:
-            manifest["process_exit_codes"]["recorder"] = stop_owned(recorder_proc, 30.0)
+            manifest["process_exit_codes"]["recorder"] = stop_owned(recorder_proc, 180.0)
         if front_proc is not None:
             manifest["process_exit_codes"]["front_republisher"] = stop_owned(front_proc, 5.0)
         if rear_proc is not None:

@@ -213,6 +213,15 @@ class OdomStabilizer(Node):
         self.provenance_pub = self.create_publisher(
             PoseProvenance, self.output_topic + "/provenance", 200)
         self.provenance_counts = {"raw": 0, "interpolated": 0, "imu_fill": 0, "unknown": 0}
+        # Which cameras solved each raw pose (odometry <input>/solve_info, stamp-matched).
+        # The pose itself never waits; its provenance waits at most 0.5 s for this.
+        self.solve_cameras = {}            # raw stamp (s) -> "front,rear" / "rear" / ...
+        self.solve_info_seen = False
+        self.pending_provenance = deque()  # (msg, kind, lower, upper, deadline_ns)
+        self.raw_cameras_counts = {}
+        self.solve_info_sub = self.create_subscription(
+            String, self.input_topic + "/solve_info", self.on_solve_info, 200)
+        self.provenance_timer = self.create_timer(0.05, self.flush_provenance)
         self.watermark = progress.MonotonicWatermark()
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
         self.sub = self.create_subscription(
@@ -558,8 +567,48 @@ class OdomStabilizer(Node):
             stamp = getattr(msg, field)
             stamp.sec = int(math.floor(sec))
             stamp.nanosec = min(int(round((sec - stamp.sec) * 1e9)), 999_999_999)
-        self.provenance_pub.publish(msg)
         self.provenance_counts[kind if kind in self.provenance_counts else "unknown"] += 1
+        if not self.solve_info_seen:
+            self.provenance_pub.publish(msg)   # odometry without solve_info: as before
+            return
+        deadline = self.get_clock().now().nanoseconds + 500_000_000
+        self.pending_provenance.append((msg, raw_lower, raw_upper, deadline))
+        self.flush_provenance()
+
+    def solve_cameras_at(self, sec):
+        """Cameras for the raw pose at `sec` (float stamps match within 0.1 ms), or None."""
+        best = None
+        for stamp, cameras in self.solve_cameras.items():
+            if abs(stamp - sec) <= 1e-4:
+                best = cameras
+                break
+        return best
+
+    def on_solve_info(self, msg):
+        info = json.loads(msg.data)
+        self.solve_info_seen = True
+        self.solve_cameras[info["stamp_ns"] * 1e-9] = info["cameras"] or "none"
+        while len(self.solve_cameras) > 2000:
+            self.solve_cameras.pop(next(iter(self.solve_cameras)))
+        self.flush_provenance()
+
+    def flush_provenance(self):
+        now = self.get_clock().now().nanoseconds
+        while self.pending_provenance:
+            msg, lower, upper, deadline = self.pending_provenance[0]
+            ends = [self.solve_cameras_at(lower), self.solve_cameras_at(upper)]
+            if None in ends and now < deadline:
+                break
+            if None in ends:
+                msg.raw_cameras = "unknown"
+            else:
+                a, b = ends
+                msg.raw_cameras = a if len(a.split(",")) <= len(b.split(",")) else b
+                if a != b and len(a.split(",")) == len(b.split(",")):
+                    msg.raw_cameras = a + "/" + b
+            self.raw_cameras_counts[msg.raw_cameras] = self.raw_cameras_counts.get(msg.raw_cameras, 0) + 1
+            self.provenance_pub.publish(msg)
+            self.pending_provenance.popleft()
 
     def publish_progress(self):
         # Watermark: the newest pose published. Poses are emitted in increasing
@@ -594,6 +643,7 @@ class OdomStabilizer(Node):
             "imu_stationary_resampled_total": self.imu_stationary_resampled_published,
             "imu_fill_gaps_accepted_total": self.imu_fill_gaps_accepted,
             "provenance_counts": self.provenance_counts,
+            "raw_cameras_counts": self.raw_cameras_counts,
             "imu_fill_gaps_rejected_total": self.imu_fill_gaps_rejected,
             "imu_fill_published_total": self.imu_fill_published,
             "pending_vision_stamps": len(self.pending_vision_stamps),

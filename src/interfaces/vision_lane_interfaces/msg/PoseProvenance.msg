@@ -11,3 +11,7 @@ string resample_kind               # the stabilizer's own name; "raw" for a pass
 bool covariance_valid              # the standard pose.covariance means something only when true (unknown: zero matrix)
 builtin_interfaces/Time raw_lower  # the raw measurements this pose was made from (equal for RAW)
 builtin_interfaces/Time raw_upper
+# Cameras whose own solve produced the raw measurement(s) behind this pose ("front,rear",
+# "rear", ...); for a blend the weaker end (fewer cameras). "unknown" when the odometry did
+# not say within 0.5 s; empty from an odometry that does not report it (docs/C2_CRITERIA_KO.md 7.2-6).
+string raw_cameras

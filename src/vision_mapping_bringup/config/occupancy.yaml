@@ -14,6 +14,8 @@ launch_arguments:
   occupancy_free_to_occupied: ''
   occupancy_occlusion_aware: ''
   occupancy_max_pending_keyframes: ''
+  occupancy_camera_liveness: ''
+  occupancy_camera_dead_sec: ''
   occupancy_max_odom_gap_sec: ''
   occupancy_max_odom_translation_m: ''
   occupancy_max_odom_yaw_deg: ''

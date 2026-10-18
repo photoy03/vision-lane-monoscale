@@ -46,7 +46,15 @@ def odometry(ctx):
                 'publish_tf': False, 'publish_map_to_odom': False,
                 'executor_threads': ctx.odom_executor_threads,
                 'mapping_min_period_sec': 0.2,
+                **lone_camera(ctx),
             }])
+
+
+def lone_camera(ctx):
+    value = ctx.args.arg('odom_lone_camera_solve').strip().lower()
+    if value not in ('', 'true', 'false'):
+        raise ValueError('odom_lone_camera_solve must be true, false or empty')
+    return {'lone_camera_solve_enabled': value == 'true'} if value else {}
 
 
 def stabilizer(ctx):
@@ -104,6 +112,8 @@ def occupancy(ctx):
             ('occupancy_free_to_occupied', 'free_to_occupied', float),
             ('occupancy_occlusion_aware', 'occlusion_aware', float),
             ('occupancy_max_pending_keyframes', 'max_pending_keyframes', int),
+            ('occupancy_camera_liveness', 'camera_liveness_enabled', bool),
+            ('occupancy_camera_dead_sec', 'camera_dead_sec', float),
             ('occupancy_max_odom_gap_sec', 'max_odom_interpolation_gap_sec', float),
             ('occupancy_max_odom_translation_m', 'max_odom_interpolation_translation_m', float),
             ('occupancy_max_odom_yaw_deg', 'max_odom_interpolation_yaw_deg', float),

@@ -36,6 +36,7 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
+#include "monoscale_occupancy_grid_map/camera_liveness.hpp"
 #include "monoscale_occupancy_grid_map/pose_interpolation.hpp"
 #include "monoscale_pose/pose_timeline.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
@@ -150,6 +151,13 @@ public:
     const int min_blob_reference_pixels = declare_parameter<int>(
       "min_blob_reference_pixels", 80);
     max_pending_keyframes_ = declare_parameter<int>("max_pending_keyframes", 2);
+    // Camera liveness (C-2 6): off keeps complete_through bound by every
+    // camera, as before. dead_sec: the widest raw image gap of the 2026-09
+    // recordings (5.66 s, 0928 front) + 1 s, so sparse images never count as a
+    // dead camera.
+    liveness_ = monoscale_occupancy::CameraLiveness(
+      declare_parameter<bool>("camera_liveness_enabled", false),
+      static_cast<int64_t>(declare_parameter<double>("camera_dead_sec", 7.0) * 1e9));
     const double free_cost_max = declare_parameter<double>(
       "free_cost_max", 60.0);
     const double free_cap = declare_parameter<double>("free_cap", 8.0);
@@ -502,6 +510,14 @@ private:
     std::lock_guard<std::mutex> guard(mutex_);
     auto & newest = newest_image_ns_[name];
     newest = std::max(newest, rclcpp::Time(message.header.stamp).nanoseconds());
+    // Newest first, then the late check: a camera back from the dead is in
+    // place with its first image, and only images already behind the
+    // published complete_through are discarded (always kept with liveness off).
+    if (!liveness_.arrive(name, now().nanoseconds(), rclcpp::Time(message.header.stamp).nanoseconds(),
+      published_through_ns_))
+    {
+      return;
+    }
     // Hold the frame rather than resolving its pose now. The odometry is
     // solved from these very images, so its stamps can never lead them: at
     // arrival every frame is newer than the newest pose, `pose_at` returns
@@ -695,6 +711,11 @@ private:
       const double elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - sweep_start).count();
       {
+        // C-4 measurement: how long the worker holds map_mutex_ per keyframe.
+        std::lock_guard<std::mutex> stats(lock_stats_mutex_);
+        if (lock_hold_ms_.size() < 20000) {lock_hold_ms_.push_back(elapsed);}
+      }
+      {
         std::lock_guard<std::mutex> guard(mutex_);
         if (stale || job.time_line != time_line_) {
           ++time_line_drops_;
@@ -735,6 +756,8 @@ private:
     odometry_ = monoscale_pose::PoseTimeline{1.0e6, 4000};
     jobs_.clear();
     newest_image_ns_.clear();
+    liveness_ = monoscale_occupancy::CameraLiveness(liveness_.enabled(), liveness_dead_ns());
+    published_through_ns_ = 0;
     versions_.clear();
     for (const auto & name : cameras_) {
       grids_[name].reset(settings_);
@@ -776,6 +799,7 @@ private:
     uint32_t queue = 0;
     uint64_t processed = 0;
     std::vector<std::pair<std::string, uint64_t>> discards;
+    std::vector<std::string> excluded;  // cameras left out by liveness
     uint64_t dropped() const
     {
       uint64_t total = 0;
@@ -807,12 +831,27 @@ private:
         // Every configured camera must have delivered before anything is final.
         newest = (name == cameras_.front()) ? camera_newest : std::min(newest, camera_newest);
       }
+      if (liveness_.enabled()) {
+        // A camera that stopped delivering no longer holds everything back.
+        const auto before = liveness_.deaths();
+        newest = liveness_.bound(cameras_, now().nanoseconds(), published_through_ns_, &out.excluded);
+        for (const auto & [name, count] : liveness_.deaths()) {
+          const auto old = before.find(name);
+          if (old == before.end() || old->second != count) {
+            RCLCPP_WARN(get_logger(), "camera %s declared dead (no image for %.1f s): left out of complete_through",
+              name.c_str(), camera_dead_sec());
+          }
+        }
+      }
       out.processed = static_cast<uint64_t>(keyframes_);
       out.discards = {
         {"pose_gap", static_cast<uint64_t>(pending_gap_dropped_)},
         {"pose_expired", static_cast<uint64_t>(pending_expired_dropped_)},
         {"overflow", static_cast<uint64_t>(pending_overflow_dropped_)},
         {"blur", static_cast<uint64_t>(blur_rejected_)}};
+      if (liveness_.enabled()) {
+        out.discards.push_back({"late_after_revival", liveness_.late_after_revival()});
+      }
     }
     {
       std::lock_guard<std::mutex> guard(job_mutex_);
@@ -822,6 +861,10 @@ private:
       out.discards.push_back({"job_dropped", static_cast<uint64_t>(jobs_dropped_)});
     }
     out.watermark = watermark_.update(pipeline_progress::watermark_from(oldest, newest));
+    {
+      std::lock_guard<std::mutex> guard(mutex_);
+      published_through_ns_ = out.watermark;
+    }
     return out;
   }
 
@@ -856,7 +899,15 @@ private:
     uint64_t exact_version = 0;
     bool exact_available = true;
     {
+      const auto wait_start = std::chrono::steady_clock::now();
       std::lock_guard<std::mutex> guard(map_mutex_);
+      {
+        // C-4 measurement: how long publishing waited for the worker's lock.
+        const double waited = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - wait_start).count();
+        std::lock_guard<std::mutex> stats(lock_stats_mutex_);
+        if (publish_wait_ms_.size() < 20000) {publish_wait_ms_.push_back(waited);}
+      }
       published = settings_.fixed_extent ?
         monoscale_occupancy::publish(
           settings_, grids, monoscale_occupancy::legacy_window(settings_)) :
@@ -891,6 +942,7 @@ private:
       snapshot.meta = map_snapshot::fill_meta(
         "occupancy", snapshot_session_, time_line_, contract_.epoch(), exact_version, sequence,
         exact_content_max, done.watermark, done.discards, contract_.late_changes());
+      snapshot.meta.excluded_cameras = done.excluded;
       trim_versions();
     }
     const cv::Mat & values = published.values;
@@ -972,6 +1024,34 @@ private:
       queued = jobs_.size();
       busy = worker_busy_;
       dropped = jobs_dropped_;
+    }
+    if (liveness_.enabled()) {
+      std::string deaths, revivals;
+      uint64_t late = 0;
+      // report() already holds mutex_.
+      for (const auto & [name, n] : liveness_.deaths()) {deaths += " " + name + "=" + std::to_string(n);}
+      for (const auto & [name, n] : liveness_.revivals()) {revivals += " " + name + "=" + std::to_string(n);}
+      late = liveness_.late_after_revival();
+      RCLCPP_INFO(get_logger(), "camera_liveness: dead_sec=%.1f deaths[%s] revivals[%s] late_after_revival=%lu",
+        camera_dead_sec(), deaths.c_str(), revivals.c_str(), static_cast<unsigned long>(late));
+    }
+    {
+      std::vector<double> hold, wait;
+      {
+        std::lock_guard<std::mutex> stats(lock_stats_mutex_);
+        hold = lock_hold_ms_;
+        wait = publish_wait_ms_;
+      }
+      const auto q = [](std::vector<double> & v, double p) {
+        if (v.empty()) {return -1.0;}
+        std::sort(v.begin(), v.end());
+        return v[static_cast<size_t>(p * static_cast<double>(v.size() - 1))];
+      };
+      RCLCPP_INFO(
+        get_logger(),
+        "sweep_lock: hold_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] publish_wait_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] jobs_dropped=%ld",
+        hold.size(), q(hold, 0.5), q(hold, 0.9), q(hold, 1.0),
+        wait.size(), q(wait, 0.5), q(wait, 0.9), q(wait, 1.0), dropped);
     }
     RCLCPP_INFO(
       get_logger(),
@@ -1056,11 +1136,17 @@ private:
 
   std::mutex mutex_;
   std::mutex map_mutex_;
+  std::mutex lock_stats_mutex_;
+  std::vector<double> lock_hold_ms_, publish_wait_ms_;  // guarded by lock_stats_mutex_
   std::mutex job_mutex_;
   std::condition_variable job_ready_;
   std::deque<KeyframeJob> jobs_;
   int64_t inflight_stamp_ns_ = 0;
   std::map<std::string, int64_t> newest_image_ns_;
+  monoscale_occupancy::CameraLiveness liveness_{false, 0};  // guarded by mutex_
+  int64_t published_through_ns_{0};  // last complete_through claimed; guarded by mutex_
+  int64_t liveness_dead_ns() const {return static_cast<int64_t>(get_parameter("camera_dead_sec").as_double() * 1e9);}
+  double camera_dead_sec() const {return get_parameter("camera_dead_sec").as_double();}
   pipeline_progress::MonotonicWatermark watermark_;
   map_snapshot::Contract contract_;  // guarded by map_mutex_
   clock_generation::Tracker clock_generation_;

@@ -6,6 +6,9 @@
 #   bash tools/run/supervise_launch.sh live.launch.py device:=... imu_device:=...
 # Restart limit: VISION_SUPERVISE_MAX_RESTARTS (5) within VISION_SUPERVISE_WINDOW_SEC (600).
 # A full restart is not seamless: poses pause and the map starts over.
+# Each start gets VISION_RESTART_INDEX (0 = first start) and, after a restart,
+# VISION_RESTART_REASON (the request that caused it, one line): map_assembler
+# reports "recovering" instead of "starting" until its first fused map.
 support_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 source /opt/ros/humble/setup.bash
 source "$support_root/install/setup.bash"
@@ -30,9 +33,12 @@ say() { echo "[supervise_launch] $*" >&2; }
 
 restarts=()   # start times of recent restarts
 start=0
+reason=""
 while true; do
   start=$((start + 1))
   export VISION_RUN_ID="run_$(date +%Y%m%d_%H%M%S)_$$_${start}"
+  export VISION_RESTART_INDEX=$((start - 1))
+  export VISION_RESTART_REASON=$reason
   rm -f "$state_dir"/*.restart "$state_dir"/*.tmp
   say "starting $VISION_RUN_ID"
   "${launch_command[@]}" "$@" &
@@ -53,6 +59,7 @@ while true; do
     rm -rf "$state_dir"; exit "$(( code == 0 ? 1 : code ))"
   fi
   say "restart requested: $(cat "$request")"
+  reason=$(tr '\n' ' ' < "$request")
 
   now=$(date +%s)
   recent=()

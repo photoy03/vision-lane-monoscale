@@ -3,5 +3,8 @@
 # launch_arguments: command-line knobs. An empty value means "use the package default".
 launch_arguments:
   odom_executor_threads: ''
+  # Lone-camera solve when the other camera has a hole (docs/C2_CRITERIA_KO.md);
+  # empty = package default (false until the CARLA ATE check).
+  odom_lone_camera_solve: ''
   odom_profile: bounded
   imu_accel_shadow: 'false'

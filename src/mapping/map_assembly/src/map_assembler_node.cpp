@@ -3,6 +3,7 @@
 // and docs/STRUCTURE_KO.md "통합 지도"). Control pose and TF never pass here.
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -58,12 +59,18 @@ class MapAssembler : public rclcpp::Node {
     lane_sub_ = create_subscription<LaneSnapshot>(map_snapshot::kLaneTopic, snapshots,
       [this](LaneSnapshot::ConstSharedPtr m) {
         check_time_line();
-        if (current(m->meta)) lanes_.add(now().nanoseconds(), meta_of(m->meta), m);
+        if (current(m->meta)) {
+          lanes_.add(now().nanoseconds(), meta_of(m->meta), m);
+          readiness_.lane(m->meta.valid, now().nanoseconds());
+        }
       });
     occupancy_sub_ = create_subscription<OccupancySnapshot>(map_snapshot::kOccupancyTopic, snapshots,
       [this](OccupancySnapshot::ConstSharedPtr m) {
         check_time_line();
-        if (current(m->meta)) occupancy_.add(now().nanoseconds(), meta_of(m->meta), m);
+        if (current(m->meta)) {
+          occupancy_.add(now().nanoseconds(), meta_of(m->meta), m);
+          readiness_.occupancy(m->meta.valid, now().nanoseconds());
+        }
       });
     pose_sub_ = create_subscription<nav_msgs::msg::Odometry>(pose_topic, rclcpp::QoS(200).reliable(),
       [this](nav_msgs::msg::Odometry::ConstSharedPtr m) { check_time_line(); on_pose(*m); });
@@ -94,6 +101,24 @@ class MapAssembler : public rclcpp::Node {
     monoscale_pose::PoseMatch match;
   };
 
+  static int64_t steady_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+  static std::string env_or(const char *name, const std::string &fallback) {
+    const char *v = std::getenv(name);
+    return v ? std::string(v) : fallback;
+  }
+  static std::string json_escape(const std::string &in) {
+    std::string out;
+    for (const char c : in) {
+      if (c == '"' || c == '\\') { out += '\\'; out += c; }
+      else if (c == '\n' || c == '\r' || c == '\t') out += ' ';
+      else if (static_cast<unsigned char>(c) >= 0x20) out += c;
+    }
+    return out;
+  }
+
   static int64_t seconds_ns(double s) { return std::isfinite(s) ? static_cast<int64_t>(s * 1e9) : -1; }
 
   // Only snapshots of this node's time line enter the histories.
@@ -114,6 +139,7 @@ class MapAssembler : public rclcpp::Node {
     gate_->reset();
     last_t_ = 0;
     ++time_line_resets_;
+    readiness_.generation_reset(steady_ns());
     RCLCPP_WARN(get_logger(), "ROS clock jumped back: fused map restarts on clock generation %lu",
       static_cast<unsigned long>(clock_generation_.value()));
   }
@@ -135,6 +161,7 @@ class MapAssembler : public rclcpp::Node {
       sample.covariance_source_valid = true;
     }
     if (!poses_.insert(sample)) ++pose_rejected_;
+    else readiness_.pose(now().nanoseconds());
   }
 
   void on_provenance(const vision_lane_interfaces::msg::PoseProvenance &m) {
@@ -155,8 +182,9 @@ class MapAssembler : public rclcpp::Node {
              const std::vector<std::string> &stale, int64_t now_ns) {
     Candidate c{t, lane, occupancy, stale, poses_.lookup(t, pose_max_gap_, pose_max_gap_, false)};
     const auto &match = c.match;
-    if (gate_->offer(t, match.valid, match.lower_stamp_ns, match.upper_stamp_ns, c, now_ns, provenance_))
-      emit(c);
+    const bool ready = gate_->offer(t, match.valid, match.lower_stamp_ns, match.upper_stamp_ns, c, now_ns, provenance_);
+    if (auto released = gate_->take_released()) emit(released->payload);
+    if (ready) emit(c);
   }
 
   void tick() {
@@ -244,6 +272,7 @@ class MapAssembler : public rclcpp::Node {
     out.pose_position_variance = out.pose_covariance_valid ? match.position_variance : -1.0;
     out.pose_yaw_variance = out.pose_covariance_valid ? match.yaw_variance : -1.0;
     fused_pub_->publish(out);
+    readiness_.published(steady_ns());
     last_t_ = t;
     last_lane_age_ms_ = (t - lane.meta.content_max) * 1e-6;
     last_occupancy_age_ms_ = (t - occupancy.meta.content_max) * 1e-6;
@@ -263,6 +292,8 @@ class MapAssembler : public rclcpp::Node {
       << ",\"provenance_expired_lower\":" << w.expired_lower << ",\"provenance_expired_upper\":" << w.expired_upper
       << ",\"provenance_expired_both\":" << w.expired_both << ",\"provenance_superseded\":" << w.superseded
       << ",\"provenance_reset_discarded\":" << w.reset_discarded
+      << ",\"provenance_released_for_poseless\":" << w.released_for_poseless
+      << ",\"provenance_dropped_while_holding\":" << w.dropped_while_holding
       << ",\"clock_generation\":" << clock_generation_.value()
       << ",\"time_line_resets\":" << time_line_resets_ << ",\"generation_mismatch\":" << generation_mismatch_
       << ",\"pose_stale\":" << pose_stale_
@@ -270,12 +301,27 @@ class MapAssembler : public rclcpp::Node {
       << ",\"occupancy_timeline_resets\":" << occupancy_.timeline_resets()
       << ",\"newest_pose_ns\":" << newest_pose << ",\"pose_missing\":" << pose_missing_
       << ",\"pose_rejected\":" << pose_rejected_ << ",\"frame_mismatch\":" << frame_mismatch_
-      << ",\"lane_age_ms\":" << last_lane_age_ms_ << ",\"occupancy_age_ms\":" << last_occupancy_age_ms_ << "}";
+      << ",\"lane_age_ms\":" << last_lane_age_ms_ << ",\"occupancy_age_ms\":" << last_occupancy_age_ms_;
+    // Readiness (C-3): added next to the unchanged "state".
+    s << ",\"phase\":\"" << readiness_.phase_name() << "\",\"restart_index\":" << readiness_.restart_index()
+      << ",\"restart_reason\":\"" << json_escape(restart_reason_) << "\",\"run_id\":\"" << json_escape(run_id_) << "\""
+      << ",\"missing\":[";
+    const auto missing = readiness_.missing();
+    for (size_t i = 0; i < missing.size(); ++i) s << (i ? "," : "") << "\"" << missing[i] << "\"";
+    s << "],\"ready_after_ms\":" << readiness_.ready_after_ms()
+      << ",\"first_valid_ns\":{\"lane\":" << readiness_.first_lane_ns()
+      << ",\"occupancy\":" << readiness_.first_occupancy_ns() << ",\"pose\":" << readiness_.first_pose_ns() << "}"
+      << ",\"readiness_generation_resets\":" << readiness_.generation_resets() << "}";
     std_msgs::msg::String msg;
     msg.data = s.str();
     status_pub_->publish(msg);
   }
 
+  // Set by tools/run/supervise_launch.sh: 0 (or unset) on a first start.
+  std::string restart_reason_{env_or("VISION_RESTART_REASON", "")};
+  std::string run_id_{env_or("VISION_RUN_ID", "")};
+  map_assembly::Readiness readiness_{
+    static_cast<uint64_t>(std::strtoull(env_or("VISION_RESTART_INDEX", "0").c_str(), nullptr, 10)), steady_ns()};
   map_assembly::LayerHistory<LaneSnapshot> lanes_;
   map_assembly::LayerHistory<OccupancySnapshot> occupancy_;
   monoscale_pose::PoseTimeline poses_{30.0};

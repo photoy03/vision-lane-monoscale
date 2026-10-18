@@ -1,4 +1,5 @@
 """tools/run/supervise_launch.sh restarts only on this run's own restart request."""
+import json
 import os
 import signal
 import subprocess
@@ -63,3 +64,13 @@ def test_ctrl_c_while_running(tmp_path):
     os.killpg(p.pid, signal.SIGINT)
     p.communicate(timeout=30)
     assert p.returncode == 0 and len(starts(tmp_path)) == 1
+
+
+def test_restart_index_and_reason_are_passed_to_each_start(tmp_path):
+    p = start(tmp_path, ['restart', 'restart', 'crash'], FAKE_ENV_LOG=str(tmp_path / 'env'))
+    p.communicate(timeout=60)
+    seen = [json.loads(line) for line in (tmp_path / 'env').read_text().splitlines()]
+    assert [s['index'] for s in seen] == ['0', '1', '2']
+    assert seen[0]['reason'] == ''
+    assert all('"reason"' in s['reason'] and '\n' not in s['reason'] for s in seen[1:])
+

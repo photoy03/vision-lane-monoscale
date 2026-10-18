@@ -22,3 +22,7 @@ uint64 late_changes
 # Cross-layer dependency: the lane map was pruned with an occupancy snapshot.
 bool depends_on_occupancy
 builtin_interfaces/Time occupancy_content_max_used
+# Cameras left out of complete_through because they stopped delivering
+# (occupancy camera liveness, C-2 6). Empty: every configured camera counted.
+# The area only an excluded camera sees is not being updated.
+string[] excluded_cameras

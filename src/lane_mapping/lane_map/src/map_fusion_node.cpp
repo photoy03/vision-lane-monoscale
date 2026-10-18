@@ -587,6 +587,9 @@ class MapFusionNode : public rclcpp::Node {
        !std::isfinite(pose.x)||!std::isfinite(pose.y)||!std::isfinite(pose.theta)) {++bad_pose_;process.outcome="REJECTED";process.reason="POSE_OR_FRAME_INVALID";return process;}
     const double age=now().seconds()-static_cast<double>(stamp)*1e-9;
     last_input_delay_ms_=age*1000.0;
+    // lane_apply_delay: one sample per input at the moment it is handled
+    // (observer_eval_C1_results_KO.md 3.3), not the 5 Hz status sample.
+    if(apply_delays_ms_.size()<50000) apply_delays_ms_.push_back(last_input_delay_ms_);
     max_input_delay_ms_=std::max(max_input_delay_ms_,last_input_delay_ms_);
     if(age<-.1) {++bad_stamp_;process.outcome="REJECTED";process.reason="FUTURE_STAMP";return process;}
     if(age>max_age_) {
@@ -751,12 +754,20 @@ class MapFusionNode : public rclcpp::Node {
       <<",\"aligned_frames\":"<<bank_.aligned<<",\"held_frames\":"<<bank_.held
       <<",\"registration_rank\":"<<bank_.last.rank
       <<",\"pose_correction\":"<<(bank_.settings().pose_registration?"true":"false")
-      <<",\"completion\":"<<completion_json()<<"}";
+      <<",\"completion\":"<<completion_json()<<apply_delay_json()<<"}";
     std_msgs::msg::String state;state.data=out.str();status_->publish(state);
     RCLCPP_INFO_THROTTLE(get_logger(),*get_clock(),3000,"LINE MAP: keyframes=%lu landmarks=%zu visible=%zu merged=%lu "
       "ambiguous=%lu invalid_pose/stamp=%lu/%lu range_pruned=%lu/%lu occupancy_pruned=%lu/%lu; odom unchanged",
       keyframes_,bank_.landmarks().size(),segments.size(),merged_,ambiguous_,bad_pose_,bad_stamp_,
       pruned_landmarks_,pruned_support_bins_,occupancy_pruned_landmarks_,occupancy_pruned_support_bins_);
+  }
+  std::string apply_delay_json() {
+    std::vector<double> d=apply_delays_ms_;
+    std::sort(d.begin(),d.end());
+    const auto at=[&d](double q){return d.empty()?-1.0:d[static_cast<size_t>(q*static_cast<double>(d.size()-1))];};
+    std::ostringstream o;
+    o<<",\"lane_apply_delay\":{\"n\":"<<d.size()<<",\"p50_ms\":"<<at(0.5)<<",\"p90_ms\":"<<at(0.9)<<"}";
+    return o.str();
   }
   std::string completion_json() {
     const auto& c=completion_.counters();
@@ -831,6 +842,7 @@ class MapFusionNode : public rclcpp::Node {
   pipeline_progress::MonotonicWatermark watermark_;
   int64_t newest_input_stamp_{0};
   lane_completion::FrameCompletion completion_{{"front"}};
+  std::vector<double> apply_delays_ms_;
   std::string output_vector_topic_;
   rclcpp::Publisher<vision_lane_interfaces::msg::PipelineProgress>::SharedPtr progress_pub_;
   rclcpp::TimerBase::SharedPtr progress_timer_;

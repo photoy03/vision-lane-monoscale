@@ -9,6 +9,10 @@ spec = importlib.util.spec_from_file_location('clock_guard', root / 'src/vision_
 log = Path(os.environ['FAKE_LOG'])
 starts = log.read_text().splitlines() if log.exists() else []
 log.write_text('\n'.join(starts + [os.environ['VISION_RUN_ID']]) + '\n')
+if os.environ.get('FAKE_ENV_LOG'):  # what the supervisor told this start
+    with open(os.environ['FAKE_ENV_LOG'], 'a') as out:
+        out.write(json.dumps({'index': os.environ.get('VISION_RESTART_INDEX'),
+                              'reason': os.environ.get('VISION_RESTART_REASON')}) + '\n')
 plan = Path(os.environ['FAKE_PLAN']).read_text().split()
 action = plan[min(len(starts), len(plan) - 1)]
 if action == 'restart':      # what clock_guard leaves behind

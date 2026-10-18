@@ -1,5 +1,7 @@
 #include <cassert>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "map_assembly/assembler.hpp"
 
@@ -178,6 +180,18 @@ int main() {
     assert(gate.offer(12 * s, true, 12 * s, 12 * s, 2, 100 * s + s / 5, buffer));
     assert(gate.counts().superseded == 1 && !gate.holding() && !gate.poll(200 * s, buffer));
   }
+  {  // A newer candidate without a pose releases the held one (its pose kept) before itself.
+    map_assembly::ProvenanceBuffer buffer;
+    map_assembly::ProvenanceGate<int> gate(s / 2);
+    assert(!gate.offer(10 * s, true, 9 * s, 11 * s, 1, 100 * s, buffer));
+    assert(!gate.offer(11 * s, true, 9 * s, 12 * s, 9, 100 * s + 1, buffer));      // dropped while holding
+    assert(gate.counts().dropped_while_holding == 1);
+    assert(gate.offer(12 * s, false, 0, 0, 2, 100 * s + s / 10, buffer));          // no pose at 12 s
+    const auto released = gate.take_released();
+    assert(released && released->payload == 1 && released->expired);
+    assert(gate.counts().released_for_poseless == 1 && gate.counts().superseded == 0 && !gate.holding());
+    assert(!gate.take_released());
+  }
   {  // Time-line reset discards the held one.
     map_assembly::ProvenanceBuffer buffer;
     map_assembly::ProvenanceGate<int> gate(s / 2);
@@ -186,6 +200,48 @@ int main() {
     assert(!gate.holding() && gate.counts().reset_discarded == 1 && !gate.poll(200 * s, buffer));
     gate.reset();
     assert(gate.counts().reset_discarded == 1);
+  }
+  {  // Readiness: first start, starting -> ready once every layer and a pose came and a map went out.
+    map_assembly::Readiness r(0, 5 * s);
+    assert(std::string(r.phase_name()) == "starting" && r.restart_index() == 0);
+    assert((r.missing() == std::vector<std::string>{"lane", "occupancy", "pose"}));
+    r.lane(false, 10 * s);  // invalid snapshots do not count
+    r.lane(true, 11 * s);
+    r.pose(11 * s);
+    assert((r.missing() == std::vector<std::string>{"occupancy"}));
+    r.occupancy(true, 12 * s);
+    r.lane(true, 13 * s);  // the first one stays
+    assert(r.missing().empty() && r.phase() == map_assembly::Readiness::Phase::kStarting);
+    r.published(7 * s + s / 2);
+    assert(std::string(r.phase_name()) == "ready" && r.ready_after_ms() == 2500.0);
+    assert(r.first_lane_ns() == 11 * s && r.first_occupancy_ns() == 12 * s && r.first_pose_ns() == 11 * s);
+    r.published(9 * s);  // later maps change nothing
+    assert(r.ready_after_ms() == 2500.0);
+  }
+  {  // Supervised restart: recovering -> ready.
+    map_assembly::Readiness r(2, 0);
+    assert(std::string(r.phase_name()) == "recovering" && r.restart_index() == 2);
+    r.lane(true, 1);
+    r.occupancy(true, 1);
+    r.pose(1);
+    r.published(s);
+    assert(std::string(r.phase_name()) == "ready" && r.ready_after_ms() == 1000.0);
+  }
+  {  // Same process, clock generation reset: back to recovering, the firsts start over.
+    map_assembly::Readiness r(0, 0);
+    r.lane(true, 50 * s);
+    r.occupancy(true, 50 * s);
+    r.pose(50 * s);
+    r.published(s);
+    r.generation_reset(100 * s);
+    assert(std::string(r.phase_name()) == "recovering" && r.generation_resets() == 1);
+    assert((r.missing() == std::vector<std::string>{"lane", "occupancy", "pose"}) && r.ready_after_ms() < 0);
+    r.lane(true, 3 * s);
+    r.occupancy(true, 3 * s);
+    r.pose(3 * s);
+    assert(r.first_lane_ns() == 3 * s);
+    r.published(104 * s);
+    assert(std::string(r.phase_name()) == "ready" && r.ready_after_ms() == 4000.0);
   }
   return 0;
 }

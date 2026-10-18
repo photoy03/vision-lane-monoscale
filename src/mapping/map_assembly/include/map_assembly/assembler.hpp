@@ -184,6 +184,11 @@ class ProvenanceGate {
   struct Counts {
     uint64_t started{0}, attached_late{0}, expired_lower{0}, expired_upper{0}, expired_both{0};
     uint64_t superseded{0}, reset_discarded{0};
+    // A newer candidate without a pose does not throw the held one away: the
+    // held one (with its pose) goes out first, UNKNOWN (observer_eval_A_stage R1).
+    uint64_t released_for_poseless{0};
+    // Newer candidates that arrived while one was held and still lacked provenance.
+    uint64_t dropped_while_holding{0};
   };
   struct Release {
     Payload payload;
@@ -203,7 +208,13 @@ class ProvenanceGate {
              int64_t now_ns, const ProvenanceBuffer &buffer) {
     if (!needs_provenance || missing(buffer, lower, upper) == 0) {
       if (pending_) {
-        ++counts_.superseded;
+        if (!needs_provenance) {
+          // The newer one has no pose; keep the held one's pose rather than lose it.
+          released_ = Release{std::move(pending_->payload), true};
+          ++counts_.released_for_poseless;
+        } else {
+          ++counts_.superseded;
+        }
         pending_.reset();
       }
       return true;
@@ -211,8 +222,18 @@ class ProvenanceGate {
     if (!pending_) {
       pending_ = Pending{t, now_ns, lower, upper, std::move(payload)};
       ++counts_.started;
+    } else {
+      ++counts_.dropped_while_holding;
     }
     return false;
+  }
+
+  // A held candidate released by offer() (newer one without a pose): emit it
+  // before the newer one so T stays increasing.
+  std::optional<Release> take_released() {
+    auto out = std::move(released_);
+    released_.reset();
+    return out;
   }
 
   // The held candidate, once its provenance is complete or its deadline passed.
@@ -247,7 +268,68 @@ class ProvenanceGate {
 
   int64_t timeout_ns_;
   std::optional<Pending> pending_;
+  std::optional<Release> released_;
   Counts counts_;
+};
+
+// Readiness after a start (C-3, observer_eval_C2_6_C3_design B). "starting"
+// on a first start, "recovering" after a supervised restart (restart_index > 0)
+// or after a clock generation reset inside the same process; either waits for
+// this generation's first valid lane and occupancy snapshot and a pose, and
+// becomes "ready" with the first fused map. first_*_ns are on the ROS clock,
+// ready_after_ms on the steady clock (the ROS clock is 0 before /clock and
+// jumps back on a replay restart).
+class Readiness {
+ public:
+  enum class Phase { kStarting, kRecovering, kReady };
+
+  explicit Readiness(uint64_t restart_index = 0, int64_t steady_now_ns = 0)
+      : restart_index_(restart_index), start_steady_ns_(steady_now_ns),
+        phase_(restart_index > 0 ? Phase::kRecovering : Phase::kStarting) {}
+
+  // Same process, new clock generation: wait for the new time line again.
+  void generation_reset(int64_t steady_now_ns) {
+    phase_ = Phase::kRecovering;
+    start_steady_ns_ = steady_now_ns;
+    first_lane_ns_ = first_occupancy_ns_ = first_pose_ns_ = 0;
+    ready_after_ms_ = -1.0;
+    ++generation_resets_;
+  }
+  void lane(bool valid, int64_t ns) { if (valid && first_lane_ns_ == 0) first_lane_ns_ = ns; }
+  void occupancy(bool valid, int64_t ns) { if (valid && first_occupancy_ns_ == 0) first_occupancy_ns_ = ns; }
+  void pose(int64_t ns) { if (first_pose_ns_ == 0) first_pose_ns_ = ns; }
+  void published(int64_t steady_now_ns) {
+    if (phase_ == Phase::kReady) return;
+    phase_ = Phase::kReady;
+    ready_after_ms_ = (steady_now_ns - start_steady_ns_) * 1e-6;
+  }
+
+  Phase phase() const { return phase_; }
+  const char *phase_name() const {
+    return phase_ == Phase::kReady ? "ready" : phase_ == Phase::kRecovering ? "recovering" : "starting";
+  }
+  // What this generation still has not delivered (empty once ready).
+  std::vector<std::string> missing() const {
+    std::vector<std::string> out;
+    if (phase_ == Phase::kReady) return out;
+    if (first_lane_ns_ == 0) out.push_back("lane");
+    if (first_occupancy_ns_ == 0) out.push_back("occupancy");
+    if (first_pose_ns_ == 0) out.push_back("pose");
+    return out;
+  }
+  uint64_t restart_index() const { return restart_index_; }
+  uint64_t generation_resets() const { return generation_resets_; }
+  double ready_after_ms() const { return ready_after_ms_; }
+  int64_t first_lane_ns() const { return first_lane_ns_; }
+  int64_t first_occupancy_ns() const { return first_occupancy_ns_; }
+  int64_t first_pose_ns() const { return first_pose_ns_; }
+
+ private:
+  uint64_t restart_index_{0}, generation_resets_{0};
+  int64_t start_steady_ns_{0};
+  Phase phase_{Phase::kStarting};
+  int64_t first_lane_ns_{0}, first_occupancy_ns_{0}, first_pose_ns_{0};
+  double ready_after_ms_{-1.0};
 };
 
 }  // namespace map_assembly
