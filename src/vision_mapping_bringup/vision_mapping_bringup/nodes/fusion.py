@@ -29,4 +29,14 @@ def nodes(ctx):
                                                     'provenance_topic': provenance_topic}]),
         ctx.make_node(package='map_assembly', executable='map_visualizer_node', name='map_visualizer',
                       output='screen', parameters=[node_parameters('runtime.yaml', 'map_visualizer'), common]),
-    ]
+    ] + viewer(ctx)
+
+
+def viewer(ctx):
+    """The fused-map image (and, before the first map, the readiness card)
+    opens with the other viewers; closing it does not stop mapping."""
+    if not ctx.args.flag('launch_viewer'):
+        return []
+    return [ctx.make_node(package='rqt_image_view', executable='rqt_image_view',
+                          name='fused_map_viewer', output='screen',
+                          arguments=['/mapping/fused_map/image'])]
