@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import csv
 import json
 import math
 from dataclasses import dataclass
@@ -525,6 +526,27 @@ def map_layers(msg, pose):
     return segments, occupancy_at
 
 
+def lane_warmup_end_ns(run: Path):
+    """Capture stamp of the first lane frame out of warm-up (profile.csv), None if unknown."""
+    path = run / "profile.csv"
+    if not path.exists():
+        return None
+    with path.open(encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("warming_up") == "0" and row.get("image_stamp_ns"):
+                return int(row["image_stamp_ns"])
+    return None
+
+
+def frame_stamp_ns(frame_id: str):
+    """Frame ids are <date>_<sec>_<ms>."""
+    parts = frame_id.split("_")
+    try:
+        return int(parts[1]) * 1_000_000_000 + int(parts[2]) * 1_000_000
+    except (IndexError, ValueError):
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--labels", required=True, help="label folder (samples.json + <frame>.json)")
@@ -548,12 +570,22 @@ def main():
             manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
             bag = str(Path(manifest["bag_path_read_only"]).resolve())
             poses, fused = load_run(run)
+            warmup_end_ns = lane_warmup_end_ns(run)
             for frame in samples["frames"]:
                 if str(Path(frame["bag"]).resolve()) != bag:
                     continue
                 label_path = labels_dir / f"{frame['id']}.json"
-                record = {"frame": frame["id"], "tags": frame["tags"], "version": version, "run": run.name,
-                          "lane_delay_s": args.lane_delay, "pass_distance_m": args.pass_distance}
+                tags = list(frame["tags"])
+                # Frames inside the lane detector's start-up warm-up cannot have lane
+                # content in any version; they are tagged warmup instead of
+                # gap_adjacent (observer_eval_C2_5c_design 1.2).
+                frame_ns = frame_stamp_ns(frame["id"])
+                in_warmup = warmup_end_ns is not None and frame_ns is not None and frame_ns < warmup_end_ns
+                if in_warmup and "gap_adjacent" in tags:
+                    tags = [t for t in tags if t != "gap_adjacent"] + ["warmup"]
+                record = {"frame": frame["id"], "tags": tags, "version": version, "run": run.name,
+                          "lane_delay_s": args.lane_delay, "pass_distance_m": args.pass_distance,
+                          "lane_warmup_end_ns": warmup_end_ns, "in_lane_warmup": in_warmup}
                 if not label_path.exists() or not json.loads(label_path.read_text(encoding="utf-8")).get("done"):
                     record["category"] = "unlabelled"
                     handle.write(json.dumps(record) + "\n")

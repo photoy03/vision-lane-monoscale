@@ -612,6 +612,31 @@ def main() -> int:
         # The recorder can exit 0 with its compressed file cut short (seen
         # 2026-10-17 and 2026-10-19). A run whose outputs cannot be read is not
         # complete; the batch scripts then try it again.
+        # Occupancy camera liveness (observer_eval_C2_6_C3_results 1.3): deaths,
+        # revivals and late images of the run; without a camera cut all three are
+        # expected to be 0, so anything else is flagged (the run still counts).
+        liveness_lines = [line for line in (output / "launch.log").read_text(errors="replace").splitlines()
+                          if "camera_liveness: dead_sec=" in line]
+        if liveness_lines:
+            last = liveness_lines[-1]
+            summary = {"line": last.split("camera_liveness: ", 1)[1]}
+            summary["unexpected"] = (not suffix) and ("deaths[]" not in last or "late_after_revival=0" not in last)
+            manifest["camera_liveness"] = summary
+            if summary["unexpected"]:
+                print(f"[{args.run_id}] WARNING: camera liveness declared a camera dead without a cut: "
+                      f"{summary['line']}", flush=True)
+        # sweep_node shutdown (C-5 11-1, observer_eval_C5_sweep_exit 3): expected a
+        # clean finish and no fatal-signal backtrace; anything else is flagged.
+        launch_text = (output / "launch.log").read_text(errors="replace")
+        sweep_lines = [line for line in launch_text.splitlines()
+                       if re.search(r"\[sweep_node-\d+\]: (process has died|process has finished cleanly)", line)]
+        manifest["sweep_exit"] = {
+            "line": sweep_lines[-1].split("]: ", 1)[-1] if sweep_lines else None,
+            "fatal_signal": "sweep_node: fatal signal" in launch_text,
+        }
+        if manifest["sweep_exit"]["fatal_signal"] or (sweep_lines and "finished cleanly" not in sweep_lines[-1]):
+            print(f"[{args.run_id}] WARNING: sweep_node did not shut down cleanly: {manifest['sweep_exit']}",
+                  flush=True)
         if manifest["status"] == "COMPLETE" and args.record_outputs == "on":
             broken = []
             for packed in sorted((output / "outputs_bag").glob("*.zstd")):

@@ -43,7 +43,9 @@ def main():
         by[d.get("run_id", "")].append((stamp, d))
     result = {}
     for run_id, rows in by.items():
-        rows.sort(key=lambda r: r[0])
+        # Within one process the clock generation only grows; the ROS clock jumps back
+        # between generations, so order by (generation, ROS time).
+        rows.sort(key=lambda r: (r[1].get("clock_generation", 0), r[0]))
         transitions, last = [], None
         for stamp, d in rows:
             key = (d.get("phase"), d.get("clock_generation"), tuple(d.get("missing", [])))

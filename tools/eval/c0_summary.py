@@ -259,7 +259,7 @@ def main():
                          f"{fmt(occ['obj_detect'])} |")
     lines += ["", "## 7. 태그별 (판정 창, pooled (a): lane_missing / occ false_free)", "",
               "| 태그 | " + " | ".join(versions) + " |", "|---|---|---|"]
-    for tag in ("grid", "gap_adjacent", "turning", "stationary"):
+    for tag in ("grid", "gap_adjacent", "turning", "stationary", "warmup"):
         cells = []
         for v in versions:
             rs = [r for r in records if r["version"] == v and tag in r["tags"]]
