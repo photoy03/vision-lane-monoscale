@@ -908,7 +908,9 @@ struct Diagnostics
   std::map<std::string, int64_t> lone_solves;
   int64_t lone_reseeds = 0;
   double first_lone_stamp = 0.0;  // capture time of the first frame taken alone
-  // Lone frames by the test that let them go: "gap" (hole/silence) or "sparse".
+  // Lone frames by the test that let them go: "gap" (hole/silence) or "sparse"
+  // on the drop path, "gap@absorb"/"sparse@absorb" just before a pair would
+  // have absorbed them.
   std::map<std::string, int64_t> lone_by_reason;
   // Each lone frame (capture stamp, camera, reason), the first 4000: offline
   // checks place them against output gaps and peer frame gaps.
@@ -922,6 +924,9 @@ struct Diagnostics
   // the frame; sparse path: between the two bracketing peer frames). Keyed by
   // the camera that went alone.
   std::map<std::string, int64_t> lone_late_peer;
+  // Lone solves made before the first pair was ever processed: the first output
+  // would then come from one camera alone (observer_eval_C2_5a_absorb 2.3).
+  int64_t lone_solves_before_first_pair = 0;
   // Heads that could still have gone alone but were evicted at the retention
   // limit (kept apart from frames_evicted).
   std::map<std::string, int64_t> lone_candidate_evicted;
@@ -1173,6 +1178,7 @@ private:
     double lower, upper;  // open interval assumed empty of peer frames
   };
   std::vector<LoneCheck> lone_checks_;
+  bool paired_once_ = false;
   // Consume `camera`'s head alone; false when it has to wait for the IMU.
   bool process_lone(size_t camera, const char * reason = "gap", double lower = 0.0, double upper = 0.0);
 

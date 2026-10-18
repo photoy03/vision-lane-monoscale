@@ -731,6 +731,7 @@ private:
     json_map(out, "lone_late_peer", d.lone_late_peer);
     json_map(out, "lone_candidate_evicted", d.lone_candidate_evicted);
     out << ",\"ready_rejections\":" << d.ready_rejections;
+    out << ",\"lone_solves_before_first_pair\":" << d.lone_solves_before_first_pair;
     json_map(out, "shadow_pairs", d.shadow_pairs);
     json_map(out, "shadow_failures", d.shadow_failures);
     const auto quantiles = [&out](const char * key, const std::map<std::string, std::vector<double>> & values) {

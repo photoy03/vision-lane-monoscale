@@ -1262,6 +1262,44 @@ void Estimator::try_process_pairs()
       continue;
     }
 
+    // A pair is chosen; the frames ahead of its picks are about to be absorbed
+    // uncompared. One whose peer has a hole or is sparse around it would have
+    // gone alone had it reached the drop path above, but the peer frame that
+    // proves it arrived together with this pair (observer_eval_C2_5a_fardrop).
+    // The oldest such head goes alone first, the same tests in the same order;
+    // the pair is picked again on the next turn.
+    if (settings_.lone_camera_solve_enabled) {
+      std::optional<size_t> alone;
+      const char * reason = "gap@absorb";
+      double lower = 0.0, upper = 0.0;
+      for (size_t i = 0; i < count; ++i) {
+        if (best_picks[i] == 0) {
+          continue;
+        }
+        if (alone.has_value() &&
+          cameras_[*alone]->queue.front().stamp <= cameras_[i]->queue.front().stamp)
+        {
+          continue;
+        }
+        double lo = 0.0, hi = 0.0;
+        if (lone_frame(i)) {
+          alone = i;
+          reason = "gap@absorb";
+        } else if (sparse_frame(i, &lo, &hi)) {
+          alone = i;
+          reason = "sparse@absorb";
+          lower = lo;
+          upper = hi;
+        }
+      }
+      if (alone.has_value()) {
+        if (!process_lone(*alone, reason, lower, upper)) {
+          return;
+        }
+        continue;
+      }
+    }
+
     const double stamp =
       std::accumulate(best_stamps.begin(), best_stamps.end(), 0.0) /
       static_cast<double>(count);
@@ -1291,6 +1329,7 @@ void Estimator::try_process_pairs()
     }
 
     ++diagnostics_.pairs_seen;
+    paired_once_ = true;
     ++frames_since_solve_;
     if (settings_.adaptive_solve_interval && !ready_to_solve()) {
       ++diagnostics_.ready_rejections;
@@ -1439,7 +1478,7 @@ bool Estimator::process_lone(size_t index, const char * reason, double lower, do
   {
     // Remember what this decision assumed so a later peer frame can prove it wrong.
     const double stamp = camera.queue.front().stamp;
-    const bool sparse = std::string(reason) == "sparse";
+    const bool sparse = std::string(reason).rfind("sparse", 0) == 0;
     for (size_t other = 0; other < cameras_.size(); ++other) {
       if (other == index) {
         continue;
@@ -1482,6 +1521,9 @@ bool Estimator::process_lone(size_t index, const char * reason, double lower, do
   std::vector<bool> participants(cameras_.size(), false);
   participants[index] = true;
   ++diagnostics_.lone_solves[camera.settings.name];
+  if (!paired_once_) {
+    ++diagnostics_.lone_solves_before_first_pair;
+  }
   process_pair(&participants);
   return true;
 }

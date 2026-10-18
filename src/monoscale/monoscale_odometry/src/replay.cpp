@@ -1472,6 +1472,7 @@ int main(int argc, char ** argv)
     for (const auto & [name, n] : diagnostics.lone_late_peer) {lone += " late_peer_" + name + "=" + std::to_string(n);}
     for (const auto & [name, n] : diagnostics.lone_candidate_evicted) {lone += " cand_evicted_" + name + "=" + std::to_string(n);}
     lone += " ready_rejections=" + std::to_string(diagnostics.ready_rejections);
+    lone += " before_first_pair=" + std::to_string(diagnostics.lone_solves_before_first_pair);
     for (const auto & e : diagnostics.lone_events) {
       std::printf("lone_event %.6f %s %s\n", e.stamp, e.camera.c_str(), e.reason.c_str());
     }

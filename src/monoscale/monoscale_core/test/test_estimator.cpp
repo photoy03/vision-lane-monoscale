@@ -962,3 +962,43 @@ TEST(LoneCameraSolve, APeerArrivingInBurstsAfterSilenceIsCountedAsAMisfire)
   EXPECT_GT(d.lone_late_peer.at("rear"), 0);
 }
 
+
+TEST(LoneCameraSolve, RearFramesAboutToBeAbsorbedIntoTheNextPairGoAloneFirst)
+{
+  // Front frames 2 s apart that reach the estimator 0.5 s late: by the time the
+  // next front frame arrives, the rear frame paired with it is already queued,
+  // so the rear frames before it would be absorbed into that pair without ever
+  // reaching the drop path. They go alone instead (observer_eval_C2_5a_fardrop).
+  Drive drive(lone_settings());
+  drive.release = [](size_t camera, double captured, double now) {
+      return camera == 1 || now >= captured + 0.5;
+    };
+  // Rear at 5 Hz as on the vehicle (a 30 Hz rear would fill the retention).
+  for (int i = 0; i < 360; ++i) {
+    drive.active = {i % 60 == 0, i % 6 == 0};
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  const auto & d = drive.estimator.diagnostics();
+  const int64_t absorbed_alone =
+    (d.lone_by_reason.count("sparse@absorb") ? d.lone_by_reason.at("sparse@absorb") : 0) +
+    (d.lone_by_reason.count("gap@absorb") ? d.lone_by_reason.at("gap@absorb") : 0);
+  EXPECT_GT(absorbed_alone, 20);
+  EXPECT_TRUE(d.lone_late_peer.empty());
+}
+
+TEST(LoneCameraSolve, NormallySpacedLatePeersAreAbsorbedAsBefore)
+{
+  // Front every 0.4 s, 0.5 s late: absorption is ordinary pairing, nothing alone.
+  Drive drive(lone_settings());
+  drive.release = [](size_t camera, double captured, double now) {
+      return camera == 1 || now >= captured + 0.5;
+    };
+  for (int i = 0; i < 300; ++i) {
+    drive.active = {i % 12 == 0, i % 6 == 0};
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  const auto & d = drive.estimator.diagnostics();
+  EXPECT_EQ(d.lone_by_reason.count("sparse@absorb"), 0u);
+  EXPECT_EQ(d.lone_by_reason.count("gap@absorb"), 0u);
+  EXPECT_TRUE(d.lone_frames.empty());
+}
