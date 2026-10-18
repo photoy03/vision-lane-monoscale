@@ -354,6 +354,9 @@ class OdomStabilizer(Node):
 
         previous = self.previous_corrected
         span = stamp - previous[0]
+        # One snapshot of the IMU yaw history per raw update. The node runs on a
+        # single-threaded executor, so on_imu cannot change it in between anyway.
+        samples = tuple(self.imu_yaw_samples)
         self.last_raw_span_ms = 1000.0 * span
         targets = []
         while self.pending_vision_stamps and self.pending_vision_stamps[0] <= stamp:
@@ -378,7 +381,7 @@ class OdomStabilizer(Node):
             grid = [previous[0] + step * k for k in range(1, int(span / step) + 1)]
             fill_poses = imu_fill_poses(
                 previous[1], pose, previous[0], stamp, grid + targets,
-                tuple(self.imu_yaw_samples),
+                samples,
                 max_sample_gap_sec=self.imu_straight_max_sample_gap_sec,
                 max_closure_m=self.imu_fill_max_closure_m,
                 max_closure_ratio=self.imu_fill_max_closure_ratio)
@@ -396,7 +399,7 @@ class OdomStabilizer(Node):
         if guarded_gap and resample_kind == "stationary":
             if imu_stationary_resample_safe(
                     previous[1], pose, previous[0], stamp,
-                    tuple(self.imu_yaw_samples),
+                    samples,
                     max_span_sec=self.max_stationary_resample_span_sec,
                     max_translation_m=self.max_stationary_resample_translation_m,
                     max_yaw_deg=self.max_stationary_resample_yaw_deg,
@@ -413,7 +416,7 @@ class OdomStabilizer(Node):
         elif guarded_gap and resample_kind == "reject":
             straight_safe = imu_straight_resample_safe(
                 previous[1], pose, previous[0], stamp,
-                tuple(self.imu_yaw_samples),
+                samples,
                 max_span_sec=self.imu_straight_max_span_sec,
                 max_translation_m=self.imu_straight_max_translation_m,
                 max_yaw_deg=self.imu_straight_max_yaw_deg,
@@ -440,43 +443,51 @@ class OdomStabilizer(Node):
             # corresponding tracker callback has not arrived yet.
             targets.append(stamp)
 
+        # Per-update values the target loop below used to recompute per target.
+        use_imu_yaw = use_imu_yaw_for_resample(resample_kind)
+        max_gap = self.imu_straight_max_sample_gap_sec
+        if use_imu_yaw:
+            # The endpoints do not depend on the target. When one is missing every
+            # IMU-yaw target of this update is skipped and counted, as before.
+            imu_start = interpolate_imu_yaw(samples, previous[0], max_gap)
+            imu_end = interpolate_imu_yaw(samples, stamp, max_gap)
+            if imu_start is not None and imu_end is not None:
+                offset_start = wrap_pi(previous[1].yaw - imu_start)
+                offset_end = wrap_pi(pose.yaw - imu_end)
+        distance = math.hypot(pose.x - previous[1].x, pose.y - previous[1].y)
         for target in targets:
             if self.previous_stamp is not None and target <= self.previous_stamp + 1e-9:
                 continue
             ratio = (target - previous[0]) / span if span > 0.0 else 1.0
+            weight = min(max(ratio, 0.0), 1.0)
+            is_resampled = abs(target - stamp) > 1e-6
             held_pose = fill_poses.get(target) if fill_poses else None
             if held_pose is None:
                 held_pose = interpolate_pose(previous[1], pose, ratio)
             # Stationary IMU evidence is only a safety gate: keep yaw interpolated
             # from the accepted MonoScale endpoints instead of substituting IMU heading.
-            if use_imu_yaw_for_resample(resample_kind) and abs(target - stamp) > 1e-6:
-                samples = tuple(self.imu_yaw_samples)
-                max_gap = self.imu_straight_max_sample_gap_sec
+            if use_imu_yaw and is_resampled:
                 imu_yaw = interpolate_imu_yaw(samples, target, max_gap)
-                imu_start = interpolate_imu_yaw(samples, previous[0], max_gap)
-                imu_end = interpolate_imu_yaw(samples, stamp, max_gap)
                 if imu_yaw is None or imu_start is None or imu_end is None:
                     self.imu_straight_sample_misses += 1
                     continue
-                offset_start = wrap_pi(previous[1].yaw - imu_start)
-                offset_end = wrap_pi(pose.yaw - imu_end)
-                offset = offset_start + min(max(ratio, 0.0), 1.0) * wrap_pi(
-                    offset_end - offset_start)
+                offset = offset_start + weight * wrap_pi(offset_end - offset_start)
                 held_pose = Pose2(held_pose.x, held_pose.y, wrap_pi(imu_yaw + offset))
-            held_roll = previous[2] + min(max(ratio, 0.0), 1.0) * (roll - previous[2])
-            held_pitch = previous[3] + min(max(ratio, 0.0), 1.0) * (pitch - previous[3])
-            is_resampled = abs(target - stamp) > 1e-6
+            held_roll = previous[2] + weight * (roll - previous[2])
+            held_pitch = previous[3] + weight * (pitch - previous[3])
             output_template = current[4]
             if is_resampled:
+                # A fresh copy, so emit_odom need not copy it again. The raw path
+                # keeps emit_odom's copy: current[4] is read back as previous[4].
                 output_template = copy.deepcopy(current[4])
-                distance = math.hypot(pose.x - previous[1].x, pose.y - previous[1].y)
                 self._set_resampled_covariance(
                     output_template, previous[4], current[4], ratio, span,
                     distance, resample_kind)
             self.emit_odom(output_template, target, held_pose, held_roll, held_pitch,
                            (pose_provenance_kind(resample_kind, is_resampled),
                             resample_kind if is_resampled else "raw",
-                            previous[0] if is_resampled else stamp, stamp))
+                            previous[0] if is_resampled else stamp, stamp),
+                           copy_template=not is_resampled)
             if is_resampled:
                 self.resampled_published += 1
                 if resample_kind == "stationary":
@@ -499,8 +510,8 @@ class OdomStabilizer(Node):
         out.pose.covariance = interpolate_pose_covariance(
             previous_cov, current_cov, ratio, span, distance, kind)
 
-    def emit_odom(self, template, stamp_sec, pose, roll, pitch, provenance):
-        out = copy.deepcopy(template)
+    def emit_odom(self, template, stamp_sec, pose, roll, pitch, provenance, copy_template=True):
+        out = copy.deepcopy(template) if copy_template else template
         # The standard covariance is passed through unchanged (MonoScale leaves it
         # all zero without an estimate); only PoseProvenance.covariance_valid says
         # whether it means anything.
@@ -602,8 +613,9 @@ class OdomStabilizer(Node):
                 msg.raw_cameras = "unknown"
             else:
                 a, b = ends
-                msg.raw_cameras = a if len(a.split(",")) <= len(b.split(",")) else b
-                if a != b and len(a.split(",")) == len(b.split(",")):
+                count_a, count_b = len(a.split(",")), len(b.split(","))
+                msg.raw_cameras = a if count_a <= count_b else b
+                if a != b and count_a == count_b:
                     msg.raw_cameras = a + "/" + b
             self.raw_cameras_counts[msg.raw_cameras] = self.raw_cameras_counts.get(msg.raw_cameras, 0) + 1
             self.provenance_pub.publish(msg)
