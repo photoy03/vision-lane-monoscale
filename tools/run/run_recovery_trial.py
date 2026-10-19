@@ -54,6 +54,7 @@ OUTPUT_TOPICS = (
 READY_BASE = ("tracking front on", "v5.2 C++ node:", "CPU line map:",
               "lane odom filter:")
 READY_OCCUPANCY = "occupancy backend requested="
+LIGHT_EXCLUDED_TOPICS = ("/perception/occupancy_grid_map", "/mapping/snapshot/occupancy")
 
 
 def ros_command(repo: Path, argv: list[str]) -> list[str]:
@@ -217,6 +218,11 @@ def main() -> int:
                         help="recorder-side compression. none (default since D-18): plain sqlite3; "
                              "zstd: the recorder compresses each file as it closes, which twice left "
                              "a cut file with exit code 0 (observer_eval_D18_recording)")
+    parser.add_argument("--outputs-light", action="store_true",
+                        help="leave the two raw occupancy streams (/perception/occupancy_grid_map, "
+                             "/mapping/snapshot/occupancy; 84 %% of an outputs_bag) out of the recording: "
+                             "the fused map still carries occupancy for C-0 scoring, but the occupancy "
+                             "snapshot contract metrics are not available (diagnostic runs, low disk)")
     parser.add_argument("--compress-after", action="store_true",
                         help="after a complete run, compress outputs_bag into outputs_bag_zstd with the "
                              "zstd CLI (tools/run/outputs_compress.py); the plain bag is kept")
@@ -393,7 +399,8 @@ def main() -> int:
             "ros2", "bag", "record", "--use-sim-time", "-s", "sqlite3",
             *(["--compression-mode", "file", "--compression-format", "zstd"]
               if args.outputs_compression == "zstd" else []),
-            "-o", str(output / "outputs_bag"), *OUTPUT_TOPICS])
+            "-o", str(output / "outputs_bag"),
+            *[t for t in OUTPUT_TOPICS if not (args.outputs_light and t in LIGHT_EXCLUDED_TOPICS)]])
     if sample_plan:
         commands["sampler"] = ros_command(repo, [
             "python3", str(repo / "tools/experiments/sample_imu_maps.py"),
@@ -408,7 +415,9 @@ def main() -> int:
         "sample_plan_sha256": sha256(sample_plan) if sample_plan else None,
         "bag_info": info.stdout, "bag_topics": sorted(available_topics),
         "replayed_topics": list(TOPICS),
-        "recorded_output_topics": list(OUTPUT_TOPICS) if args.record_outputs == "on" else [],
+        "recorded_output_topics": [t for t in OUTPUT_TOPICS if not (args.outputs_light and t in LIGHT_EXCLUDED_TOPICS)]
+        if args.record_outputs == "on" else [],
+        "outputs_light": args.outputs_light,
         "playback_rate": args.playback_rate,
         # Layout of /mapping/snapshot/* and /mapping/fused_map: 2 = clock_generation,
         # 3 = FusedMap pose provenance (older FusedMap is read as FusedMapV2),
