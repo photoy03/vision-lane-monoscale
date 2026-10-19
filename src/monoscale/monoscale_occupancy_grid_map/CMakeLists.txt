@@ -91,7 +91,16 @@ target_link_libraries(sweep_jobs_golden monoscale_occupancy_core ${OpenCV_LIBS} 
 ament_target_dependencies(sweep_jobs_golden
   rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
 
-install(TARGETS monoscale_occupancy_core sweep_offline sweep_node sweep_jobs_golden
+# E-9 JobBuilder golden: a recorded input event sequence through the node's callbacks or a
+# standalone JobBuilder (observer_eval_E9j 2). Reads the measurement bags read-only.
+find_package(SQLite3 REQUIRED)
+add_executable(job_builder_golden test/job_builder_golden.cpp)
+target_include_directories(job_builder_golden PRIVATE include)
+target_link_libraries(job_builder_golden monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART} SQLite::SQLite3)
+ament_target_dependencies(job_builder_golden
+  rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
+
+install(TARGETS monoscale_occupancy_core sweep_offline sweep_node sweep_jobs_golden job_builder_golden
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})

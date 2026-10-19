@@ -50,27 +50,13 @@
 #include "vision_lane_interfaces/image_quality.hpp"
 #include "vision_lane_interfaces/msg/occupancy_snapshot.hpp"
 #include "monoscale_occupancy_grid_map/sweep.hpp"
+#include "monoscale_occupancy_grid_map/job_builder.hpp"
+
+// The input path lives in JobBuilder (E-9, observer_eval_E9j 2); harnesses test for it.
+#define SWEEP_NODE_HAS_JOB_BUILDER 1
 
 namespace
 {
-
-double yaw_of(const geometry_msgs::msg::Quaternion & q)
-{
-  return std::atan2(2.0 * (q.w * q.z + q.x * q.y),
-    1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-}
-
-// One camera's ring of recent frames, each tagged with the pose it was seen
-// from. Bounded by travelled distance rather than count so a stop does not
-// flush it.
-struct Frame
-{
-  double stamp = 0.0;
-  int64_t stamp_ns = 0;
-  cv::Mat gray;      // CV_32F at processing width
-  monoscale_occupancy::Pose5 pose;
-  double travelled = 0.0;
-};
 
 // One camera's grid as it stood right after one of its keyframes. Each camera
 // has its own grid, so a map that is exact at time T can be assembled from the
@@ -323,6 +309,20 @@ public:
       throw std::invalid_argument("keyframe_travel_m must be finite and positive");
     }
     settings_ = settings;
+    monoscale_occupancy::JobBuilderSettings input;
+    input.cameras = cameras_;
+    input.processing_width = processing_width_;
+    input.max_odom_gap_sec = max_odom_interpolation_gap_sec_;
+    input.max_odom_translation_m = max_odom_interpolation_translation_m_;
+    input.max_odom_yaw_deg = max_odom_interpolation_yaw_deg_;
+    input.quality_gate_mode = image_quality_gate_mode_;
+    input.min_sharpness = image_quality_min_sharpness_;
+    input.quality_sample_width = image_quality_sample_width_;
+    input.quality_laplacian_ksize = image_quality_laplacian_ksize_;
+    input.source_offsets = settings_.source_offsets;
+    input.source_tolerance = settings_.source_tolerance;
+    input.keyframe_travel = settings_.keyframe_travel;
+    builder_ = monoscale_occupancy::JobBuilder(input);
     for (const auto & name : cameras_) {
       grids_[name].reset(settings_);
       grid_line_[name] = time_line_;
@@ -445,72 +445,11 @@ private:
         message.child_frame_id.c_str());
       return;
     }
-    if (stamp_ns <= 0 || (odometry_.size() > 0 && stamp_ns <= odometry_.latest_stamp_ns())) {
-      ++odom_stamp_rejected_;
-      return;
-    }
-    const double raw_x = message.pose.pose.position.x;
-    const double raw_y = message.pose.pose.position.y;
-    const auto & raw_q = message.pose.pose.orientation;
-    const double qnorm = std::sqrt(
-      raw_q.x * raw_q.x + raw_q.y * raw_q.y + raw_q.z * raw_q.z + raw_q.w * raw_q.w);
-    if (!std::isfinite(raw_x) || !std::isfinite(raw_y) || !std::isfinite(qnorm) || qnorm < 1e-9) {
-      ++odom_value_rejected_;
-      return;
-    }
-    geometry_msgs::msg::Quaternion q = raw_q;
-    q.x /= qnorm; q.y /= qnorm; q.z /= qnorm; q.w /= qnorm;
-    monoscale_occupancy::Pose5 pose;
-    // This message already expresses base_link in map.  A mapping consumer
-    // must not hide a second private origin behind the same frame_id: lane
-    // vectors and occupancy cells now use this exact pose contract.
-    pose.x = raw_x;
-    pose.y = raw_y;
-    pose.yaw = yaw_of(q);
-    // Roll and pitch from the same quaternion: the sweep places the road as a
-    // world-horizontal plane, and a pitched vehicle over a flat road needs
-    // them or the ground ten metres out moves by metres.
-    pose.roll = std::atan2(2.0 * (q.w * q.x + q.y * q.z),
-      1.0 - 2.0 * (q.x * q.x + q.y * q.y));
-    const double sinp = 2.0 * (q.w * q.y - q.z * q.x);
-    pose.pitch = std::abs(sinp) >= 1.0 ? std::copysign(M_PI / 2.0, sinp) : std::asin(sinp);
-    monoscale_pose::TimedPose sample{stamp_ns, pose.x, pose.y, pose.yaw};
-    sample.roll = pose.roll;
-    sample.pitch = pose.pitch;
-    if (!odometry_.insert(sample)) {
-      ++odom_value_rejected_;
-      return;
-    }
-    // The pose that just arrived is what the held frames were waiting for.
-    for (const auto & name : cameras_) {drain(name);}
-  }
-
-  // The pose at an image stamp from the shared pose timeline: an exact sample
-  // or a gap/translation/yaw-bounded blend of the bracketing pair. Nullopt
-  // until odometry brackets the stamp -- a frame with no pose is not keyframed.
-  std::optional<monoscale_occupancy::Pose5> pose_at(int64_t stamp_ns)
-  {
-    const auto match = odometry_.lookup_bounded(stamp_ns, {max_odom_interpolation_gap_sec_,
-      max_odom_interpolation_translation_m_, max_odom_interpolation_yaw_deg_});
-    using Kind = monoscale_pose::PoseMatchKind;
-    switch (match.kind) {
-      case Kind::exact:
-      case Kind::interpolated: {
-          monoscale_occupancy::Pose5 pose;
-          pose.x = match.pose.x;
-          pose.y = match.pose.y;
-          pose.yaw = match.pose.yaw;
-          pose.roll = match.pose.roll;
-          pose.pitch = match.pose.pitch;
-          return pose;
-        }
-      case Kind::gap_too_large: ++pose_gap_rejected_; break;
-      case Kind::translation_too_large: ++pose_motion_rejected_; break;
-      case Kind::yaw_too_large: ++pose_yaw_rejected_; break;
-      case Kind::invalid: ++pose_invalid_rejected_; break;
-      default: break;  // Outside the history: wait or expire in drain().
-    }
-    return std::nullopt;
+    const auto & q = message.pose.pose.orientation;
+    std::vector<monoscale_occupancy::BuiltJob> built;
+    builder_.add_odometry(stamp_ns, message.pose.pose.position.x, message.pose.pose.position.y,
+      q.x, q.y, q.z, q.w, built);
+    submit(built);
   }
 
   void on_image(const std::string & name, const sensor_msgs::msg::Image & message)
@@ -542,20 +481,8 @@ private:
       RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000, "cv_bridge: %s", error.what());
       return;
     }
-    const double scale = processing_width_ / static_cast<double>(gray.cols);
-    cv::Mat resized;
-    cv::resize(gray, resized, cv::Size(), scale, scale, cv::INTER_AREA);
-    if (image_quality_gate_mode_ != "off") {
-      const double sharpness = image_quality::sharpness(
-        resized, image_quality_sample_width_, image_quality_laplacian_ksize_);
-      last_sharpness_ = sharpness;
-      if (image_quality_gate_mode_ == "reject" && sharpness < image_quality_min_sharpness_) {
-        ++blur_rejected_;
-        return;
-      }
-    }
-    cv::Mat gray32;
-    resized.convertTo(gray32, CV_32F);
+    const auto gray32 = builder_.prepare(gray);
+    if (!gray32) {return;}
 
     std::lock_guard<std::mutex> guard(mutex_);
     auto & newest = newest_image_ns_[name];
@@ -568,92 +495,10 @@ private:
     {
       return;
     }
-    // Hold the frame rather than resolving its pose now. The odometry is
-    // solved from these very images, so its stamps can never lead them: at
-    // arrival every frame is newer than the newest pose, `pose_at` returns
-    // nothing, and dropping it here meant the live node made no keyframes at
-    // all -- ever, at any speed. Measured 09-08 on the driving rig: 400 of
-    // 400 frames arrived ahead of the newest pose, by a median of 0.70 s.
-    // Offline never saw this because there the whole trajectory is loaded
-    // before the first frame is placed.
-    auto & queue = pending_[name];
-    queue.push_back({rclcpp::Time(message.header.stamp).nanoseconds(), stamp, gray32});
-    while (queue.size() > kPendingFrames) {
-      queue.pop_front();
-      ++pending_overflow_dropped_;
-    }
-    drain(name);
-  }
-
-  // Admit every held frame the odometry can now place, oldest first so the
-  // ring stays ordered and `travelled` keeps accumulating along the path.
-  void drain(const std::string & name)
-  {
-    auto & queue = pending_[name];
-    while (!queue.empty()) {
-      const auto & held = queue.front();
-      const auto pose = pose_at(held.stamp_ns);
-      if (!pose) {
-        if (odometry_.size() > 0 && held.stamp_ns < odometry_.oldest_stamp_ns()) {
-          // Older than any pose still held: it can never be placed now.
-          queue.pop_front();
-          ++pending_expired_dropped_;
-          continue;
-        }
-        if (odometry_.size() > 0 && held.stamp_ns <= odometry_.latest_stamp_ns()) {
-          // The right bracket already arrived. A gap that is too wide cannot
-          // be repaired by future odometry; do not block all newer images.
-          queue.pop_front();
-          ++pending_gap_dropped_;
-          continue;
-        }
-        return;  // Newer than the newest pose. Wait for the odometry.
-      }
-      admit(name, held.stamp, held.stamp_ns, held.gray, *pose);
-      queue.pop_front();
-    }
-  }
-
-  void admit(
-    const std::string & name, const double stamp, const int64_t stamp_ns, const cv::Mat & gray,
-    const monoscale_occupancy::Pose5 & pose)
-  {
-    auto & ring = rings_[name];
-    double travelled = 0.0;
-    if (!ring.empty()) {
-      const auto & last = ring.back();
-      travelled = last.travelled +
-        std::hypot(pose.x - last.pose.x, pose.y - last.pose.y);
-    }
-    Frame frame;
-    frame.stamp = stamp;
-    frame.stamp_ns = stamp_ns;
-    frame.gray = gray;
-    frame.pose = pose;
-    frame.travelled = travelled;
-    // A frame from where the last one already stands carries no baseline the
-    // ring does not have, so take its place instead of joining it. Without
-    // this a stationary vehicle grows the ring at the frame rate for ever --
-    // the travel-based trim below cannot fire when travel does not advance,
-    // and the node reached 8.3 GB in three minutes of standing still.
-    const bool moved = ring.empty() ||
-      travelled - ring.back().travelled > kRingMinStep;
-    if (moved) {
-      ring.push_back(std::move(frame));
-    } else {
-      ring.back() = std::move(frame);
-    }
-    // Keep enough baseline for the widest source offset, plus a margin.
-    while (ring.size() > 2 &&
-      travelled - ring.front().travelled > 6.0)
-    {
-      ring.pop_front();
-    }
-    // Backstop: the trim above is distance-based, so anything that keeps the
-    // travel small keeps the ring long. Each frame is a float image.
-    while (ring.size() > kRingFrames) {ring.pop_front();}
-    ++placed_;
-    maybe_keyframe(name);
+    // Held until odometry brackets it (JobBuilder::add_frame).
+    std::vector<monoscale_occupancy::BuiltJob> built;
+    builder_.add_frame(name, rclcpp::Time(message.header.stamp).nanoseconds(), stamp, *gray32, built);
+    submit(built);
   }
 
   Lens scaled_lens(const std::string & name) const
@@ -671,41 +516,23 @@ private:
     return lens;
   }
 
-  void maybe_keyframe(const std::string & name)
+  // Keyframes the input path chose, to the workers in the order chosen. Caller holds mutex_.
+  void submit(std::vector<monoscale_occupancy::BuiltJob> & built)
   {
-    auto & ring = rings_[name];
-    const Frame & reference = ring.back();
-    if (reference.travelled < next_at_[name]) {return;}
-
-    // Sources at the configured offsets of camera travel, nearest frame in
-    // the ring within tolerance. Offsets are along the driven path here (the
-    // ring is short), matching the offline --source-offsets without
-    // --baseline-select.
-    KeyframeJob job;
-    job.camera = name;
-    job.reference_gray = reference.gray;
-    job.reference_pose = reference.pose;
-    job.stamp = reference.stamp;
-    job.stamp_ns = reference.stamp_ns;
-    job.time_line = time_line_;
-    job.lens = scaled_lens(name);
-    for (double offset : settings_.source_offsets) {
-      const double want = reference.travelled + offset;
-      const Frame * best = nullptr;
-      double gap = settings_.source_tolerance;
-      for (const auto & frame : ring) {
-        const double error = std::abs(frame.travelled - want);
-        if (error < gap && &frame != &reference) {gap = error; best = &frame;}
-      }
-      if (best) {
-        job.source_grays.push_back(best->gray);
-        job.source_poses.push_back(best->pose);
-      }
+    for (auto & b : built) {
+      KeyframeJob job;
+      job.camera = b.camera;
+      job.reference_gray = b.reference_gray;
+      job.reference_pose = b.reference_pose;
+      job.stamp = b.stamp;
+      job.stamp_ns = b.stamp_ns;
+      job.time_line = time_line_;
+      job.lens = scaled_lens(b.camera);
+      job.source_grays = std::move(b.source_grays);
+      job.source_poses = std::move(b.source_poses);
+      if (!job_dump_dir_.empty()) {dump_job(job);}
+      enqueue(std::move(job));
     }
-    if (job.source_grays.size() < 2) {return;}
-    next_at_[name] = reference.travelled + settings_.keyframe_travel;
-    if (!job_dump_dir_.empty()) {dump_job(job);}
-    enqueue(std::move(job));
   }
 
   // The worker queue a camera's jobs go to: one shared queue in serial mode.
@@ -914,10 +741,7 @@ private:
     const auto grid_locks = lock_all_grids();
     std::scoped_lock all(mutex_, job_mutex_, map_mutex_);
     time_line_ = clock_generation_.value();
-    pending_.clear();
-    rings_.clear();
-    next_at_.clear();
-    odometry_ = monoscale_pose::PoseTimeline{1.0e6, 4000};
+    builder_.reset();
     for (auto & queue : queues_) {queue.clear();}
     newest_image_ns_.clear();
     liveness_ = monoscale_occupancy::CameraLiveness(liveness_.enabled(), liveness_dead_ns());
@@ -986,8 +810,8 @@ private:
     {
       std::lock_guard<std::mutex> guard(mutex_);
       for (const auto & name : cameras_) {
-        const auto held = pending_.find(name);
-        if (held != pending_.end() && !held->second.empty()) {
+        const auto held = builder_.pending().find(name);
+        if (held != builder_.pending().end() && !held->second.empty()) {
           oldest = pipeline_progress::oldest_of(oldest, held->second.front().stamp_ns);
           out.queue += static_cast<uint32_t>(held->second.size());
         }
@@ -1010,10 +834,10 @@ private:
       }
       out.processed = static_cast<uint64_t>(keyframes_);
       out.discards = {
-        {"pose_gap", static_cast<uint64_t>(pending_gap_dropped_)},
-        {"pose_expired", static_cast<uint64_t>(pending_expired_dropped_)},
-        {"overflow", static_cast<uint64_t>(pending_overflow_dropped_)},
-        {"blur", static_cast<uint64_t>(blur_rejected_)}};
+        {"pose_gap", static_cast<uint64_t>(builder_.counters().pending_gap_dropped)},
+        {"pose_expired", static_cast<uint64_t>(builder_.counters().pending_expired_dropped)},
+        {"overflow", static_cast<uint64_t>(builder_.counters().pending_overflow_dropped)},
+        {"blur", static_cast<uint64_t>(builder_.counters().blur_rejected)}};
       if (liveness_.enabled()) {
         out.discards.push_back({"late_after_revival", liveness_.late_after_revival()});
       }
@@ -1187,8 +1011,9 @@ private:
     // invisible: no frame was ever placed, so nothing was ever logged.
     size_t held = 0;
     size_t ringed = 0;
-    for (const auto & entry : pending_) {held += entry.second.size();}
-    for (const auto & entry : rings_) {ringed += entry.second.size();}
+    for (const auto & entry : builder_.pending()) {held += entry.second.size();}
+    for (const auto & entry : builder_.rings()) {ringed += entry.second.size();}
+    const auto & input = builder_.counters();
     size_t queued = 0;
     bool busy = false;
     int64_t dropped = 0;
@@ -1250,9 +1075,9 @@ private:
       "reject[odom_frame=%ld odom_stamp=%ld odom_value=%ld pose_gap=%ld pose_move=%ld pose_yaw=%ld pose_invalid=%ld image=%ld blur=%ld] "
       "pending_drop[gap=%ld expired=%ld overflow=%ld] stamp_regressions=%ld tiles_pruned=%ld "
       "exact_snapshot[older_versions=%lu fallback=%lu] time_line[generation=%lu resets=%ld drops=%ld]",
-      keyframes_, placed_, held, ringed, odometry_.size(), queued,
+      keyframes_, input.placed, held, ringed, builder_.odometry().size(), queued,
       max_pending_keyframes_, busy ? 1 : 0, dropped, published_,occupied_cells_,free_cells_,
-      unknown_cells_,other_cells_,last_sweep_ms_,last_sharpness_,
+      unknown_cells_,other_cells_,last_sweep_ms_,input.last_sharpness,
       free_before_slab_cells_, free_after_slab_cells_, free_after_erode_cells_,
       last_judgeable_pixels_,last_believed_pixels_,last_clear_pixels_,
       last_free_diagnostics_.free_textured_pixels,last_free_diagnostics_.free_finite_pixels,
@@ -1262,10 +1087,10 @@ private:
       last_free_diagnostics_.free_cost_500_pixels,last_free_diagnostics_.free_cost_1000_pixels,
       last_free_diagnostics_.free_cost_2000_pixels,last_free_diagnostics_.free_cost_5000_pixels,
       last_free_diagnostics_.free_cost_10000_pixels,odom_frame_rejected_,
-      odom_stamp_rejected_,odom_value_rejected_,pose_gap_rejected_,pose_motion_rejected_,
-      pose_yaw_rejected_,pose_invalid_rejected_,image_frame_rejected_,
-      blur_rejected_,pending_gap_dropped_,pending_expired_dropped_,
-      pending_overflow_dropped_,stamp_regressions_,pruned_tiles_,
+      input.odom_stamp_rejected,input.odom_value_rejected,input.pose_gap_rejected,input.pose_motion_rejected,
+      input.pose_yaw_rejected,input.pose_invalid_rejected,image_frame_rejected_,
+      input.blur_rejected,input.pending_gap_dropped,input.pending_expired_dropped,
+      input.pending_overflow_dropped,stamp_regressions_,pruned_tiles_,
       static_cast<unsigned long>(older_snapshots_), static_cast<unsigned long>(snapshot_fallbacks_),
       static_cast<unsigned long>(time_line_), time_line_resets_, time_line_drops_);
   }
@@ -1294,26 +1119,9 @@ private:
   std::map<std::string, std::string> camera_frames_;
   std::map<std::string, std::unique_ptr<monoscale_occupancy::Sweep>> sweeps_;
   std::map<std::string, monoscale_occupancy::CameraGrid> grids_;
-  std::map<std::string, std::deque<Frame>> rings_;
-  // Frames waiting for odometry to reach their stamp. At 22 Hz this bounds
-  // the wait at about twenty seconds, well past the 0.7 s actually seen.
-  static constexpr size_t kPendingFrames = 512;
-  // A frame closer than this to the ring's newest replaces it rather than
-  // extending the ring: half the smallest source offset's tolerance.
-  static constexpr double kRingMinStep = 0.02;
-  // Hard cap on ring length. 6 m of baseline at the 5 cm keyframe spacing
-  // needs 120; this is double that, and bounds the ring near 1 GB per camera.
-  static constexpr size_t kRingFrames = 256;
-  struct HeldFrame
-  {
-    int64_t stamp_ns;  // matched against the pose timeline
-    double stamp;      // carried into keyframes and the grid header
-    cv::Mat gray;
-  };
-  std::map<std::string, std::deque<HeldFrame>> pending_;
-  std::map<std::string, double> next_at_;
-  // Odometry history; strictly increasing stamps (checked in on_odometry).
-  monoscale_pose::PoseTimeline odometry_{1.0e6, 4000};
+  // The input path: odometry, held frames, rings and the keyframe choice. Guarded by
+  // mutex_ (prepare() runs before it, as the image preprocessing always did).
+  monoscale_occupancy::JobBuilder builder_;
 
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> image_subs_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr> info_subs_;
@@ -1373,7 +1181,6 @@ private:
   bool stop_worker_ = false;
   int64_t jobs_dropped_ = 0;
   int64_t keyframes_ = 0;
-  int64_t placed_ = 0;
   int64_t pruned_tiles_ = 0;
   int occupied_cells_ = 0;
   int free_cells_ = 0;
@@ -1387,23 +1194,12 @@ private:
   int last_believed_pixels_ = 0;
   int last_clear_pixels_ = 0;
   double last_sweep_ms_ = 0.0;
-  double last_sharpness_ = 0.0;
   double last_stamp_ = 0.0;
   bool have_stamp_ = false;
   int published_ = 0;
   int64_t odom_frame_rejected_ = 0;
-  int64_t odom_stamp_rejected_ = 0;
-  int64_t odom_value_rejected_ = 0;
-  int64_t pose_gap_rejected_ = 0;
-  int64_t pose_motion_rejected_ = 0;
-  int64_t pose_yaw_rejected_ = 0;
-  int64_t pose_invalid_rejected_ = 0;
-  int64_t pending_gap_dropped_ = 0;
-  int64_t pending_expired_dropped_ = 0;
-  int64_t pending_overflow_dropped_ = 0;
   int64_t stamp_regressions_ = 0;
   int64_t image_frame_rejected_ = 0;
-  int64_t blur_rejected_ = 0;
 };
 
 // Diagnosis of the intermittent exit -11 at shutdown (2 of 7 replays, never
