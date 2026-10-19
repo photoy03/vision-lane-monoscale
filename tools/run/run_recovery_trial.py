@@ -54,7 +54,17 @@ OUTPUT_TOPICS = (
 READY_BASE = ("tracking front on", "v5.2 C++ node:", "CPU line map:",
               "lane odom filter:")
 READY_OCCUPANCY = "occupancy backend requested="
-LIGHT_EXCLUDED_TOPICS = ("/perception/occupancy_grid_map", "/mapping/snapshot/occupancy")
+LIGHT_EXCLUDED_TOPICS = ("/perception/occupancy_grid_map",)
+# Where the contract checks (the realtime veto, observer_eval_E9g 3) read from, in
+# tools/eval/metrics/repeat_compare.py; written into every manifest (observer_eval_E9h 1).
+CONTRACT_METRIC_SOURCES = {
+    "snapshot_metrics (snapshot_*_late_changes, complete_backwards, content_ahead, valid_ratio)":
+        ["/mapping/snapshot/lanes", "/mapping/snapshot/occupancy"],
+    "fused_metrics (fused_contract_violations, future_content, generation_mismatch, t_not_increasing)":
+        ["/mapping/fused_map", "/mapping/snapshot/lanes", "/mapping/snapshot/occupancy"],
+    "watermark_* (held_regressions, published_backwards, lag)": ["/pipeline/progress"],
+    "snapshot_fallbacks, jobs_dropped, publishes": ["launch.log (sweep_node)"],
+}
 
 
 def ros_command(repo: Path, argv: list[str]) -> list[str]:
@@ -219,10 +229,10 @@ def main() -> int:
                              "zstd: the recorder compresses each file as it closes, which twice left "
                              "a cut file with exit code 0 (observer_eval_D18_recording)")
     parser.add_argument("--outputs-light", action="store_true",
-                        help="leave the two raw occupancy streams (/perception/occupancy_grid_map, "
-                             "/mapping/snapshot/occupancy; 84 %% of an outputs_bag) out of the recording: "
-                             "the fused map still carries occupancy for C-0 scoring, but the occupancy "
-                             "snapshot contract metrics are not available (diagnostic runs, low disk)")
+                        help="leave the raw occupancy stream /perception/occupancy_grid_map (42 %% of an "
+                             "outputs_bag) out of the recording; the snapshot topics the contract checks "
+                             "read are kept, and the fused map carries occupancy for C-0 scoring "
+                             "(diagnostic runs, low disk; observer_eval_E9h)")
     parser.add_argument("--compress-after", action="store_true",
                         help="after a complete run, compress outputs_bag into outputs_bag_zstd with the "
                              "zstd CLI (tools/run/outputs_compress.py); the plain bag is kept")
@@ -418,6 +428,7 @@ def main() -> int:
         "recorded_output_topics": [t for t in OUTPUT_TOPICS if not (args.outputs_light and t in LIGHT_EXCLUDED_TOPICS)]
         if args.record_outputs == "on" else [],
         "outputs_light": args.outputs_light,
+        "contract_metric_sources": CONTRACT_METRIC_SOURCES,
         "playback_rate": args.playback_rate,
         # Layout of /mapping/snapshot/* and /mapping/fused_map: 2 = clock_generation,
         # 3 = FusedMap pose provenance (older FusedMap is read as FusedMapV2),
