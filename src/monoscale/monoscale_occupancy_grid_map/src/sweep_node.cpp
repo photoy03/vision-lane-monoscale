@@ -157,8 +157,10 @@ public:
     publish_commit_neutralise_ = declare_parameter<bool>("publish_commit_neutralise", true);
     // E-9 (c1, observer_eval_E9i): carve (neutralise_slab written back, as a publish does)
     // once after every keyframe, so the stored grids no longer depend on when publish ran
-    // (the write-back is idempotent between keyframes). false = upstream: only publish carves.
-    carve_on_keyframe_ = declare_parameter<bool>("carve_on_keyframe", false);
+    // (the write-back is idempotent between keyframes). Default since observer_eval_E9k:
+    // the measured map change is below resolution (occ_offline 8 variants). false = upstream:
+    // only publish carves.
+    carve_on_keyframe_ = declare_parameter<bool>("carve_on_keyframe", true);
     // With keyframe carves the publish timer only reads the grids (observer_eval_E9j 5):
     // the map is then a function of the job order alone.
     if (carve_on_keyframe_) {publish_commit_neutralise_ = false;}
@@ -511,7 +513,8 @@ private:
     lens.cx *= ratio;
     lens.cy *= ratio;
     if (!(lens.fx > 0.0) || !(lens.fy > 0.0) || !std::isfinite(ratio) || ratio <= 0.0) {
-      throw std::runtime_error(name + " has no valid fisheye calibration");
+      // Checked when the camera's first keyframe is chosen (JobBuilder), not at start-up.
+      throw std::runtime_error(name + " has no valid fisheye calibration (at its first keyframe)");
     }
     return lens;
   }
@@ -1165,7 +1168,7 @@ private:
   // reset in them (written back when publish_commit_neutralise_). Atomic: report() reads
   // them under mutex_, which must not take map_mutex_.
   std::atomic<uint64_t> publishes_{0}, neutralised_cells_{0};
-  bool carve_on_keyframe_ = false;
+  bool carve_on_keyframe_ = true;
   std::atomic<uint64_t> carves_{0}, carved_cells_{0};  // (c1) keyframe carves and the cells they reset
   uint64_t job_dump_count_ = 0;
   std::map<std::string, int64_t> newest_image_ns_;

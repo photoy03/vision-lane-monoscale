@@ -25,7 +25,7 @@ launch_arguments:
   # writes neutralise_slab back into the stored grids (upstream: true).
   occupancy_publish_rate_hz: ''
   occupancy_publish_commit_neutralise: ''
-  # E-9 (c1): carve once after every keyframe (empty = package default, false = upstream).
+  # E-9 (c1): carve once after every keyframe (empty = package default true since E9k; false = upstream).
   occupancy_carve_on_keyframe: ''
   occupancy_max_odom_gap_sec: ''
   occupancy_max_odom_translation_m: ''
