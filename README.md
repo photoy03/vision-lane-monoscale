@@ -78,7 +78,7 @@ sudo apt update
 sudo apt install -y build-essential cmake pkg-config gcc-11 g++-11 \
   python3-colcon-common-extensions python3-rosdep python3-pytest \
   python3-numpy python3-opencv python3-yaml python3-matplotlib python3-psutil \
-  libopencv-dev libeigen3-dev libgomp1 zstd \
+  libopencv-dev libeigen3-dev libsqlite3-dev libgomp1 zstd \
   gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
   ros-humble-rosbag2-compression-zstd
 ```
