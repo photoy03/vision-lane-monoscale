@@ -61,6 +61,9 @@ target_link_libraries(monoscale_occupancy_core ${OpenCV_LIBS}
   $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>)
 if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_SWEEP_KERNELS})
   set_target_properties(monoscale_occupancy_core PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+  # E-9: every host thread launches on its own default stream, so two camera
+  # workers do not serialise on (or synchronise) each other's work.
+  target_compile_options(monoscale_occupancy_core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--default-stream per-thread>)
   find_package(CUDAToolkit REQUIRED)
   target_link_libraries(monoscale_occupancy_core CUDA::cudart)
 endif()
@@ -80,7 +83,15 @@ target_link_libraries(sweep_node monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP
 ament_target_dependencies(sweep_node
   rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
 
-install(TARGETS monoscale_occupancy_core sweep_offline sweep_node
+# E-9 job harness: recorded keyframe jobs through the node's own workers (a tool, not a
+# test: the jobs come from a recorded run, VISION_SWEEP_JOB_DUMP).
+add_executable(sweep_jobs_golden test/sweep_jobs_golden.cpp)
+target_include_directories(sweep_jobs_golden PRIVATE include)
+target_link_libraries(sweep_jobs_golden monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART})
+ament_target_dependencies(sweep_jobs_golden
+  rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
+
+install(TARGETS monoscale_occupancy_core sweep_offline sweep_node sweep_jobs_golden
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})

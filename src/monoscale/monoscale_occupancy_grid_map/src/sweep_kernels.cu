@@ -540,7 +540,7 @@ namespace
 void expect(const char * what)
 {
   if (getenv("SWEEP_CUDA_SYNC") != nullptr) {
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(cudaStreamPerThread);  // this thread's stream only (E-9)
   }
   const cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
@@ -581,11 +581,13 @@ struct Scratch
   float * second_cost = nullptr;
 };
 
-Scratch g_scratch;
+// Per host thread (E-9): each camera's dedicated worker owns its device buffers and,
+// built with --default-stream per-thread, its own stream.
+thread_local Scratch g_scratch;
 // The volume of the call just made, so a caller that decides afterwards that
 // it wants the whole cost profile can have it without sweeping twice.
-const float * g_last_volume = nullptr;
-size_t g_last_elements = 0;
+thread_local const float * g_last_volume = nullptr;
+thread_local size_t g_last_elements = 0;
 
 template <typename T>
 void ensure(T ** pointer, size_t & held, size_t wanted)
@@ -760,7 +762,7 @@ void plane_sweep_cuda_impl(
     }
   }
 
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(cudaStreamPerThread);  // this thread's stream only (E-9)
   expect("matching");
 
   // The validity bar: what fraction of (window x sources) samples a pixel
@@ -810,7 +812,7 @@ void plane_sweep_cuda_impl(
     chosen, s.valid, planes, static_cast<int>(pixels), road_plane,
     s.best_index, s.best_cost, s.road_cost, s.second_cost);
 
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(cudaStreamPerThread);  // this thread's stream only (E-9)
   expect("reduction");
 
   cudaMemcpy(best_index, s.best_index, pixels * sizeof(int), cudaMemcpyDeviceToHost);

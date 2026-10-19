@@ -31,6 +31,10 @@ namespace monoscale_occupancy
 #ifdef MONOSCALE_OCCUPANCY_HAS_CUDA
 // Runtime device check used by the online node's startup diagnostics.
 bool cuda_available();
+struct SweepSettings;
+// Process-wide CUDA setup done once before worker threads start (E-9); a no-op
+// without CUDA or after the first call.
+void cuda_configure(const SweepSettings & settings);
 #endif
 
 // OpenCV fisheye camera with a fixed mount.  The original benchmark cameras

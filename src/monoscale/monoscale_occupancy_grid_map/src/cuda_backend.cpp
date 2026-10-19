@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,19 @@ namespace monoscale_occupancy
 bool cuda_available()
 {
   return plane_sweep_cuda_available();
+}
+
+// One-time process setup, before any worker thread exists (E-9): the backend line
+// and SWEEP_SEEN_FRACTION, which the kernel reads with getenv. Later calls do nothing.
+void cuda_configure(const SweepSettings & settings)
+{
+  static std::once_flag once;
+  std::call_once(once, [&settings]() {
+      std::fprintf(stderr, "[occupancy] cuda backend: available=%d\n",
+        plane_sweep_cuda_available() ? 1 : 0);
+      const std::string v = std::to_string(settings.seen_fraction);
+      setenv("SWEEP_SEEN_FRACTION", v.c_str(), 1);
+    });
 }
 
 // The 35 floats one source needs, matching zncc_accumulate_fisheye's layout
@@ -84,12 +98,7 @@ bool cuda_match(
   cv::Mat & best, cv::Mat & best_cost, cv::Mat & road_cost, cv::Mat & second_cost,
   std::vector<cv::Mat> & volume, bool want_volume, double * volume_copy_ms)
 {
-  static bool announced = false;
-  if (!announced) {
-    std::fprintf(stderr, "[occupancy] cuda backend: available=%d\n",
-      plane_sweep_cuda_available() ? 1 : 0);
-    announced = true;
-  }
+  cuda_configure(settings);
   if (!cuda_available()) {
     return false;
   }
@@ -129,13 +138,7 @@ bool cuda_match(
   }
 
   // seen_fraction reaches the kernel only through the environment, the same
-  // channel plane_sweep.py uses. Set it to our setting for this call.
-  static bool set_env = false;
-  if (!set_env) {
-    std::string v = std::to_string(settings.seen_fraction);
-    setenv("SWEEP_SEEN_FRACTION", v.c_str(), 1);
-    set_env = true;
-  }
+  // channel plane_sweep.py uses; cuda_configure() set it once.
 
   plane_sweep_cuda_impl(
     ref.data(), src.data(), sources, nullptr, planes, rows, cols,
