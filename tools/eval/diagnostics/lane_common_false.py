@@ -19,6 +19,12 @@ first run) and classified by the nearest label lane at the samples:
   crossing_suspect        a label lane within 1.0 m but not parallel
 
 This is a list for a person looking at the frame images; it decides nothing by itself.
+
+--by-distance adds a table of common false samples that have a parallel label lane
+within 1 m, by forward distance (base_link x): median lateral distance to that label
+lane and length. A projection error (mount height / pitch) grows with distance; a
+detection edge error stays about the same (observer_eval_E2B_coexist 1). Bands 1-4 m
+and 4-8 m are both judged here (map_accuracy's two lane bands).
 """
 import argparse
 import json
@@ -30,9 +36,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "metrics"))
 import map_accuracy as ma  # noqa: E402
+import lane_false_compare as lfc  # noqa: E402
 from lane_false_compare import false_samples, first_seen, near_map, MAX_ANGLE  # noqa: E402
 
 NEAR_M = 1.0
+
+
+def far_false_samples(raster, lanes, segments):
+    """false_samples() for the 4-8 m band (same rule, other band)."""
+    _, _, state, _ = raster
+    saved = lfc.BAND
+    lfc.BAND = (4.0, 8.0)
+    try:
+        return lfc.false_samples(raster, lanes, segments)[0]
+    finally:
+        lfc.BAND = saved
 
 
 def nearest_label(x, y, angle, lanes):
@@ -55,6 +73,7 @@ def main():
     ap.add_argument("--after-ns", type=int, default=0)
     ap.add_argument("--json", type=Path)
     ap.add_argument("--report", type=Path)
+    ap.add_argument("--by-distance", action="store_true")
     args = ap.parse_args()
     if len(args.runs) < 2:
         raise SystemExit("needs two or more runs of one bag")
@@ -63,7 +82,7 @@ def main():
     loaded = {run: ma.load_run(run) for run in args.runs}
     seen = first_seen(loaded[args.runs[0]][1])
     bag = str(Path(json.loads((args.runs[0] / "manifest.json").read_text())["bag_path_read_only"]).resolve())
-    rows, frames = [], []
+    rows, frames, distance_rows = [], [], []
     for frame in samples["frames"]:
         if str(Path(frame["bag"]).resolve()) != bag or frame["stamp"] < args.after_ns * 1e-9:
             continue
@@ -85,9 +104,15 @@ def main():
             continue
         raster, lanes = ma.rasterise(labels, camera), ma.label_lanes(labels, camera)
         falses, total = false_samples(raster, lanes, maps[0])
+        if args.by_distance:
+            falses += far_false_samples(raster, lanes, maps[0])
         common = [s for s in falses if all(near_map(s[1], s[2], s[3], other) for other in maps[1:])]
         frames.append({"frame": frame["id"], "false_m": round(sum(s[4] for s in falses), 3),
                        "common_false_m": round(sum(s[4] for s in common), 3), "total_m": round(total, 3)})
+        for s in common:
+            d, par = nearest_label(s[1], s[2], s[3], lanes)
+            if d is not None and par:
+                distance_rows.append((s[1], d, s[4]))
         by_track = {}
         for s in common:
             by_track.setdefault(s[0], []).append(s)
@@ -113,6 +138,13 @@ def main():
                "total_m": round(sum(f["total_m"] for f in frames), 2),
                "by_kind_m": {k: round(sum(r["length_m"] for r in rows if r["kind"] == k), 2)
                              for k in ("label_missing_suspect", "offset_suspect", "crossing_suspect")}}
+    if args.by_distance:
+        bands = ((1.0, 2.0), (2.0, 3.0), (3.0, 4.0), (4.0, 6.0), (6.0, 8.0))
+        summary["parallel_offset_by_distance"] = [
+            {"x_m": list(b), "length_m": round(sum(l for x, _, l in distance_rows if b[0] <= x < b[1]), 2),
+             "median_offset_m": round(statistics.median([d for x, d, _ in distance_rows if b[0] <= x < b[1]]), 3)
+             if any(b[0] <= x < b[1] for x, _, _ in distance_rows) else None}
+            for b in bands]
     print(json.dumps(summary), flush=True)
     if args.json:
         args.json.write_text(json.dumps({"summary": summary, "frames": frames, "tracks": rows}, indent=1))
