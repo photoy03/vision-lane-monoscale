@@ -169,6 +169,13 @@ public:
     // E-9 diagnostic (observer_eval_E9c 3): true = publish() writes neutralise_slab back
     // into the grids, as upstream does; false leaves the stored grids to keyframes only.
     publish_commit_neutralise_ = declare_parameter<bool>("publish_commit_neutralise", true);
+    // E-9 (c1, observer_eval_E9i): carve (neutralise_slab written back, as a publish does)
+    // once after every keyframe, so the stored grids no longer depend on when publish ran
+    // (the write-back is idempotent between keyframes). false = upstream: only publish carves.
+    carve_on_keyframe_ = declare_parameter<bool>("carve_on_keyframe", false);
+    // With keyframe carves the publish timer only reads the grids (observer_eval_E9j 5):
+    // the map is then a function of the job order alone.
+    if (carve_on_keyframe_) {publish_commit_neutralise_ = false;}
     if (const char * dump = std::getenv("VISION_SWEEP_JOB_DUMP")) {job_dump_dir_ = dump;}
     // E-9 harness only: a random 0..N ms pause before each keyframe, to vary how the
     // camera workers interleave. Unset in every real run.
@@ -179,7 +186,7 @@ public:
     if (!timing_path.empty()) {
       timing_csv_.open(timing_path);
       timing_csv_ << "stamp_ns,camera,sources,cuda,queued_at_start,jobs_dropped_total,wait_ms,prep_ms,"
-        "match_ms,volume_copy_ms,verdict_ms,subplane_ms,integrate_ms,lock_hold_ms,grid_wait_ms\n";
+        "match_ms,volume_copy_ms,verdict_ms,subplane_ms,integrate_ms,lock_hold_ms,grid_wait_ms,carve_ms\n";
     }
     // Camera liveness (C-2 6): off keeps complete_through bound by every
     // camera, as before. dead_sec: the widest raw image gap of the 2026-09
@@ -836,6 +843,23 @@ private:
           }
         }
       }
+      double carve_ms = 0.0;
+      if (carve_on_keyframe_ && !stale) {
+        // (c1): this keyframe's version is kept as swept (what a publish right after it
+        // would have seen), then every grid gets the publish write-back. Every camera's
+        // lock, as publish() takes them; the job's own lock was released above. A publish
+        // in between carves the same cells (idempotent), so the order does not matter.
+        const auto carve_start = std::chrono::steady_clock::now();
+        const auto grid_locks = lock_all_grids();
+        std::vector<monoscale_occupancy::CameraGrid *> grids;
+        for (const auto & name : cameras_) {grids.push_back(&grids_[name]);}
+        const int cells = settings_.fixed_extent ?
+          monoscale_occupancy::carve(settings_, grids, monoscale_occupancy::legacy_window(settings_)) :
+          monoscale_occupancy::carve(settings_, grids);
+        carve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - carve_start).count();
+        ++carves_;
+        carved_cells_ += static_cast<uint64_t>(cells);
+      }
       const double elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - sweep_start).count();
       {
@@ -849,7 +873,7 @@ private:
                     << (timing.cuda ? 1 : 0) << ',' << queued_at_start << ',' << dropped_at_start << ','
                     << wait_ms << ',' << timing.prep_ms << ',' << timing.match_ms << ','
                     << timing.volume_copy_ms << ',' << timing.verdict_ms << ',' << timing.subplane_ms << ','
-                    << timing.integrate_ms << ',' << elapsed << ',' << grid_wait_ms << '\n';
+                    << timing.integrate_ms << ',' << elapsed << ',' << grid_wait_ms << ',' << carve_ms << '\n';
         timing_csv_.flush();
       }
       {
@@ -1195,6 +1219,7 @@ private:
     {
       std::vector<double> hold, wait;
       const uint64_t publishes = publishes_.load(), neutralised = neutralised_cells_.load();
+      const uint64_t carves = carves_.load(), carved = carved_cells_.load();
       {
         std::lock_guard<std::mutex> stats(lock_stats_mutex_);
         hold = lock_hold_ms_;
@@ -1207,10 +1232,12 @@ private:
       };
       RCLCPP_INFO(
         get_logger(),
-        "sweep_lock: hold_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] publish_wait_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] jobs_dropped=%ld by_camera[%s] workers=%zu publishes=%lu neutralised_cells=%lu commit=%d",
+        "sweep_lock: hold_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] publish_wait_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] jobs_dropped=%ld by_camera[%s] workers=%zu publishes=%lu neutralised_cells=%lu commit=%d "
+        "keyframe_carves=%lu carved_cells=%lu",
         hold.size(), q(hold, 0.5), q(hold, 0.9), q(hold, 1.0),
         wait.size(), q(wait, 0.5), q(wait, 0.9), q(wait, 1.0), dropped, dropped_by_camera.c_str(), worker_count,
-        static_cast<unsigned long>(publishes), static_cast<unsigned long>(neutralised), publish_commit_neutralise_ ? 1 : 0);
+        static_cast<unsigned long>(publishes), static_cast<unsigned long>(neutralised), publish_commit_neutralise_ ? 1 : 0,
+        static_cast<unsigned long>(carves), static_cast<unsigned long>(carved));
     }
     RCLCPP_INFO(
       get_logger(),
@@ -1320,6 +1347,8 @@ private:
   // reset in them (written back when publish_commit_neutralise_). Atomic: report() reads
   // them under mutex_, which must not take map_mutex_.
   std::atomic<uint64_t> publishes_{0}, neutralised_cells_{0};
+  bool carve_on_keyframe_ = false;
+  std::atomic<uint64_t> carves_{0}, carved_cells_{0};  // (c1) keyframe carves and the cells they reset
   uint64_t job_dump_count_ = 0;
   std::map<std::string, int64_t> newest_image_ns_;
   monoscale_occupancy::CameraLiveness liveness_{false, 0};  // guarded by mutex_

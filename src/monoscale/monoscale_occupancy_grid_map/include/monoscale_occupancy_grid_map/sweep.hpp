@@ -403,6 +403,14 @@ Published publish(
   const SweepSettings & settings, std::vector<CameraGrid *> grids,
   const GridWindow & request = GridWindow(), bool commit_neutralise = true);
 
+// The write-back half of publish() alone: neutralise_slab applied to the grids, exactly as a
+// publish with commit_neutralise writes it (same window rule), without drawing the map.
+// Returns the cells reset. E-9 (c1): the node calls it after every keyframe
+// (carve_on_keyframe) so the stored grids no longer depend on when publish ran.
+int carve(
+  const SweepSettings & settings, std::vector<CameraGrid *> grids,
+  const GridWindow & request = GridWindow());
+
 // The legacy fixed extent named by grid_width/grid_height/origin_x/origin_y.
 GridWindow legacy_window(const SweepSettings & settings);
 
