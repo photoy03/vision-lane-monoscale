@@ -118,6 +118,8 @@ def occupancy(ctx):
             ('occupancy_camera_liveness', 'camera_liveness_enabled', bool),
             ('occupancy_camera_dead_sec', 'camera_dead_sec', float),
             ('occupancy_parallel_cameras', 'parallel_cameras', bool),
+            ('occupancy_publish_rate_hz', 'publish_rate_hz', float),
+            ('occupancy_publish_commit_neutralise', 'publish_commit_neutralise', bool),
             ('occupancy_max_odom_gap_sec', 'max_odom_interpolation_gap_sec', float),
             ('occupancy_max_odom_translation_m', 'max_odom_interpolation_translation_m', float),
             ('occupancy_max_odom_yaw_deg', 'max_odom_interpolation_yaw_deg', float),

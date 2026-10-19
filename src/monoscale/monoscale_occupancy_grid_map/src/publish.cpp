@@ -305,7 +305,8 @@ void Sweep::integrate(
 }
 
 Published publish(
-  const SweepSettings & s, std::vector<CameraGrid *> grids, const GridWindow & request)
+  const SweepSettings & s, std::vector<CameraGrid *> grids, const GridWindow & request,
+  bool commit_neutralise)
 {
   Published out;
   // The extent to draw: what was asked for, or -- for the live node, which
@@ -409,7 +410,7 @@ Published publish(
         const uint8_t * f = failing.ptr<uint8_t>(r);
         float * lo = g->log_odds.ptr<float>(r);
         for (int c = 0; c < W; ++c) {
-          if (f[c] && lo[c] < 0.0f) {lo[c] = 0.0f;}
+          if (f[c] && lo[c] < 0.0f) {lo[c] = 0.0f; ++out.neutralised_cells;}
         }
       }
     }
@@ -478,7 +479,9 @@ Published publish(
   }
   out.free_after_erode = cv::countNonZero(values == 0);
   // neutralise_slab wrote into the views' log odds; put that back.
-  for (size_t i = 0; i < grids.size(); ++i) {grids[i]->commit(s, views[i]);}
+  if (commit_neutralise) {
+    for (size_t i = 0; i < grids.size(); ++i) {grids[i]->commit(s, views[i]);}
+  }
   out.values = values;
   return out;
 }

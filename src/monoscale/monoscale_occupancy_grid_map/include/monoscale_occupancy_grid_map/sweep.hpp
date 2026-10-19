@@ -316,6 +316,7 @@ struct Published
   int free_before_slab = 0;
   int free_after_slab = 0;
   int free_after_erode = 0;
+  int neutralised_cells = 0;  // cells whose free belief neutralise_slab reset (all cameras)
 };
 
 class Sweep
@@ -395,9 +396,12 @@ private:
 // before it started. `sweep_offline` passes the legacy fixed extent, because
 // it writes a bare .npy with no origin in it and the scoring reference reads
 // that file as 600 x 600 at (-30, -30).
+// commit_neutralise: write neutralise_slab back into the grids (upstream behaviour, so the
+// stored grids depend on when publish ran). false leaves the grids untouched (E-9
+// diagnostic; observer_eval_E9c 3).
 Published publish(
   const SweepSettings & settings, std::vector<CameraGrid *> grids,
-  const GridWindow & request = GridWindow());
+  const GridWindow & request = GridWindow(), bool commit_neutralise = true);
 
 // The legacy fixed extent named by grid_width/grid_height/origin_x/origin_y.
 GridWindow legacy_window(const SweepSettings & settings);

@@ -21,6 +21,10 @@ launch_arguments:
   occupancy_camera_dead_sec: ''
   # E-9: one sweep worker per camera (empty = package default, serial).
   occupancy_parallel_cameras: ''
+  # E-9 diagnostics only (empty = package default): map publish rate and whether a publish
+  # writes neutralise_slab back into the stored grids (upstream: true).
+  occupancy_publish_rate_hz: ''
+  occupancy_publish_commit_neutralise: ''
   occupancy_max_odom_gap_sec: ''
   occupancy_max_odom_translation_m: ''
   occupancy_max_odom_yaw_deg: ''

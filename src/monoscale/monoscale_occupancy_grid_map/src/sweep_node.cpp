@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -165,6 +166,9 @@ public:
     // max_pending_keyframes) instead of one worker for all cameras. Off by default
     // until the job harness shows the maps bit-identical (observer_eval_E9).
     parallel_cameras_ = declare_parameter<bool>("parallel_cameras", false);
+    // E-9 diagnostic (observer_eval_E9c 3): true = publish() writes neutralise_slab back
+    // into the grids, as upstream does; false leaves the stored grids to keyframes only.
+    publish_commit_neutralise_ = declare_parameter<bool>("publish_commit_neutralise", true);
     if (const char * dump = std::getenv("VISION_SWEEP_JOB_DUMP")) {job_dump_dir_ = dump;}
     // E-9 harness only: a random 0..N ms pause before each keyframe, to vary how the
     // camera workers interleave. Unset in every real run.
@@ -175,7 +179,7 @@ public:
     if (!timing_path.empty()) {
       timing_csv_.open(timing_path);
       timing_csv_ << "stamp_ns,camera,sources,cuda,queued_at_start,jobs_dropped_total,wait_ms,prep_ms,"
-        "match_ms,volume_copy_ms,verdict_ms,subplane_ms,integrate_ms,lock_hold_ms\n";
+        "match_ms,volume_copy_ms,verdict_ms,subplane_ms,integrate_ms,lock_hold_ms,grid_wait_ms\n";
     }
     // Camera liveness (C-2 6): off keeps complete_through bound by every
     // camera, as before. dead_sec: the widest raw image gap of the 2026-09
@@ -741,6 +745,29 @@ private:
     for (size_t i = 0; i < job.source_grays.size(); ++i) {image(job.source_grays[i], "_src" + std::to_string(i));}
   }
 
+  // Every camera's grid lock without holding one while blocking on another
+  // (observer_eval_E9b 3): block on one, try the rest, start over from the one that
+  // was busy. Returned locks release on destruction.
+  std::vector<std::unique_lock<std::mutex>> lock_all_grids()
+  {
+    std::vector<std::mutex *> all;
+    for (const auto & name : cameras_) {all.push_back(grid_mutex_[name].get());}
+    size_t first = 0;
+    while (true) {
+      std::vector<std::unique_lock<std::mutex>> held;
+      held.emplace_back(*all[first]);
+      size_t busy = all.size();
+      for (size_t k = 1; k < all.size(); ++k) {
+        const size_t i = (first + k) % all.size();
+        std::unique_lock<std::mutex> lock(*all[i], std::try_to_lock);
+        if (!lock.owns_lock()) {busy = i; break;}
+        held.push_back(std::move(lock));
+      }
+      if (busy == all.size()) {return held;}
+      first = busy;
+    }
+  }
+
   void worker_loop(size_t q)
   {
     while (true) {
@@ -772,32 +799,41 @@ private:
         thread_local std::minstd_rand jitter(static_cast<unsigned>(std::hash<std::thread::id>{}(std::this_thread::get_id())));
         std::this_thread::sleep_for(std::chrono::milliseconds(jitter() % (test_jitter_ms_ + 1)));
       }
+      double grid_wait_ms = 0.0;
       if (!stale) {
         // The camera's grid and sweep are written by this worker only (E-9), under the
         // camera's own lock: publish() also writes into the live grids (neutralise_slab
         // is committed back, publish.cpp), so it takes every camera's lock. The other
         // camera's worker and the image/odometry callbacks never wait on this one.
+        const auto grid_wait_start = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> grid_lock(*grid_mutex_[job.camera]);
+        grid_wait_ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - grid_wait_start).count();
         auto & grid = grids_[job.camera];
-        if (grid_line_[job.camera] != job.time_line) {
-          // The clock jumped back since this grid was last used: start it empty.
-          grid.reset(settings_);
-          grid_line_[job.camera] = job.time_line;
-        }
-        auto & sweep = sweeps_[job.camera];
-        if (!sweep) {sweep = std::make_unique<monoscale_occupancy::Sweep>(settings_, job.lens);}
-        sweep->keyframe(job.reference_gray, job.reference_pose, job.source_grays, job.source_poses, grid);
-        diagnostics = sweep->diagnostics();
-        timing = sweep->timing();
-        if (!settings_.fixed_extent) {
-          pruned = grid.prune(settings_, job.reference_pose.x, job.reference_pose.y, settings_.rolling_radius);
-        }
-        std::lock_guard<std::mutex> guard(map_mutex_);
-        stale = job.time_line != time_line_;
-        if (!stale) {
-          // Content time moves with the content, under the same lock.
-          contract_.changed(job.stamp_ns);
-          keep_version(job.camera, job.stamp_ns);
+        if (job.time_line < grid_line_[job.camera]) {
+          // check_time_line emptied this grid for a newer time line while the job
+          // waited: an older job must not write into it (observer_eval_E9b 2).
+          stale = true;
+        } else {
+          if (job.time_line > grid_line_[job.camera]) {
+            grid.reset(settings_);
+            grid_line_[job.camera] = job.time_line;
+          }
+          auto & sweep = sweeps_[job.camera];
+          if (!sweep) {sweep = std::make_unique<monoscale_occupancy::Sweep>(settings_, job.lens);}
+          sweep->keyframe(job.reference_gray, job.reference_pose, job.source_grays, job.source_poses, grid);
+          diagnostics = sweep->diagnostics();
+          timing = sweep->timing();
+          if (!settings_.fixed_extent) {
+            pruned = grid.prune(settings_, job.reference_pose.x, job.reference_pose.y, settings_.rolling_radius);
+          }
+          std::lock_guard<std::mutex> guard(map_mutex_);
+          stale = job.time_line != time_line_;
+          if (!stale) {
+            // Content time moves with the content, under the same lock.
+            contract_.changed(job.stamp_ns);
+            keep_version(job.camera, job.stamp_ns);
+          }
         }
       }
       const double elapsed = std::chrono::duration<double, std::milli>(
@@ -813,7 +849,7 @@ private:
                     << (timing.cuda ? 1 : 0) << ',' << queued_at_start << ',' << dropped_at_start << ','
                     << wait_ms << ',' << timing.prep_ms << ',' << timing.match_ms << ','
                     << timing.volume_copy_ms << ',' << timing.verdict_ms << ',' << timing.subplane_ms << ','
-                    << timing.integrate_ms << ',' << elapsed << '\n';
+                    << timing.integrate_ms << ',' << elapsed << ',' << grid_wait_ms << '\n';
         timing_csv_.flush();
       }
       {
@@ -851,8 +887,7 @@ private:
   {
     if (!clock_generation_.take_reset()) {return;}
     // Camera grid locks first (a worker may be sweeping), then the rest (E-9).
-    std::vector<std::unique_lock<std::mutex>> grid_locks;
-    for (const auto & name : cameras_) {grid_locks.emplace_back(*grid_mutex_[name]);}
+    const auto grid_locks = lock_all_grids();
     std::scoped_lock all(mutex_, job_mutex_, map_mutex_);
     time_line_ = clock_generation_.value();
     pending_.clear();
@@ -1008,10 +1043,9 @@ private:
     bool exact_available = true;
     {
       const auto wait_start = std::chrono::steady_clock::now();
-      // Every camera's grid lock (camera order), then the map lock: the same order
-      // a worker takes its own grid lock then map_mutex_, so no cycle (E-9).
-      std::vector<std::unique_lock<std::mutex>> grid_locks;
-      for (const auto & name : cameras_) {grid_locks.emplace_back(*grid_mutex_[name]);}
+      // Every camera's grid lock (lock_all_grids), then the map lock: a worker takes
+      // its own grid lock then map_mutex_, so no cycle (E-9).
+      const auto grid_locks = lock_all_grids();
       std::lock_guard<std::mutex> guard(map_mutex_);
       {
         // C-4 measurement: how long publishing waited for the worker's lock.
@@ -1022,9 +1056,11 @@ private:
       }
       published = settings_.fixed_extent ?
         monoscale_occupancy::publish(
-          settings_, grids, monoscale_occupancy::legacy_window(settings_)) :
-        monoscale_occupancy::publish(settings_, grids);
+          settings_, grids, monoscale_occupancy::legacy_window(settings_), publish_commit_neutralise_) :
+        monoscale_occupancy::publish(settings_, grids, monoscale_occupancy::GridWindow(), publish_commit_neutralise_);
       if (published.window.empty()) {return;}
+      ++publishes_;
+      neutralised_cells_ += static_cast<uint64_t>(published.neutralised_cells);
       // The grid just computed holds every keyframe so far: its own time.
       latest_content_max = contract_.content_max();
       // The snapshot is the map exact at complete_through: every camera's grid
@@ -1088,8 +1124,9 @@ private:
       std::vector<monoscale_occupancy::CameraGrid *> held;
       for (const auto & grid : exact) {held.push_back(grid.get());}
       const auto older = settings_.fixed_extent ?
-        monoscale_occupancy::publish(settings_, held, monoscale_occupancy::legacy_window(settings_)) :
-        monoscale_occupancy::publish(settings_, held);
+        monoscale_occupancy::publish(settings_, held, monoscale_occupancy::legacy_window(settings_),
+          publish_commit_neutralise_) :
+        monoscale_occupancy::publish(settings_, held, monoscale_occupancy::GridWindow(), publish_commit_neutralise_);
       snapshot.grid.header = message.header;
       snapshot.grid.info = message.info;
       snapshot.grid.info.width = static_cast<uint32_t>(older.window.width);
@@ -1157,6 +1194,7 @@ private:
     }
     {
       std::vector<double> hold, wait;
+      const uint64_t publishes = publishes_.load(), neutralised = neutralised_cells_.load();
       {
         std::lock_guard<std::mutex> stats(lock_stats_mutex_);
         hold = lock_hold_ms_;
@@ -1169,9 +1207,10 @@ private:
       };
       RCLCPP_INFO(
         get_logger(),
-        "sweep_lock: hold_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] publish_wait_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] jobs_dropped=%ld by_camera[%s] workers=%zu",
+        "sweep_lock: hold_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] publish_wait_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] jobs_dropped=%ld by_camera[%s] workers=%zu publishes=%lu neutralised_cells=%lu commit=%d",
         hold.size(), q(hold, 0.5), q(hold, 0.9), q(hold, 1.0),
-        wait.size(), q(wait, 0.5), q(wait, 0.9), q(wait, 1.0), dropped, dropped_by_camera.c_str(), worker_count);
+        wait.size(), q(wait, 0.5), q(wait, 0.9), q(wait, 1.0), dropped, dropped_by_camera.c_str(), worker_count,
+        static_cast<unsigned long>(publishes), static_cast<unsigned long>(neutralised), publish_commit_neutralise_ ? 1 : 0);
     }
     RCLCPP_INFO(
       get_logger(),
@@ -1276,6 +1315,11 @@ private:
   std::map<std::string, std::unique_ptr<std::mutex>> grid_mutex_;
   std::string job_dump_dir_;
   int test_jitter_ms_ = 0;
+  bool publish_commit_neutralise_ = true;
+  // E-9 diagnostic counters: publishes that drew a map and the free cells neutralise_slab
+  // reset in them (written back when publish_commit_neutralise_). Atomic: report() reads
+  // them under mutex_, which must not take map_mutex_.
+  std::atomic<uint64_t> publishes_{0}, neutralised_cells_{0};
   uint64_t job_dump_count_ = 0;
   std::map<std::string, int64_t> newest_image_ns_;
   monoscale_occupancy::CameraLiveness liveness_{false, 0};  // guarded by mutex_
