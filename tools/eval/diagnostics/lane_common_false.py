@@ -53,15 +53,19 @@ def far_false_samples(raster, lanes, segments):
         lfc.BAND = saved
 
 
-def nearest_label(x, y, angle, lanes):
-    """(distance, parallel) to the nearest label point within NEAR_M, else (None, False)."""
+def nearest_label(x, y, angle, lanes, signed=False):
+    """(distance, parallel) to the nearest label point within NEAR_M, else (None, False).
+    signed=True adds the lateral offset of the sample from that label point, along the
+    base_link y axis (+ = the sample lies left of the label)."""
     best = None
     for lane in lanes:
         for px, py, pa in lane:
             d = math.hypot(x - px, y - py)
             if d <= NEAR_M and (best is None or d < best[0]):
-                best = (d, ma.angle_diff(angle, pa) <= MAX_ANGLE)
-    return best if best is not None else (None, False)
+                best = (d, ma.angle_diff(angle, pa) <= MAX_ANGLE, y - py)
+    if best is None:
+        return (None, False, None) if signed else (None, False)
+    return best if signed else best[:2]
 
 
 def main():
@@ -82,7 +86,7 @@ def main():
     loaded = {run: ma.load_run(run) for run in args.runs}
     seen = first_seen(loaded[args.runs[0]][1])
     bag = str(Path(json.loads((args.runs[0] / "manifest.json").read_text())["bag_path_read_only"]).resolve())
-    rows, frames, distance_rows = [], [], []
+    rows, frames, distance_rows, offset_rows = [], [], [], []
     for frame in samples["frames"]:
         if str(Path(frame["bag"]).resolve()) != bag or frame["stamp"] < args.after_ns * 1e-9:
             continue
@@ -110,9 +114,11 @@ def main():
         frames.append({"frame": frame["id"], "false_m": round(sum(s[4] for s in falses), 3),
                        "common_false_m": round(sum(s[4] for s in common), 3), "total_m": round(total, 3)})
         for s in common:
-            d, par = nearest_label(s[1], s[2], s[3], lanes)
+            d, par, dy = nearest_label(s[1], s[2], s[3], lanes, signed=True)
             if d is not None and par:
                 distance_rows.append((s[1], d, s[4]))
+                offset_rows.append({"frame": frame["id"], "track": s[0], "x": round(s[1], 2), "y": round(s[2], 3),
+                                    "offset_y": round(dy, 3), "length": s[4]})
         by_track = {}
         for s in common:
             by_track.setdefault(s[0], []).append(s)
@@ -145,9 +151,12 @@ def main():
              "median_offset_m": round(statistics.median([d for x, d, _ in distance_rows if b[0] <= x < b[1]]), 3)
              if any(b[0] <= x < b[1] for x, _, _ in distance_rows) else None}
             for b in bands]
+    if args.by_distance:
+        summary["offset_samples"] = len(offset_rows)
     print(json.dumps(summary), flush=True)
     if args.json:
-        args.json.write_text(json.dumps({"summary": summary, "frames": frames, "tracks": rows}, indent=1))
+        args.json.write_text(json.dumps({"summary": summary, "frames": frames, "tracks": rows,
+                                         "offset_samples": offset_rows}, indent=1))
     if args.report:
         lines = [f"# common lane false: {', '.join(summary['runs'])}", "", json.dumps(summary, ensure_ascii=False), "",
                  "| frame | track | length m | kind | label dist m | first seen | x range | y range |",
