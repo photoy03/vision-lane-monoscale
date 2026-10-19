@@ -100,7 +100,15 @@ target_link_libraries(job_builder_golden monoscale_occupancy_core ${OpenCV_LIBS}
 ament_target_dependencies(job_builder_golden
   rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
 
-install(TARGETS monoscale_occupancy_core sweep_offline sweep_node sweep_jobs_golden job_builder_golden
+# E-9 deterministic occupancy replay (observer_eval_E9j): the node's code serially over a
+# recorded input event sequence, with a fixed carve rule. Driven by tools/run/occ_offline.py.
+add_executable(occ_offline test/occ_offline.cpp)
+target_include_directories(occ_offline PRIVATE include)
+target_link_libraries(occ_offline monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART} SQLite::SQLite3)
+ament_target_dependencies(occ_offline
+  rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
+
+install(TARGETS monoscale_occupancy_core sweep_offline sweep_node sweep_jobs_golden job_builder_golden occ_offline
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})

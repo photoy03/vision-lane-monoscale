@@ -619,6 +619,22 @@ private:
         busy_[q] = true;
         inflight_stamp_ns_[q] = job.stamp_ns;
       }
+      run_job(job, queued_at_start, dropped_at_start);
+      {
+        std::lock_guard<std::mutex> guard(job_mutex_);
+        busy_[q] = false;
+        inflight_stamp_ns_[q] = 0;
+      }
+      job_idle_.notify_all();
+    }
+  }
+
+  // One keyframe job, start to end: sweep into its camera's grid, keep the version, the
+  // (c1) carve, the timing row and the counters. The workers call it; so does occ_offline,
+  // serially, with the workers stopped.
+  void run_job(KeyframeJob & job, size_t queued_at_start, int64_t dropped_at_start)
+  {
+    {
       const auto sweep_start = std::chrono::steady_clock::now();
       const double wait_ms = std::chrono::duration<double, std::milli>(sweep_start - job.queued_at).count();
       monoscale_occupancy::KeyframeTiming timing;
@@ -723,12 +739,6 @@ private:
         have_stamp_ = true;
         }
       }
-      {
-        std::lock_guard<std::mutex> guard(job_mutex_);
-        busy_[q] = false;
-        inflight_stamp_ns_[q] = 0;
-      }
-      job_idle_.notify_all();
     }
   }
 
