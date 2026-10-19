@@ -33,7 +33,7 @@ ament_target_dependencies(compressed_image_replay_node rclcpp sensor_msgs)
 target_link_libraries(compressed_image_replay_node ${OpenCV_LIBS})
 target_include_directories(compressed_image_replay_node PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_compile_options(compressed_image_replay_node PRIVATE -O3 -DNDEBUG)
-target_include_directories(global_mapping_node PRIVATE ${OpenCV_INCLUDE_DIRS} ${monoscale_pose_INCLUDE_DIRS} ${lane_map_INCLUDE_DIRS})
+target_include_directories(global_mapping_node PRIVATE include ${OpenCV_INCLUDE_DIRS} ${monoscale_pose_INCLUDE_DIRS} ${lane_map_INCLUDE_DIRS})
 target_compile_options(global_mapping_node PRIVATE -O3 -DNDEBUG)
 
 set(VISION_LANE_OPENCV_CUDA_FOUND TRUE)
@@ -78,4 +78,13 @@ install(PROGRAMS scripts/convert_fisheye_npz.py scripts/compare_profiles.py
   scripts/compare_preprocess_backends.py
   scripts/plot_profiles.py
   DESTINATION lib/${PROJECT_NAME})
+# E-8: the detection code as a header, and its golden-output check (tools, not a test:
+# it needs recorded frames that do not ship with the package).
+install(DIRECTORY include/ DESTINATION include)
+add_executable(lane_pipeline_golden test/lane_pipeline_golden.cpp)
+target_include_directories(lane_pipeline_golden PRIVATE include ${OpenCV_INCLUDE_DIRS} ${lane_map_INCLUDE_DIRS})
+target_link_libraries(lane_pipeline_golden ${OpenCV_LIBS})
+target_compile_options(lane_pipeline_golden PRIVATE -O3 -DNDEBUG)
+install(TARGETS lane_pipeline_golden RUNTIME DESTINATION lib/${PROJECT_NAME})
+
 ament_package()
