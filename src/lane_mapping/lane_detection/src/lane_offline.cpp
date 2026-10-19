@@ -147,6 +147,8 @@ int main(int argc, char ** argv)
     std::ofstream snapshots(out_dir + "/snapshots.jsonl");
     std::ofstream creations(out_dir + "/creations.jsonl");
     creations << std::setprecision(17);
+    std::ofstream registration(out_dir + "/registration.jsonl");
+    registration << std::setprecision(17);
     if (!journal || !snapshots) {throw std::runtime_error("cannot write into " + out_dir);}
     journal << std::setprecision(17);
     snapshots << std::setprecision(17);
@@ -191,6 +193,20 @@ int main(int argc, char ** argv)
                     << "],\"source_distance\":" << best << "}\n";
         }
         ++outcomes[result.outcome + ":" + result.reason];
+        // E-2b drift table (observer_eval_E2B_drift 3): the bank's registration state after
+        // every input that reached it (offline log only).
+        if (!result.warmup && !result.motion_skipped) {
+          const auto & reg = bank.last;
+          const auto c = bank.corrected({0.0, 0.0});
+          registration << "{\"stamp_ns\":" << stamp << ",\"correction\":[" << c.x << ',' << c.y << ','
+                       << bank.yaw_correction() << "],\"accepted\":" << (reg.accepted ? "true" : "false")
+                       << ",\"near\":" << (reg.near ? "true" : "false") << ",\"pairs\":" << reg.pairs
+                       << ",\"rank\":" << reg.rank << ",\"rms\":" << reg.rms << ",\"delta\":[" << reg.delta.x << ','
+                       << reg.delta.y << ',' << reg.delta.yaw << "],\"held_total\":" << bank.held
+                       << ",\"aligned_total\":" << bank.aligned << ",\"created\":" << result.update.created
+                       << ",\"merged\":" << result.update.merged << ",\"usable\":" << result.usable_segments
+                       << ",\"pose\":[" << here.x << ',' << here.y << ',' << here.theta << "]}\n";
+        }
         if (!result.keyframe_created) {return;}
         ++keyframes;
         last_pose = here;

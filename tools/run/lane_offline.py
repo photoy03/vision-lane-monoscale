@@ -187,6 +187,9 @@ def main():
     ap.add_argument("--labels", type=Path)
     ap.add_argument("--latency-ms", type=float)
     ap.add_argument("--keep-frames", action="store_true")
+    ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                    help="override one lane_map or detection parameter of the dump (diagnostic runs, e.g. "
+                         "enable_pose_registration=false); recorded in inputs.json")
     args = ap.parse_args()
     run, pose_run, out = args.run.resolve(), (args.pose_run or args.run).resolve(), args.out.resolve()
     if out.exists():
@@ -199,8 +202,15 @@ def main():
     (out / "poses.txt").write_text("\n".join(recorded_poses(pose_run)) + "\n")
     dump_params(run / "parameter_dumps/global_mapping_cpp.yaml", "global_mapping_cpp", out / "detection_params.txt")
     dump_params(run / "parameter_dumps/lane_map_fusion.yaml", "lane_map_fusion", out / "map_params.txt")
+    for item in args.set:
+        name, _, value = item.partition("=")
+        for target in (out / "detection_params.txt", out / "map_params.txt"):
+            lines = [line for line in target.read_text().splitlines() if line.split(" ", 1)[0] != name]
+            if target.name == "map_params.txt" or any(line.split(" ", 1)[0] == name for line in target.read_text().splitlines()):
+                target.write_text("\n".join(lines + [f"{name} {value}"]) + "\n")
     latency = args.latency_ms if args.latency_ms is not None else latency_ms(run)
-    meta = {"run": str(run), "pose_run": str(pose_run), "bag": str(bag), "frames": len(frames), "latency_ms": latency}
+    meta = {"run": str(run), "pose_run": str(pose_run), "bag": str(bag), "frames": len(frames), "latency_ms": latency,
+            "overrides": args.set}
     (out / "inputs.json").write_text(json.dumps(meta, indent=1))
     binary = REPO / "install/lane_detection/lib/lane_detection/lane_offline"
     subprocess.run([str(binary), "--frames", str(out / "frames.txt"), "--poses", str(out / "poses.txt"),
