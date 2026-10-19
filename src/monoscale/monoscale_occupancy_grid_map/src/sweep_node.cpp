@@ -167,10 +167,11 @@ public:
     // With keyframe carves the publish timer only reads the grids (observer_eval_E9j 5):
     // the map is then a function of the job order alone.
     if (carve_on_keyframe_) {publish_commit_neutralise_ = false;}
-    // E-9 (c2, observer_eval_E9i 3 / E9k 7): with parallel workers and keyframe carves, the
-    // sweeps run in parallel but integrate + carve go in the order the jobs were made, so
-    // the map is the serial node's. Without keyframe carves, parallel is unordered (E-9).
-    ordered_ = parallel_cameras_ && carve_on_keyframe_;
+    // E-9 (c2, observer_eval_E9i 3 / E9l 4): with parallel workers the sweeps run in
+    // parallel but integrate (+ carve) go in the order the jobs were made, so the map is the
+    // serial node's whatever carve_on_keyframe says. To get upstream behaviour back, turn
+    // carve_on_keyframe and parallel_cameras off together.
+    ordered_ = parallel_cameras_;
     if (const char * dump = std::getenv("VISION_SWEEP_JOB_DUMP")) {job_dump_dir_ = dump;}
     // E-9 harness only: a random 0..N ms pause before each keyframe, to vary how the
     // camera workers interleave. Unset in every real run.

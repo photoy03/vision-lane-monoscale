@@ -10,6 +10,7 @@
 //   sweep_jobs_golden <job_dir> <max_jobs_per_camera> <out.txt> --ros-args --params-file P ...
 // HARNESS_PUBLISH_EACH=1: one job at a time, the node's publish() after each (publish
 // commits neutralise_slab back into the live grids, so this checks that interplay).
+// HARNESS_STALE_JOB=k: job k is dropped as stale (an ordered turn that is never integrated).
 // HARNESS_PUBLISH_STRESS=1: publish() from a second thread every 50 ms while the
 // workers run (no golden comparison: a thread-safety exercise).
 #include <algorithm>
@@ -174,6 +175,11 @@ int main(int argc, char ** argv)
     const bool publish_each = std::getenv("HARNESS_PUBLISH_EACH") != nullptr;
     // HARNESS_PUBLISH_REPEAT=n: n publishes after each job (is neutralise idempotent?).
     const int publish_repeat = std::getenv("HARNESS_PUBLISH_REPEAT") ? std::atoi(std::getenv("HARNESS_PUBLISH_REPEAT")) : 1;
+    // HARNESS_STALE_JOB=k: job k is made on another clock generation, so the node drops it
+    // as stale. With ordered parallel workers its integration turn must still pass
+    // (observer_eval_E9l 4): the run ends, and serial and parallel agree.
+    const long stale_job = std::getenv("HARNESS_STALE_JOB") ? std::atol(std::getenv("HARNESS_STALE_JOB")) : -1;
+    long submitted = 0;
     std::atomic<bool> stress_done{false};
     std::thread stress;
     if (std::getenv("HARNESS_PUBLISH_STRESS")) {
@@ -190,7 +196,7 @@ int main(int argc, char ** argv)
       job.reference_pose = j.reference;
       job.stamp = j.stamp;
       job.stamp_ns = j.stamp_ns;
-      job.time_line = node->time_line_;
+      job.time_line = submitted++ == stale_job ? node->time_line_ + 7 : node->time_line_;
       job.lens = node->scaled_lens(j.camera);
       job.source_grays = j.source_grays;
       job.source_poses = j.sources;
