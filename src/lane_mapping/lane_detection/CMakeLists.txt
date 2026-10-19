@@ -86,5 +86,10 @@ target_include_directories(lane_pipeline_golden PRIVATE include ${OpenCV_INCLUDE
 target_link_libraries(lane_pipeline_golden ${OpenCV_LIBS})
 target_compile_options(lane_pipeline_golden PRIVATE -O3 -DNDEBUG)
 install(TARGETS lane_pipeline_golden RUNTIME DESTINATION lib/${PROJECT_NAME})
+add_executable(lane_offline src/lane_offline.cpp)
+target_include_directories(lane_offline PRIVATE include src ${OpenCV_INCLUDE_DIRS} ${lane_map_INCLUDE_DIRS} ${monoscale_pose_INCLUDE_DIRS})
+target_link_libraries(lane_offline ${OpenCV_LIBS})
+target_compile_options(lane_offline PRIVATE -O3 -DNDEBUG)
+install(TARGETS lane_offline RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 ament_package()

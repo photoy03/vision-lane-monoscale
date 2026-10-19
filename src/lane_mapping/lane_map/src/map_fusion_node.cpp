@@ -31,6 +31,7 @@ using Recovered = vision_lane_interfaces::msg::RecoveredMarkingSegmentArray;
 #include <opencv2/imgproc.hpp>
 #include "lane_map/registration.hpp"
 #include "lane_map/map_apply.hpp"
+#include "lane_map/node_settings.hpp"
 #include "lane_map/recovery_identity.hpp"
 #include "lane_map/lane_mapper.hpp"
 #include "lane_map/frame_completion.hpp"
@@ -175,31 +176,7 @@ class MapFusionNode : public rclcpp::Node {
     int input_segments{0},usable_segments{0},created{0},merged{0},continued{0},pruned{0};
   };
   lane_mapping::MapperSettings mapper_settings() {
-    lane_mapping::MapperSettings m;
-    m.odom_buffer_sec=declare_parameter<double>("mapper_odom_buffer_sec",m.odom_buffer_sec);
-    m.max_odom_age_sec=declare_parameter<double>("mapper_max_odom_age_sec",m.max_odom_age_sec);
-    m.max_odom_gap_sec=declare_parameter<double>("mapper_max_odom_gap_sec",m.max_odom_gap_sec);
-    m.ttl_sec=declare_parameter<double>("mapper_pending_ttl_sec",m.ttl_sec);
-    m.unresolvable_grace_sec=declare_parameter<double>("mapper_unresolvable_grace_sec",m.unresolvable_grace_sec);
-    m.max_count=static_cast<size_t>(declare_parameter<int>("mapper_pending_max_count",static_cast<int>(m.max_count)));
-    m.commit_budget=declare_parameter<int>("mapper_commit_budget",m.commit_budget);
-    m.drop_unresolvable_head=declare_parameter<bool>("mapper_drop_unresolvable_head",m.drop_unresolvable_head);
-    m.tracker_reset_gap_sec=declare_parameter<double>("mapper_tracker_reset_gap_sec",m.tracker_reset_gap_sec);
-    auto &t=m.tracker;
-    t.history=declare_parameter<int>("tracker_history",t.history);
-    t.confirm_hits=declare_parameter<int>("tracker_confirm_hits",t.confirm_hits);
-    t.max_missed=declare_parameter<int>("tracker_max_missed",t.max_missed);
-    t.temporal_angle=declare_parameter<double>("tracker_temporal_angle_deg",t.temporal_angle);
-    t.temporal_offset=declare_parameter<double>("tracker_temporal_offset_m",t.temporal_offset);
-    t.temporal_anchor_offset=declare_parameter<double>("tracker_temporal_anchor_offset_m",t.temporal_anchor_offset);
-    t.temporal_gap=declare_parameter<double>("tracker_temporal_gap_m",t.temporal_gap);
-    t.ema=declare_parameter<double>("tracker_ema",t.ema);
-    if(!std::isfinite(m.ttl_sec)||m.ttl_sec<=0||!std::isfinite(m.unresolvable_grace_sec)||
-       m.unresolvable_grace_sec<=0||m.unresolvable_grace_sec>m.ttl_sec||m.max_count<1||m.commit_budget<1||
-       !std::isfinite(m.max_odom_age_sec)||m.max_odom_age_sec<=0||!std::isfinite(m.max_odom_gap_sec)||
-       m.max_odom_gap_sec<=0||t.history<1||t.confirm_hits<1||t.max_missed<0||t.ema<=0||t.ema>1)
-      throw std::invalid_argument("invalid lane mapper parameters");
-    return m;
+    return lane_map_settings::mapper_settings(declare_());
   }
   // Watermark = snapshot complete_through (see PipelineProgress.msg): with the
   // mapper, just before the oldest observation still waiting for a pose and never
@@ -378,26 +355,14 @@ class MapFusionNode : public rclcpp::Node {
     std::filesystem::rename(temporary,mapper_summary_path_,error);
   }
   lane_fusion::Settings settings() {
-    lane_fusion::Settings s;
-    s.angle_deg=declare_parameter<double>("match_angle_deg",s.angle_deg);
-    s.offset_m=declare_parameter<double>("match_offset_m",s.offset_m);
-    s.overlap_m=declare_parameter<double>("match_overlap_m",s.overlap_m);
-    s.overlap_ratio=declare_parameter<double>("match_overlap_ratio",s.overlap_ratio);
-    s.bin_m=declare_parameter<double>("support_bin_m",s.bin_m);
-    s.confirm_views=declare_parameter<int>("confirm_keyframes",s.confirm_views);
-    s.min_length_m=declare_parameter<double>("min_segment_length_m",s.min_length_m);
-    s.max_length_m=declare_parameter<double>("max_segment_length_m",s.max_length_m);
-    s.min_confidence=declare_parameter<double>("min_confidence",s.min_confidence);
-    s.max_landmarks=declare_parameter<int>("max_landmarks",s.max_landmarks);
-    s.tentative_ttl_sec=declare_parameter<double>("tentative_ttl_sec",s.tentative_ttl_sec);
-    s.confirmed_ttl_sec=declare_parameter<double>("confirmed_ttl_sec",s.confirmed_ttl_sec);
-    s.continuation_mode=declare_parameter<bool>("continuation_mode",s.continuation_mode);
-    s.continuation_gap_m=declare_parameter<double>("continuation_gap_m",s.continuation_gap_m);
-    s.duplicate_render_offset_m=declare_parameter<double>("duplicate_render_offset_m",s.duplicate_render_offset_m);
-    s.duplicate_candidate_offset_m=declare_parameter<double>("duplicate_candidate_offset_m",s.duplicate_candidate_offset_m);
-    s.pose_registration=declare_parameter<bool>("enable_pose_registration",s.pose_registration);
-    return s;
+    return lane_map_settings::bank_settings(declare_());
   }
+  // declare_parameter as a callable for lane_map/node_settings.hpp.
+  struct Declare {
+    rclcpp::Node* node;
+    template<class T> T operator()(const char* name,T value) const {return node->declare_parameter<T>(name,value);}
+  };
+  Declare declare_() {return Declare{this};}
   static std::string json_string(const std::string& value) {
     std::ostringstream out; out << '"';
     for (const unsigned char c : value) {
