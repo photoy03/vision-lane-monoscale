@@ -187,6 +187,9 @@ int main(int argc, char ** argv)
           while (!queue.empty()) {fresh.push_back(std::move(queue.front())); queue.pop_front();}
         }
       }
+      // In the order made (with parallel_cameras there is one queue per camera, and run_job
+      // integrates in that order).
+      std::stable_sort(fresh.begin(), fresh.end(), [](const auto & a, const auto & b) {return a.sequence < b.sequence;});
       for (auto & job : fresh) {
         if (pending) {process(*pending, &job.stamp_ns);}
         pending = std::make_unique<Made>(Made{std::move(job), e.virtual_ns, i});

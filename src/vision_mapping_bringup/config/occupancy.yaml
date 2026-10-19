@@ -19,7 +19,7 @@ launch_arguments:
   # solve off the layer still stops while the pose is down.
   occupancy_camera_liveness: 'true'
   occupancy_camera_dead_sec: ''
-  # E-9: one sweep worker per camera (empty = package default, serial).
+  # E-9: one sweep worker per camera (empty = package default: parallel, ordered by (c2)).
   occupancy_parallel_cameras: ''
   # E-9 diagnostics only (empty = package default): map publish rate and whether a publish
   # writes neutralise_slab back into the stored grids (upstream: true).

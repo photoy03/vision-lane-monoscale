@@ -145,7 +145,7 @@ def replay(pose_run: Path, out: Path, rule: str):
     with open(out / "occ_offline.log", "w") as log:
         subprocess.run([str(binary), str(out / "events.txt"), str(out), arg, "--ros-args",
                         "-r", "__node:=monoscale_occupancy_grid_map", "--params-file", str(params),
-                        "-p", "max_pending_keyframes:=1000000", "-p", "carve_on_keyframe:=false",
+                        "-p", "max_pending_keyframes:=1000000", "-p", "carve_on_keyframe:=false", "-p", "parallel_cameras:=false",
                         "-p", "keyframe_timing_csv_path:=''", "-p", "use_sim_time:=false"],
                        check=True, stdout=log, stderr=subprocess.STDOUT, env=env)
     return json.loads((out / "summary.json").read_text())

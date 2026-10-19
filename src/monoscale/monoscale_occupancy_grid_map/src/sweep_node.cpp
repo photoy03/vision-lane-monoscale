@@ -151,9 +151,10 @@ public:
       "min_blob_reference_pixels", 80);
     max_pending_keyframes_ = declare_parameter<int>("max_pending_keyframes", 2);
     // E-9: one dedicated worker per camera (each with its own queue of
-    // max_pending_keyframes) instead of one worker for all cameras. Off by default
-    // until the job harness shows the maps bit-identical (observer_eval_E9).
-    parallel_cameras_ = declare_parameter<bool>("parallel_cameras", false);
+    // max_pending_keyframes) instead of one worker for all cameras. Default since (c2)
+    // (observer_eval_E9i 5, E9k): with keyframe carves the workers integrate in job order,
+    // byte-identical to one worker in the job harness.
+    parallel_cameras_ = declare_parameter<bool>("parallel_cameras", true);
     // E-9 diagnostic (observer_eval_E9c 3): true = publish() writes neutralise_slab back
     // into the grids, as upstream does; false leaves the stored grids to keyframes only.
     publish_commit_neutralise_ = declare_parameter<bool>("publish_commit_neutralise", true);
@@ -1199,7 +1200,7 @@ private:
   std::vector<std::deque<KeyframeJob>> queues_;
   std::vector<int64_t> inflight_stamp_ns_;
   std::vector<bool> busy_;
-  bool parallel_cameras_ = false;
+  bool parallel_cameras_ = true;
   std::map<std::string, int64_t> jobs_dropped_by_camera_;  // guarded by job_mutex_
   std::map<std::string, uint64_t> grid_line_;  // time line each camera's grid was built on; its worker only
   // Per-camera grid locks (E-9): a worker holds its camera's while it sweeps; publish()

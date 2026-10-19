@@ -156,9 +156,13 @@ int main(int argc, char ** argv)
         for (const auto & job : built) {job_line(out, i, job); ++jobs;}
       } else {
         std::lock_guard<std::mutex> guard(node->job_mutex_);
+        // In the order made (parallel_cameras keeps one queue per camera).
+        std::vector<KeyframeJob> fresh;
         for (auto & queue : node->queues_) {
-          while (!queue.empty()) {job_line(out, i, queue.front()); queue.pop_front(); ++jobs;}
+          while (!queue.empty()) {fresh.push_back(std::move(queue.front())); queue.pop_front();}
         }
+        std::stable_sort(fresh.begin(), fresh.end(), [](const auto & a, const auto & b) {return a.sequence < b.sequence;});
+        for (const auto & job : fresh) {job_line(out, i, job); ++jobs;}
       }
     }
     long long c[11];
