@@ -10,6 +10,7 @@
 //                   of /perception/occupancy_grid_map): carve after the last job whose
 //                   running maximum stamp is at or before a recorded stamp
 //   none            no carve at all (diagnostic)
+//   every:<n>       carve after every n-th job (diagnostic: the carve density curve, E9k 4)
 // Writes out_dir/jobs.jsonl (one line per job), maps.bin + maps.jsonl (the drawn map after
 // every job: int8 cells, row-major, and where it sits), summary.json.
 #include <algorithm>
@@ -78,7 +79,9 @@ int main(int argc, char ** argv)
     for (int64_t v; in >> v;) {recorded.push_back(v);}
     std::sort(recorded.begin(), recorded.end());
     recorded.erase(std::unique(recorded.begin(), recorded.end()), recorded.end());
-  } else if (rule != "keyframe" && rule != "none") {
+  }
+  const int every = rule.rfind("every:", 0) == 0 ? std::atoi(rule.c_str() + 6) : 0;
+  if (rule.rfind("stamps:", 0) != 0 && rule != "keyframe" && rule != "none" && every <= 0) {
     std::fprintf(stderr, "unknown rule %s\n", rule.c_str());
     return 2;
   }
@@ -115,7 +118,7 @@ int main(int argc, char ** argv)
         runmax = j == 0 ? m.job.stamp_ns : std::max(runmax, m.job.stamp_ns);
         job_stamps.insert(m.job.stamp_ns);
         const int64_t upper = next_stamp ? std::max(runmax, *next_stamp) : INT64_MAX;
-        bool carve = rule == "keyframe";
+        bool carve = rule == "keyframe" || (every > 0 && (j + 1) % static_cast<size_t>(every) == 0);
         while (next_recorded < recorded.size() && recorded[next_recorded] < runmax) {
           if (j == 0) {++recorded_before_first;}
           ++next_recorded;  // older than this job's content: placed earlier (or before the first job)

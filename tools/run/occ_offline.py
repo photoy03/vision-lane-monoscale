@@ -21,6 +21,7 @@ Replay (occ_offline, C++: the node's own code, serially) with a carve rule (E9j 
             stamp is at or before one
   keyframe  (나) carve after every job (carve_on_keyframe)
   none      no carve (diagnostic)
+  every:N   carve after every N-th job (diagnostic: carve density curve)
 Parameters are the pose run's occupancy parameter dump (carve_on_keyframe forced false: the
 rule is applied by the replay). With --labels, every labelled frame of the bag is scored
 with map_accuracy's occupancy code (imm / pass / final windows, lane delay 3.0 s, pass
@@ -226,7 +227,7 @@ def main():
     ap.add_argument("--pose-run", type=Path)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--events-only", action="store_true")
-    ap.add_argument("--rule", choices=("stamps", "keyframe", "none"), default="stamps")
+    ap.add_argument("--rule", default="stamps", help="stamps | keyframe | none | every:N (carve after every N-th job)")
     ap.add_argument("--labels", type=Path)
     ap.add_argument("--keep-maps", action="store_true")
     args = ap.parse_args()
