@@ -30,6 +30,7 @@
 using Recovered = vision_lane_interfaces::msg::RecoveredMarkingSegmentArray;
 #include <opencv2/imgproc.hpp>
 #include "lane_map/registration.hpp"
+#include "lane_map/map_apply.hpp"
 #include "lane_map/recovery_identity.hpp"
 #include "lane_map/lane_mapper.hpp"
 #include "lane_map/frame_completion.hpp"
@@ -89,6 +90,10 @@ class MapFusionNode : public rclcpp::Node {
       xmax_<=xmin_||ymax_<=ymin_||hz<=0||hz>20||
       (xmax_-xmin_)/res_>4096||(ymax_-ymin_)/res_>4096)
       throw std::invalid_argument("invalid map bounds or timing parameters");
+    apply_settings_.warmup=warmup_;apply_settings_.min_travel=min_travel_;apply_settings_.min_yaw=min_yaw_;
+    apply_settings_.fixed_extent=extent_mode_=="github_fixed";
+    apply_settings_.xmin=xmin_;apply_settings_.xmax=xmax_;apply_settings_.ymin=ymin_;apply_settings_.ymax=ymax_;
+    apply_settings_.rolling_distance=rolling_distance_;
     height_=static_cast<int>(std::ceil((xmax_-xmin_)/res_));
     width_=static_cast<int>(std::ceil((ymax_-ymin_)/res_));
     const auto journal_path=declare_parameter<std::string>("keyframe_path","");
@@ -555,47 +560,36 @@ class MapFusionNode : public rclcpp::Node {
       if(reject_late_input_) {++bad_stamp_;process.outcome="REJECTED";process.reason="LATE_INPUT";return process;}
     }
     last_received_stamp_=stamp;
-    if(received_<=static_cast<uint64_t>(warmup_)) {process.reason="WARMUP";return process;}
-    const auto pruned=extent_mode_=="github_fixed" ?
-      bank_.prune_box(xmin_,xmax_,ymin_,ymax_) :
-      bank_.prune({pose.x,pose.y},rolling_distance_);
-    process.pruned=static_cast<int>(pruned.landmarks+pruned.support_bins);
-    process.bank_mutated=process.pruned>0;
-    if(process.bank_mutated) contract_.changed(stamp);
-    pruned_landmarks_+=pruned.landmarks;
-    pruned_support_bins_+=pruned.support_bins;
-    if(last_pose_) {
-      const double travel=std::hypot(pose.x-last_pose_->x,pose.y-last_pose_->y);
-      const double yaw=std::abs(std::remainder(pose.theta-last_pose_->theta,2*pi_));
-      if(travel<min_travel_&&yaw<min_yaw_) {++motion_skipped_;process.reason="MOTION_GATE";process.outcome=process.bank_mutated?"APPLIED":"SKIPPED";return process;}
-    }
-    std::vector<lane_fusion::Observation> observations;
+    // Warm-up, extent prune, motion gate, segment filter and bank update (lane_map/map_apply.hpp).
+    std::vector<lane_map_apply::Segment> segments;
+    segments.reserve(m.segments.size());
+    for(const auto& s:m.segments)
+      segments.push_back({{s.start.x,s.start.y},{s.end.x,s.end.y},s.mean_width_m,s.confidence,s.confirmed,
+        s.reprojected,s.camera_id,ns(s.source_stamp),s.track_id});
+    const lane_map_apply::Pose here{pose.x,pose.y,pose.theta};
+    std::optional<lane_map_apply::Pose> previous;
+    if(last_pose_) previous=lane_map_apply::Pose{last_pose_->x,last_pose_->y,last_pose_->theta};
+    const auto applied=lane_map_apply::apply(bank_,apply_settings_,received_,stamp,here,
+      previous?&*previous:nullptr,m.camera_id,segments);
+    process.reason=applied.reason;process.outcome=applied.outcome;
+    if(applied.warmup) return process;
+    process.pruned=static_cast<int>(applied.pruned.landmarks+applied.pruned.support_bins);
+    process.bank_mutated=applied.bank_mutated;
+    if(applied.changed_after_prune) contract_.changed(stamp);
+    pruned_landmarks_+=applied.pruned.landmarks;
+    pruned_support_bins_+=applied.pruned.support_bins;
+    if(applied.motion_skipped) {++motion_skipped_;return process;}
+    filtered_segments_+=applied.filtered;capacity_+=applied.capacity;
     std::vector<const vision_lane_interfaces::msg::MarkingSegment*> sources;
-    for(const auto& s:m.segments) {
-      if(observations.size()>=128) {++capacity_;break;}
-      if(!s.confirmed||s.reprojected||s.camera_id!=m.camera_id||std::abs(ns(s.source_stamp)-stamp)>1000) {
-        ++filtered_segments_;continue;
-      }
-      const lane_fusion::Point a{s.start.x,s.start.y}, b{s.end.x,s.end.y};
-      if(!lane_fusion::finite(a)||!lane_fusion::finite(b)||!std::isfinite(s.mean_width_m)||
-         !std::isfinite(s.confidence)) continue;
-      auto ga=world(a,pose),gb=world(b,pose);
-      observations.push_back({ga,gb,s.mean_width_m,s.confidence});sources.push_back(&s);
-    }
-    process.usable_segments=static_cast<int>(observations.size());
-    const auto landmark_count_before=bank_.landmarks().size();
-    const auto update=bank_.update(stamp,observations,{pose.x,pose.y});
+    for(const size_t i:applied.sources) sources.push_back(&m.segments[i]);
+    process.usable_segments=applied.usable_segments;
+    const auto& update=applied.update;
     merged_+=update.merged;created_+=update.created;continued_+=update.continued;duplicates_+=update.duplicate;
     ambiguous_+=update.ambiguous;invalid_+=update.invalid;capacity_+=update.capacity;
     process.created=update.created;process.merged=update.merged;process.continued=update.continued;
-    process.bank_mutated=process.bank_mutated||update.created>0||update.merged>0||bank_.landmarks().size()!=landmark_count_before;
-    if(process.bank_mutated||update.continued>0||update.duplicate>0) contract_.changed(stamp);
-    if(update.merged+update.created==0) {
-      process.reason=process.bank_mutated?"PRUNE_OR_EXPIRY_ONLY":"NO_LANDMARK_ASSOCIATION";
-      process.outcome=process.bank_mutated?"APPLIED":"SKIPPED";
-      return process;
-    }
-    process.outcome="APPLIED";process.reason="LANDMARK_ASSOCIATION";process.keyframe_created=true;
+    if(applied.changed_after_update) contract_.changed(stamp);
+    if(!applied.keyframe_created) return process;
+    process.keyframe_created=true;
     ++keyframes_;last_pose_=pose;last_header_=m.header;last_header_.frame_id=map_frame_;
     // These are temporally filtered local vectors, not raw images or raw Hough.
     if(journal_.is_open() && journal_.good()) {
@@ -789,6 +783,7 @@ class MapFusionNode : public rclcpp::Node {
     snapshot_pub_->publish(out);
   }
   lane_fusion::RegisteredBank bank_;
+  lane_map_apply::Settings apply_settings_;
   lane_mapping::LaneMapper mapper_;
   map_snapshot::Contract contract_;
   clock_generation::Tracker clock_generation_;
