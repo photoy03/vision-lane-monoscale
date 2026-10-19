@@ -410,8 +410,27 @@ void Sweep::keyframe(
   const std::vector<Pose5> & source_poses,
   CameraGrid & grid) const
 {
+  integrate_keyframe(compute_keyframe(reference_gray, reference_pose, source_grays, source_poses), grid);
+}
+
+void Sweep::integrate_keyframe(const KeyframeResult & result, CameraGrid & grid) const
+{
+  if (!result.valid) {return;}
+  const auto stage = std::chrono::steady_clock::now();
+  integrate(result.reference_pose, result.heights, result.road, result.best, result.best_cost,
+    result.second_cost, result.verdict, grid);
+  timing_.integrate_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - stage).count();
+}
+
+KeyframeResult Sweep::compute_keyframe(
+  const cv::Mat & reference_gray, const Pose5 & reference_pose,
+  const std::vector<cv::Mat> & source_grays,
+  const std::vector<Pose5> & source_poses) const
+{
+  KeyframeResult result;
   if (source_grays.size() < 2) {
-    return;
+    return result;
   }
   using Clock = std::chrono::steady_clock;
   const auto ms_since = [](Clock::time_point start) {
@@ -587,10 +606,15 @@ void Sweep::keyframe(
   }
 
   timing_.subplane_ms = ms_since(stage);
-  stage = Clock::now();
-  integrate(reference_pose, heights, road, best, best_cost, second_cost,
-    verdict, grid);
-  timing_.integrate_ms = ms_since(stage);
+  result.valid = true;
+  result.reference_pose = reference_pose;
+  result.heights = std::move(heights);
+  result.road = road;
+  result.best = best;
+  result.best_cost = best_cost;
+  result.second_cost = second_cost;
+  result.verdict = std::move(verdict);
+  return result;
 }
 
 void Sweep::aggregate(

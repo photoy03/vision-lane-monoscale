@@ -319,6 +319,21 @@ struct Published
   int neutralised_cells = 0;  // cells whose free belief neutralise_slab reset (all cameras)
 };
 
+// One keyframe's sweep, everything before the grid is touched (E-9 (c2)): compute it on
+// any thread, then integrate_keyframe() into the camera's grid in the order the
+// keyframes were made.
+struct KeyframeResult
+{
+  bool valid = false;  // false: fewer than two sources, nothing to integrate
+  Pose5 reference_pose;
+  std::vector<double> heights;
+  int road = 0;
+  cv::Mat best;
+  cv::Mat best_cost;
+  cv::Mat second_cost;
+  Verdict verdict;
+};
+
 class Sweep
 {
 public:
@@ -331,6 +346,14 @@ public:
     const std::vector<cv::Mat> & source_grays,
     const std::vector<Pose5> & source_poses,
     CameraGrid & grid) const;
+
+  // keyframe() in two halves: compute_keyframe reads only the images and poses;
+  // integrate_keyframe writes the grid. keyframe() is exactly the two in a row.
+  KeyframeResult compute_keyframe(
+    const cv::Mat & reference_gray, const Pose5 & reference_pose,
+    const std::vector<cv::Mat> & source_grays,
+    const std::vector<Pose5> & source_poses) const;
+  void integrate_keyframe(const KeyframeResult & result, CameraGrid & grid) const;
 
   const SweepSettings & settings() const {return settings_;}
   const SweepDiagnostics & diagnostics() const {return diagnostics_;}

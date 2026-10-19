@@ -25,6 +25,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -91,6 +92,7 @@ struct KeyframeJob
   double stamp = 0.0;
   int64_t stamp_ns = 0;
   uint64_t time_line = 1;   // clock generation it was made in
+  uint64_t sequence = 0;    // order made (c2: the integration order)
   std::vector<cv::Mat> source_grays;
   std::vector<monoscale_occupancy::Pose5> source_poses;
   monoscale_occupancy::Lens lens;
@@ -164,6 +166,10 @@ public:
     // With keyframe carves the publish timer only reads the grids (observer_eval_E9j 5):
     // the map is then a function of the job order alone.
     if (carve_on_keyframe_) {publish_commit_neutralise_ = false;}
+    // E-9 (c2, observer_eval_E9i 3 / E9k 7): with parallel workers and keyframe carves, the
+    // sweeps run in parallel but integrate + carve go in the order the jobs were made, so
+    // the map is the serial node's. Without keyframe carves, parallel is unordered (E-9).
+    ordered_ = parallel_cameras_ && carve_on_keyframe_;
     if (const char * dump = std::getenv("VISION_SWEEP_JOB_DUMP")) {job_dump_dir_ = dump;}
     // E-9 harness only: a random 0..N ms pause before each keyframe, to vary how the
     // camera workers interleave. Unset in every real run.
@@ -174,7 +180,7 @@ public:
     if (!timing_path.empty()) {
       timing_csv_.open(timing_path);
       timing_csv_ << "stamp_ns,camera,sources,cuda,queued_at_start,jobs_dropped_total,wait_ms,prep_ms,"
-        "match_ms,volume_copy_ms,verdict_ms,subplane_ms,integrate_ms,lock_hold_ms,grid_wait_ms,carve_ms\n";
+        "match_ms,volume_copy_ms,verdict_ms,subplane_ms,integrate_ms,lock_hold_ms,grid_wait_ms,carve_ms,turn_wait_ms\n";
     }
     // Camera liveness (C-2 6): off keeps complete_through bound by every
     // camera, as before. dead_sec: the widest raw image gap of the 2026-09
@@ -538,6 +544,16 @@ private:
     }
   }
 
+  // (c2) A job's integration turn is over (integrated, dropped or stale): later ones may
+  // go once every earlier sequence is over. Caller holds job_mutex_.
+  void finish_turn(uint64_t sequence)
+  {
+    if (!ordered_) {return;}
+    turns_done_.insert(sequence);
+    while (turns_done_.count(next_to_integrate_)) {turns_done_.erase(next_to_integrate_++);}
+    turn_ready_.notify_all();
+  }
+
   // The worker queue a camera's jobs go to: one shared queue in serial mode.
   size_t queue_of(const std::string & name) const
   {
@@ -550,8 +566,10 @@ private:
     {
       std::lock_guard<std::mutex> guard(job_mutex_);
       auto & queue = queues_[queue_of(job.camera)];
+      job.sequence = next_sequence_++;
       while (static_cast<int>(queue.size()) >= max_pending_keyframes_) {
         ++jobs_dropped_by_camera_[queue.front().camera];
+        finish_turn(queue.front().sequence);  // never integrated: its turn passes
         queue.pop_front();
         ++jobs_dropped_;
       }
@@ -653,6 +671,25 @@ private:
         std::this_thread::sleep_for(std::chrono::milliseconds(jitter() % (test_jitter_ms_ + 1)));
       }
       double grid_wait_ms = 0.0;
+      double turn_wait_ms = 0.0;
+      monoscale_occupancy::KeyframeResult result;
+      if (!stale) {
+        // The sweep itself reads only the job (images, poses): no lock. The camera's Sweep
+        // is this worker's alone.
+        auto & sweep = sweeps_[job.camera];
+        if (!sweep) {sweep = std::make_unique<monoscale_occupancy::Sweep>(settings_, job.lens);}
+        result = sweep->compute_keyframe(job.reference_gray, job.reference_pose, job.source_grays, job.source_poses);
+      }
+      if (!stale && ordered_) {
+        // (c2): integrate and carve in the order the jobs were made, whatever camera
+        // finished computing first, so the grids are those of the serial node.
+        const auto turn_start = std::chrono::steady_clock::now();
+        std::unique_lock<std::mutex> guard(job_mutex_);
+        turn_ready_.wait(guard, [this, &job]() {
+            return next_to_integrate_ == job.sequence || job.time_line != time_line_;});
+        stale = job.time_line != time_line_;
+        turn_wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - turn_start).count();
+      }
       if (!stale) {
         // The camera's grid and sweep are written by this worker only (E-9), under the
         // camera's own lock: publish() also writes into the live grids (neutralise_slab
@@ -673,8 +710,7 @@ private:
             grid_line_[job.camera] = job.time_line;
           }
           auto & sweep = sweeps_[job.camera];
-          if (!sweep) {sweep = std::make_unique<monoscale_occupancy::Sweep>(settings_, job.lens);}
-          sweep->keyframe(job.reference_gray, job.reference_pose, job.source_grays, job.source_poses, grid);
+          sweep->integrate_keyframe(result, grid);
           diagnostics = sweep->diagnostics();
           timing = sweep->timing();
           if (!settings_.fixed_extent) {
@@ -706,6 +742,10 @@ private:
         ++carves_;
         carved_cells_ += static_cast<uint64_t>(cells);
       }
+      if (ordered_) {
+        std::lock_guard<std::mutex> guard(job_mutex_);
+        finish_turn(job.sequence);
+      }
       const double elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - sweep_start).count();
       {
@@ -719,7 +759,7 @@ private:
                     << (timing.cuda ? 1 : 0) << ',' << queued_at_start << ',' << dropped_at_start << ','
                     << wait_ms << ',' << timing.prep_ms << ',' << timing.match_ms << ','
                     << timing.volume_copy_ms << ',' << timing.verdict_ms << ',' << timing.subplane_ms << ','
-                    << timing.integrate_ms << ',' << elapsed << ',' << grid_wait_ms << ',' << carve_ms << '\n';
+                    << timing.integrate_ms << ',' << elapsed << ',' << grid_wait_ms << ',' << carve_ms << ',' << turn_wait_ms << '\n';
         timing_csv_.flush();
       }
       {
@@ -755,7 +795,11 @@ private:
     std::scoped_lock all(mutex_, job_mutex_, map_mutex_);
     time_line_ = clock_generation_.value();
     builder_.reset();
-    for (auto & queue : queues_) {queue.clear();}
+    for (auto & queue : queues_) {
+      for (const auto & dropped : queue) {finish_turn(dropped.sequence);}
+      queue.clear();
+    }
+    turn_ready_.notify_all();  // jobs waiting for a turn on the old time line give up
     newest_image_ns_.clear();
     liveness_ = monoscale_occupancy::CameraLiveness(liveness_.enabled(), liveness_dead_ns());
     published_through_ns_ = 0;
@@ -1169,6 +1213,13 @@ private:
   // them under mutex_, which must not take map_mutex_.
   std::atomic<uint64_t> publishes_{0}, neutralised_cells_{0};
   bool carve_on_keyframe_ = true;
+  bool ordered_ = false;  // (c2)
+  // (c2) integration turns, guarded by job_mutex_: the next sequence to integrate and the
+  // finished ones above it.
+  uint64_t next_sequence_ = 0;
+  uint64_t next_to_integrate_ = 0;
+  std::set<uint64_t> turns_done_;
+  std::condition_variable turn_ready_;
   std::atomic<uint64_t> carves_{0}, carved_cells_{0};  // (c1) keyframe carves and the cells they reset
   uint64_t job_dump_count_ = 0;
   std::map<std::string, int64_t> newest_image_ns_;
