@@ -13,7 +13,8 @@
 // qx qy qz qw vx vy wz cov0 cov7 cov35" per line. *params.txt: "name value" per line (a run's
 // parameter dump flattened); a name that is missing takes the node default.
 // Output in DIR: journal.jsonl (registered_keyframes format), snapshots.jsonl (the rendered
-// lane map after every applied keyframe), summary.json.
+// lane map after every applied keyframe), creations.jsonl (each new bank line with the
+// tracker track it came from), summary.json.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -23,6 +24,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -143,6 +145,8 @@ int main(int argc, char ** argv)
 
     std::ofstream journal(out_dir + "/journal.jsonl");
     std::ofstream snapshots(out_dir + "/snapshots.jsonl");
+    std::ofstream creations(out_dir + "/creations.jsonl");
+    creations << std::setprecision(17);
     if (!journal || !snapshots) {throw std::runtime_error("cannot write into " + out_dir);}
     journal << std::setprecision(17);
     snapshots << std::setprecision(17);
@@ -168,8 +172,24 @@ int main(int argc, char ** argv)
           segments.push_back({{a.x, a.y}, {b.x, b.y}, o.width, o.confidence, true, false, r.camera_id, stamp, o.track_id});
         }
         const lane_map_apply::Pose here{r.pose.x, r.pose.y, r.pose.yaw};
+        std::set<uint32_t> before;
+        for (const auto & l : bank.landmarks()) {before.insert(l.id);}
         const auto result = lane_map_apply::apply(bank, apply, received, stamp, here,
             last_pose ? &*last_pose : nullptr, r.camera_id, segments);
+        // E-2b: which tracker track each new bank line came from (offline log only).
+        for (const auto & l : bank.landmarks()) {
+          if (before.count(l.id)) {continue;}
+          double best = 1e9;
+          uint32_t track = 0;
+          for (const size_t i : result.sources) {
+            const auto a = lane_map_apply::world(segments[i].a, here), b = lane_map_apply::world(segments[i].b, here);
+            const double d = std::hypot(0.5 * (a.x + b.x) - l.center.x, 0.5 * (a.y + b.y) - l.center.y);
+            if (d < best) {best = d; track = segments[i].track_id;}
+          }
+          creations << "{\"stamp_ns\":" << stamp << ",\"landmark\":" << l.id << ",\"track\":" << track
+                    << ",\"center\":[" << l.center.x << ',' << l.center.y << "],\"u\":[" << l.u.x << ',' << l.u.y
+                    << "],\"source_distance\":" << best << "}\n";
+        }
         ++outcomes[result.outcome + ":" + result.reason];
         if (!result.keyframe_created) {return;}
         ++keyframes;
