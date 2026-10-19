@@ -19,6 +19,8 @@ launch_arguments:
   # solve off the layer still stops while the pose is down.
   occupancy_camera_liveness: 'true'
   occupancy_camera_dead_sec: ''
+  # E-9: one sweep worker per camera (empty = package default, serial).
+  occupancy_parallel_cameras: ''
   occupancy_max_odom_gap_sec: ''
   occupancy_max_odom_translation_m: ''
   occupancy_max_odom_yaw_deg: ''
