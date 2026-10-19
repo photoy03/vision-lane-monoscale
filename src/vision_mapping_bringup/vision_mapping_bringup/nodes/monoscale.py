@@ -99,6 +99,8 @@ def occupancy(ctx):
         'info_topics': ctx.info_topics,
         'odometry_topic': ctx.topics.odom,
         'occupancy_topic': args.arg('occupancy_topic'),
+        # E-7: per-keyframe stage times, only with stage diagnostics.
+        'keyframe_timing_csv_path': str(ctx.run / 'occupancy_keyframes.csv') if ctx.stage_diagnostics else '',
         'map_frame': world['frame'], 'base_frame': 'base_link',
         'rolling_radius_m': float(world['rolling_radius_m']),
         **args.given((

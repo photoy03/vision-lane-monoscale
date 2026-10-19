@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
+#include <fstream>
 #include <condition_variable>
 #include <deque>
 #include <map>
@@ -103,6 +104,7 @@ struct KeyframeJob
   std::vector<cv::Mat> source_grays;
   std::vector<monoscale_occupancy::Pose5> source_poses;
   monoscale_occupancy::Lens lens;
+  std::chrono::steady_clock::time_point queued_at;  // E-7: queue wait
 };
 
 }  // namespace
@@ -156,6 +158,14 @@ public:
     const int min_blob_reference_pixels = declare_parameter<int>(
       "min_blob_reference_pixels", 80);
     max_pending_keyframes_ = declare_parameter<int>("max_pending_keyframes", 2);
+    // E-7 measurement: one CSV row per finished keyframe (stage times, queue wait).
+    // Empty (the default) writes nothing.
+    const auto timing_path = declare_parameter<std::string>("keyframe_timing_csv_path", "");
+    if (!timing_path.empty()) {
+      timing_csv_.open(timing_path);
+      timing_csv_ << "stamp_ns,camera,sources,cuda,queued_at_start,jobs_dropped_total,wait_ms,prep_ms,"
+        "match_ms,volume_copy_ms,verdict_ms,subplane_ms,integrate_ms,lock_hold_ms\n";
+    }
     // Camera liveness (C-2 6): off keeps complete_through bound by every
     // camera, as before. dead_sec: the widest raw image gap of the 2026-09
     // recordings (5.66 s, 0928 front) + 1 s, so sparse images never count as a
@@ -665,6 +675,7 @@ private:
         jobs_.pop_front();
         ++jobs_dropped_;
       }
+      job.queued_at = std::chrono::steady_clock::now();
       jobs_.push_back(std::move(job));
     }
     job_ready_.notify_one();
@@ -674,16 +685,22 @@ private:
   {
     while (true) {
       KeyframeJob job;
+      size_t queued_at_start = 0;
+      int64_t dropped_at_start = 0;
       {
         std::unique_lock<std::mutex> guard(job_mutex_);
         job_ready_.wait(guard, [this]() {return stop_worker_ || !jobs_.empty();});
         if (stop_worker_ && jobs_.empty()) {return;}
         job = std::move(jobs_.front());
         jobs_.pop_front();
+        queued_at_start = jobs_.size();
+        dropped_at_start = jobs_dropped_;
         worker_busy_ = true;
         inflight_stamp_ns_ = job.stamp_ns;
       }
       const auto sweep_start = std::chrono::steady_clock::now();
+      const double wait_ms = std::chrono::duration<double, std::milli>(sweep_start - job.queued_at).count();
+      monoscale_occupancy::KeyframeTiming timing;
       int64_t pruned = 0;
       bool stale = false;  // made before the clock jumped back: not for this map
       monoscale_occupancy::SweepDiagnostics diagnostics;
@@ -703,6 +720,7 @@ private:
           job.reference_gray, job.reference_pose, job.source_grays,
           job.source_poses, grids_[job.camera]);
         diagnostics = sweeps_[job.camera]->diagnostics();
+        timing = sweeps_[job.camera]->timing();
         if (!settings_.fixed_extent) {
           pruned = grids_[job.camera].prune(
             settings_, job.reference_pose.x, job.reference_pose.y,
@@ -719,6 +737,15 @@ private:
         // C-4 measurement: how long the worker holds map_mutex_ per keyframe.
         std::lock_guard<std::mutex> stats(lock_stats_mutex_);
         if (lock_hold_ms_.size() < 20000) {lock_hold_ms_.push_back(elapsed);}
+      }
+      if (timing_csv_.is_open() && !stale) {
+        // Only the worker writes the file.
+        timing_csv_ << job.stamp_ns << ',' << job.camera << ',' << job.source_grays.size() << ','
+                    << (timing.cuda ? 1 : 0) << ',' << queued_at_start << ',' << dropped_at_start << ','
+                    << wait_ms << ',' << timing.prep_ms << ',' << timing.match_ms << ','
+                    << timing.volume_copy_ms << ',' << timing.verdict_ms << ',' << timing.subplane_ms << ','
+                    << timing.integrate_ms << ',' << elapsed << '\n';
+        timing_csv_.flush();
       }
       {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -1167,6 +1194,7 @@ private:
   rclcpp::Publisher<vision_lane_interfaces::msg::PipelineProgress>::SharedPtr progress_pub_;
   rclcpp::TimerBase::SharedPtr progress_timer_;
   std::thread worker_;
+  std::ofstream timing_csv_;  // E-7, written by the worker only
   bool stop_worker_ = false;
   bool worker_busy_ = false;
   int64_t jobs_dropped_ = 0;

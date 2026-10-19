@@ -52,12 +52,14 @@ constexpr double kFrontRotation[9] = {
   0.0, -0.5, 0.8660254,
   -1.0, 0.0, 0.0,
   0.0, -0.8660254, -0.5};
-constexpr double kFrontTranslation[3] = {3.694, 0.0, 0.89};
+// CARLA kit mounts minus actor_origin_height_m 0.03635 (upstream b5c58df; the odometry
+// package uses the same, vision_fisheye.param.yaml). Earlier outputs used 0.89 / 1.26.
+constexpr double kFrontTranslation[3] = {3.694, 0.0, 0.88915};
 constexpr double kRearRotation[9] = {
   0.0, 0.5, -0.8660254,
   1.0, 0.0, 0.0,
   0.0, -0.8660254, -0.5};
-constexpr double kRearTranslation[3] = {-0.82, 0.0, 1.26};
+constexpr double kRearTranslation[3] = {-0.82, 0.0, 1.25915};
 
 monoscale_occupancy::Lens make_lens(
   const double rotation[9], const double translation[3], double width_px)

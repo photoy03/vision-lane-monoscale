@@ -97,6 +97,20 @@ struct SweepDiagnostics
   int clear_pixels = 0;
 };
 
+// Wall time of the stages of the last keyframe (E-7 measurement; nothing reads it
+// back into the computation). match includes the kernel's device->host transfers;
+// volume_copy is the host-side copy of the aggregated volume that subplane needs.
+struct KeyframeTiming
+{
+  bool cuda = false;
+  double prep_ms = 0.0;
+  double match_ms = 0.0;
+  double volume_copy_ms = 0.0;
+  double verdict_ms = 0.0;
+  double subplane_ms = 0.0;
+  double integrate_ms = 0.0;
+};
+
 struct SweepSettings
 {
   // The ladder. -0.15 gives the match-failure pixels planes to drain into;
@@ -315,6 +329,7 @@ public:
 
   const SweepSettings & settings() const {return settings_;}
   const SweepDiagnostics & diagnostics() const {return diagnostics_;}
+  const KeyframeTiming & timing() const {return timing_;}
 
 private:
   // Where each reference pixel is found in `source`, for the world-horizontal
@@ -361,6 +376,7 @@ private:
   // frame size seen.
   mutable cv::Mat ray_base_;  // CV_64FC3
   mutable SweepDiagnostics diagnostics_;
+  mutable KeyframeTiming timing_;
   void ensure_rays(int width, int height) const;
 };
 

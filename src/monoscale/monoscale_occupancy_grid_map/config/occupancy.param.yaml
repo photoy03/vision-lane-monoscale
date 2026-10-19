@@ -65,7 +65,10 @@
       frame_id: 'front_fisheye_camera_optical_frame'
       calibration_width: 2560.0
       rotation_base_from_camera: [0.0, -0.5, 0.8660254, -1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
-      translation_base_from_camera: [3.694, 0.0, 0.89]
+      # CARLA kit mount minus actor_origin_height_m 0.03635 (upstream b5c58df), the same
+      # values the odometry package carries (vision_fisheye.param.yaml). The vehicle
+      # bringup replaces both cameras' mounts with the rig (E-4).
+      translation_base_from_camera: [3.694, 0.0, 0.88915]
     rear:
       k: [1051.81, 0.0, 1279.5, 0.0, 1051.81, 719.5, 0.0, 0.0, 1.0]
       d: [0.0, 0.0, 0.0, 0.0]
@@ -73,4 +76,4 @@
       frame_id: 'rear_fisheye_camera_optical_frame'
       calibration_width: 2560.0
       rotation_base_from_camera: [0.0, 0.5, -0.8660254, 1.0, 0.0, 0.0, 0.0, -0.8660254, -0.5]
-      translation_base_from_camera: [-0.82, 0.0, 1.26]
+      translation_base_from_camera: [-0.82, 0.0, 1.25915]

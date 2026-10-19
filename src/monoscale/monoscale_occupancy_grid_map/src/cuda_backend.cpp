@@ -9,6 +9,7 @@
 
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -81,7 +82,7 @@ bool cuda_match(
   const Pose5 & reference_pose, const std::vector<Pose5> & source_poses,
   const std::vector<double> & heights, int road,
   cv::Mat & best, cv::Mat & best_cost, cv::Mat & road_cost, cv::Mat & second_cost,
-  std::vector<cv::Mat> & volume, bool want_volume)
+  std::vector<cv::Mat> & volume, bool want_volume, double * volume_copy_ms)
 {
   static bool announced = false;
   if (!announced) {
@@ -144,12 +145,17 @@ bool cuda_match(
     second_cost.ptr<float>(0), vol_ptr, geometry.data(), offsets.data());
 
   if (want_volume) {
+    const auto copy_start = std::chrono::steady_clock::now();
     volume.resize(planes);
     for (int p = 0; p < planes; ++p) {
       volume[p].create(rows, cols, CV_32F);
       std::memcpy(volume[p].ptr<float>(0),
         vol.data() + static_cast<size_t>(p) * rows * cols,
         static_cast<size_t>(rows) * cols * sizeof(float));
+    }
+    if (volume_copy_ms != nullptr) {
+      *volume_copy_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - copy_start).count();
     }
   }
   return true;
