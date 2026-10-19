@@ -172,6 +172,8 @@ int main(int argc, char ** argv)
         }
       };
     const bool publish_each = std::getenv("HARNESS_PUBLISH_EACH") != nullptr;
+    // HARNESS_PUBLISH_REPEAT=n: n publishes after each job (is neutralise idempotent?).
+    const int publish_repeat = std::getenv("HARNESS_PUBLISH_REPEAT") ? std::atoi(std::getenv("HARNESS_PUBLISH_REPEAT")) : 1;
     std::atomic<bool> stress_done{false};
     std::thread stress;
     if (std::getenv("HARNESS_PUBLISH_STRESS")) {
@@ -201,7 +203,10 @@ int main(int argc, char ** argv)
 #else
       node->enqueue(std::move(job));
 #endif
-      if (publish_each) {wait_idle(); node->publish();}
+      if (publish_each) {
+        wait_idle();
+        for (int k = 0; k < publish_repeat; ++k) {node->publish();}
+      }
     }
     wait_idle();
     stress_done = true;
