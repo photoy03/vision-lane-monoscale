@@ -26,6 +26,8 @@ launch_arguments:
   occupancy_publish_rate_hz: ''
   occupancy_publish_commit_neutralise: ''
   # E-9 (c1): carve once after every keyframe (empty = package default true since E9k; false = upstream).
+  # To restore upstream behaviour turn this AND occupancy_parallel_cameras off together; serial with
+  # keyframe carves on can drop jobs (2 per run measured, observer_eval_E9n).
   occupancy_carve_on_keyframe: ''
   occupancy_max_odom_gap_sec: ''
   occupancy_max_odom_translation_m: ''
