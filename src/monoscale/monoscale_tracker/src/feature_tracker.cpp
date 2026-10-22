@@ -54,6 +54,7 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
@@ -63,6 +64,7 @@
 #include <rosbag2_cpp/writer.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <monoscale_tracker/gyro_rotation.hpp>
+#include "vision_lane_interfaces/compressed_input.hpp"
 
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
 #include <opencv2/core/cuda.hpp>
@@ -1205,6 +1207,16 @@ public:
 
     camera_names_ = cameras;
     image_topics_ = topics;
+    // Image-input experiment (2026-10-22): receive each camera's JPEG and decode it here
+    // instead of the raw frame a republisher decoded. Empty (the default) = raw topics.
+    const auto compressed_topics = declare_parameter<std::vector<std::string>>(
+      "compressed_image_topics", std::vector<std::string>{});
+    compressed_decode_ = declare_parameter<std::string>("compressed_decode", "color");
+    if (!compressed_topics.empty() &&
+      (compressed_topics.size() != cameras.size() || !compressed_input::valid_mode(compressed_decode_)))
+    {
+      throw std::runtime_error("compressed_image_topics must match cameras; compressed_decode color|gray");
+    }
     for (size_t index = 0; index < cameras.size(); ++index) {
       const std::string & name = cameras[index];
       states_[name].target = max_features_;
@@ -1226,6 +1238,20 @@ public:
         create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive));
       rclcpp::SubscriptionOptions options;
       options.callback_group = groups_.back();
+      if (!compressed_topics.empty()) {
+        decode_stats_[name];
+        compressed_subscriptions_.push_back(
+          create_subscription<sensor_msgs::msg::CompressedImage>(
+            compressed_topics[index], input_qos,
+            [this, name](sensor_msgs::msg::CompressedImage::ConstSharedPtr message) {
+              onCompressed(name, *message);
+            },
+            options));
+        RCLCPP_INFO(
+          get_logger(), "tracking %s on %s (compressed, decode %s)", name.c_str(),
+          compressed_topics[index].c_str(), compressed_decode_.c_str());
+        continue;
+      }
       subscriptions_.push_back(
         create_subscription<sensor_msgs::msg::Image>(
           topics[index], input_qos,
@@ -1442,6 +1468,31 @@ public:
   }
 
 private:
+  // The JPEG decoded as the raw republisher would (color) or straight to gray, wrapped in
+  // the Image the raw path takes. Per camera: its own callback group, so its own stats.
+  void onCompressed(const std::string & name, const sensor_msgs::msg::CompressedImage & message)
+  {
+    auto & stats = decode_stats_.at(name);  // inserted for every camera in the constructor
+    const auto start = std::chrono::steady_clock::now();
+    const cv::Mat decoded = compressed_input::decode(message.data, compressed_decode_);
+    if (decoded.empty()) {
+      ++stats.failures;
+      return;
+    }
+    sensor_msgs::msg::Image image;
+    image.header = message.header;
+    image.height = static_cast<uint32_t>(decoded.rows);
+    image.width = static_cast<uint32_t>(decoded.cols);
+    image.encoding = decoded.channels() == 1 ? "mono8" : "bgr8";
+    image.step = static_cast<uint32_t>(decoded.cols * decoded.elemSize());
+    const auto * begin = decoded.ptr<uint8_t>(0);
+    image.data.assign(begin, begin + static_cast<size_t>(image.step) * image.height);
+    stats.add(compressed_input::ms_since(start));
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000, "compressed_decode %s: %s",
+      name.c_str(), stats.summary().c_str());
+    onImage(name, image);
+  }
+
   void onImage(const std::string & name, const sensor_msgs::msg::Image & message)
   {
     const bool diagnostics_enabled = static_cast<bool>(diagnostics_csv_);
@@ -5145,6 +5196,9 @@ private:
   std::map<std::string, rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr>
   publishers_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> subscriptions_;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr> compressed_subscriptions_;
+  std::string compressed_decode_ = "color";
+  std::map<std::string, compressed_input::DecodeStats> decode_stats_;
 };
 
 int main(int argc, char ** argv)

@@ -18,6 +18,8 @@ def tracker(ctx):
                 'use_sim_time': ctx.sim_time, 'cameras': ctx.camera_names,
                 'image_topics': ctx.image_topics, 'info_topics': ctx.info_topics,
                 **ctx.rear_parameters,
+                **({'compressed_image_topics': ctx.compressed_topics, 'compressed_decode': ctx.compressed_decode}
+                   if ctx.compressed_topics else {}),
                 'diagnostics_csv_path': str(run / 'tracker_frames.csv') if ctx.stage_diagnostics else '',
                 'gyro_diagnostics_csv_path': str(run / 'gyro_prediction.csv') if ctx.stage_diagnostics else '',
                 **monoscale_front(ctx.setup.front),
@@ -97,6 +99,9 @@ def occupancy(ctx):
         'cameras': ctx.camera_names,
         'image_topics': ctx.image_topics,
         'info_topics': ctx.info_topics,
+        **({'compressed_image_topics': ctx.compressed_topics, 'compressed_decode': ctx.compressed_decode}
+           if ctx.compressed_topics else {}),
+        **({'image_queue_depth': ctx.image_queue_depth} if ctx.image_queue_depth else {}),
         'odometry_topic': ctx.topics.odom,
         'occupancy_topic': args.arg('occupancy_topic'),
         # E-7: per-keyframe stage times, only with stage diagnostics.

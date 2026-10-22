@@ -228,6 +228,14 @@ def main() -> int:
                         help="recorder-side compression. none (default since D-18): plain sqlite3; "
                              "zstd: the recorder compresses each file as it closes, which twice left "
                              "a cut file with exit code 0 (observer_eval_D18_recording)")
+    parser.add_argument("--image-input", choices=("raw", "compressed", "compressed_gray", "gated"), default="raw",
+                        help="image-input experiment (2026-10-22): raw (default) = republishers decode the "
+                             "bag JPEGs to raw topics; compressed / compressed_gray = no republishers, the "
+                             "tracker, occupancy and lane nodes take the JPEG topics (gray: tracker and "
+                             "occupancy decode straight to gray); gated = compressed_gray through "
+                             "tools/run/frame_gate_relay.py (--gate-period) with image queues of depth 1")
+    parser.add_argument("--gate-period", type=float, default=0.2,
+                        help="with --image-input gated: one frame per camera per slot of this many seconds")
     parser.add_argument("--outputs-light", action="store_true",
                         help="leave the raw occupancy stream /perception/occupancy_grid_map (42 %% of an "
                              "outputs_bag) out of the recording; the snapshot topics the contract checks "
@@ -296,6 +304,11 @@ def main() -> int:
         "occupancy_carve_on_keyframe",
     }
     launch_overrides: dict[str, str] = {}
+    if args.image_input == "gated" and not any(i.startswith("tracker_input_queue_depth=") for i in args.launch_arg):
+        # Gated input: every image consumer takes the newest frame only (the occupancy and
+        # lane depths are set by the bringup's image_input; the tracker's through its
+        # override so the parameter check expects it).
+        args.launch_arg = list(args.launch_arg) + ["tracker_input_queue_depth=1"]
     for item in args.launch_arg:
         name, separator, value = item.partition("=")
         if not separator or name not in allowed_launch_args or not value:
@@ -397,12 +410,20 @@ def main() -> int:
     if args.instrumentation == "on":
         front_repub.extend(["-p", f"diagnostics_csv_path:={output / 'front_decode.csv'}"])
         rear_repub.extend(["-p", f"diagnostics_csv_path:={output / 'rear_decode.csv'}"])
+    if args.image_input != "raw":
+        # The consumers take the JPEG topics themselves: no raw republishers. Gated: the
+        # frame gate takes the republishers' place (its log goes to front_republish.log).
+        launch.append(f"image_input:={args.image_input}")
+        front_repub = ([sys.executable, str(repo / "tools/run/frame_gate_relay.py"), "--ros-args",
+                        "-p", f"period_sec:={args.gate_period}", "-p", "use_sim_time:=true"]
+                       if args.image_input == "gated" else None)
+        rear_repub = None
     player = [
         "ros2", "bag", "play", str(bag), "--clock", "30", "--rate", str(args.playback_rate),
         "--disable-keyboard-controls", "--wait-for-all-acked", "2000",
         "--qos-profile-overrides-path", str(qos), "--topics", *TOPICS,
     ]
-    commands = {name: ros_command(repo, argv) for name, argv in
+    commands = {name: (ros_command(repo, argv) if argv is not None else None) for name, argv in
                 (("launch", launch), ("front_republisher", front_repub),
                  ("rear_republisher", rear_repub), ("player", player))}
     if args.record_outputs == "on":
@@ -421,6 +442,8 @@ def main() -> int:
         "pending_recovery": args.pending == "on", "bag_path_read_only": str(bag),
         "launch_overrides": launch_overrides,
         "camera_input_suffix": suffix,
+        "image_input": args.image_input,
+        "gate_period_sec": args.gate_period if args.image_input == "gated" else None,
         "stage_diagnostics": args.instrumentation == "on",
         "sample_plan": str(sample_plan) if sample_plan else None,
         "sample_plan_sha256": sha256(sample_plan) if sample_plan else None,
@@ -506,14 +529,25 @@ def main() -> int:
         else:
             raise RuntimeError("launch nodes did not become ready; inspect launch.log")
 
-        front_proc = subprocess.Popen(commands["front_republisher"], env=env, stdin=subprocess.DEVNULL,
-                                      stdout=logs["front_republish.log"], stderr=subprocess.STDOUT,
-                                      start_new_session=True)
-        rear_proc = subprocess.Popen(commands["rear_republisher"], env=env, stdin=subprocess.DEVNULL,
-                                     stdout=logs["rear_republish.log"], stderr=subprocess.STDOUT,
-                                     start_new_session=True)
-        for topic in ("/sensing/camera/front/fisheye/image_raw",
-                      "/sensing/camera/rear/fisheye/image_raw"):
+        if commands["front_republisher"] is not None:
+            front_proc = subprocess.Popen(commands["front_republisher"], env=env, stdin=subprocess.DEVNULL,
+                                          stdout=logs["front_republish.log"], stderr=subprocess.STDOUT,
+                                          start_new_session=True)
+        if commands["rear_republisher"] is not None:
+            rear_proc = subprocess.Popen(commands["rear_republisher"], env=env, stdin=subprocess.DEVNULL,
+                                         stdout=logs["rear_republish.log"], stderr=subprocess.STDOUT,
+                                         start_new_session=True)
+        # Raw input: each raw topic needs its republisher and a consumer. Compressed input:
+        # the consumers must be on the JPEG topics (the player publishes them later); gated:
+        # on the gated topics, and the gate on the bag topics.
+        if args.image_input == "raw":
+            ready_topics = [(t, True) for t in ("/sensing/camera/front/fisheye/image_raw",
+                                                "/sensing/camera/rear/fisheye/image_raw")]
+        elif args.image_input == "gated":
+            ready_topics = [(t + "_gated", True) for t in TOPICS[:2]] + [(t, False) for t in TOPICS[:2]]
+        else:
+            ready_topics = [(t, False) for t in TOPICS[:2]]
+        for topic, need_publisher in ready_topics:
             deadline = time.monotonic() + 40.0
             ready = False
             while time.monotonic() < deadline:
@@ -521,7 +555,8 @@ def main() -> int:
                                     env, timeout=8.0)
                 pub = re.search(r"Publisher count:\s*(\d+)", query.stdout)
                 sub = re.search(r"Subscription count:\s*(\d+)", query.stdout)
-                if query.returncode == 0 and pub and sub and int(pub.group(1)) > 0 and int(sub.group(1)) > 0:
+                if query.returncode == 0 and pub and sub and (int(pub.group(1)) > 0 or not need_publisher) \
+                        and int(sub.group(1)) > 0:
                     ready = True
                     break
                 time.sleep(1.0)
@@ -555,6 +590,21 @@ def main() -> int:
             manifest["parameter_dumps"][node] = {"exit_code": dump.returncode, "path": str(path)}
         expected = requested_parameters(
             launch_overrides, occupancy=occupancy_enabled, lane_fusion=lane_fusion_enabled)
+        if args.image_input != "raw":
+            # The image-input experiment must actually reach the nodes.
+            decode = "color" if args.image_input == "compressed" else "gray"
+            suffix_gated = "_gated" if args.image_input == "gated" else ""
+            expected["/feature_tracker"].update({
+                "compressed_decode": decode,
+                "compressed_image_topics": [t + suffix_gated for t in TOPICS[:2]]})
+            expected.setdefault("/global_mapping_cpp", {}).update({
+                "compressed_image_input": True, "image_topic": TOPICS[0] + suffix_gated,
+                "image_queue_depth": 1 if args.image_input == "gated" else 2})
+            if occupancy_enabled:
+                expected["/monoscale_occupancy_grid_map"].update({
+                    "compressed_decode": decode,
+                    "compressed_image_topics": [t + suffix_gated for t in TOPICS[:2]],
+                    "image_queue_depth": 1 if args.image_input == "gated" else 10})
         failures = check_dumps(manifest["parameter_dumps"], expected)
         manifest["expected_parameters"] = expected
         manifest["parameter_validation"] = {"passed": not failures, "failures": failures}
@@ -637,8 +687,11 @@ def main() -> int:
         if recorder_proc is not None:
             manifest["process_exit_codes"]["recorder"] = stop_owned(recorder_proc, 180.0)
             recorder_proc = None
-        manifest["process_exit_codes"]["front_republisher"] = stop_owned(front_proc)
-        manifest["process_exit_codes"]["rear_republisher"] = stop_owned(rear_proc)
+        # Only the processes this run started (compressed input starts no republishers).
+        if front_proc is not None:
+            manifest["process_exit_codes"]["front_republisher"] = stop_owned(front_proc)
+        if rear_proc is not None:
+            manifest["process_exit_codes"]["rear_republisher"] = stop_owned(rear_proc)
         front_proc = rear_proc = None
         time.sleep(2.0)
         manifest["process_exit_codes"]["launch"] = stop_owned(launch_proc, 30.0)

@@ -93,6 +93,15 @@ def _launch(context, group='all'):
         nodes += sensors.rear(ctx)
         run_files.write_rear_snapshots(ctx.run, setup, ctx.rear_parameters)
 
+    ctx.image_input = args.arg('image_input').strip() or 'raw'
+    if ctx.image_input not in ('raw', 'compressed', 'compressed_gray', 'gated'):
+        raise ValueError('image_input must be raw, compressed, compressed_gray or gated')
+    sources = ['/measurement/front/image_raw/compressed', '/measurement/rear/image_raw/compressed']
+    ctx.compressed_topics = [] if ctx.image_input == 'raw' else [
+        topic + ('_gated' if ctx.image_input == 'gated' else '') for topic in sources[:len(ctx.camera_names)]]
+    ctx.compressed_decode = 'color' if ctx.image_input in ('raw', 'compressed') else 'gray'
+    ctx.image_queue_depth = 1 if ctx.image_input == 'gated' else 0  # 0: each node's own default
+
     ctx.mapping_owner = validation.lane_mapping_owner(args)
     lane_defaults, lane_explicit = lanes.detection_parameters(ctx)
     nodes += sensors.mount_transforms(ctx)

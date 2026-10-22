@@ -40,6 +40,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
 #include "monoscale_occupancy_grid_map/camera_liveness.hpp"
@@ -49,6 +50,7 @@
 #include "vision_lane_interfaces/map_snapshot.hpp"
 #include "vision_lane_interfaces/clock_generation.hpp"
 #include "vision_lane_interfaces/image_quality.hpp"
+#include "vision_lane_interfaces/compressed_input.hpp"
 #include "vision_lane_interfaces/msg/occupancy_snapshot.hpp"
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 #include "monoscale_occupancy_grid_map/job_builder.hpp"
@@ -368,13 +370,36 @@ public:
       workers_.emplace_back([this, q]() {worker_loop(q);});
     }
 
+    // Image-input experiment (2026-10-22): each camera's JPEG decoded here (color = what
+    // the raw republisher publishes, gray = straight to luma) instead of the raw topic.
+    // Empty (the default) = raw topics. image_queue_depth: the image subscription depth.
+    const auto compressed_topics = declare_parameter<std::vector<std::string>>(
+      "compressed_image_topics", std::vector<std::string>{});
+    compressed_decode_ = declare_parameter<std::string>("compressed_decode", "color");
+    const int image_depth = static_cast<int>(declare_parameter<int>("image_queue_depth", 10));
+    if ((!compressed_topics.empty() &&
+      (compressed_topics.size() != cameras_.size() || !compressed_input::valid_mode(compressed_decode_))) ||
+      image_depth < 1)
+    {
+      throw std::invalid_argument("compressed_image_topics must match cameras; compressed_decode color|gray; image_queue_depth >= 1");
+    }
     rclcpp::QoS sensor(10);
     sensor.best_effort();
+    rclcpp::QoS image_qos(static_cast<size_t>(image_depth));
+    image_qos.best_effort();
     for (size_t i = 0; i < cameras_.size(); ++i) {
       const std::string name = cameras_[i];
-      image_subs_.push_back(create_subscription<sensor_msgs::msg::Image>(
-        image_topics_[i], sensor,
-        [this, name](sensor_msgs::msg::Image::ConstSharedPtr m) {check_time_line(); on_image(name, *m);}));
+      if (!compressed_topics.empty()) {
+        decode_stats_[name];
+        compressed_subs_.push_back(create_subscription<sensor_msgs::msg::CompressedImage>(
+          compressed_topics[i], image_qos,
+          [this, name](sensor_msgs::msg::CompressedImage::ConstSharedPtr m) {
+            check_time_line(); on_compressed(name, *m);}));
+      } else {
+        image_subs_.push_back(create_subscription<sensor_msgs::msg::Image>(
+          image_topics_[i], image_qos,
+          [this, name](sensor_msgs::msg::Image::ConstSharedPtr m) {check_time_line(); on_image(name, *m);}));
+      }
       info_subs_.push_back(create_subscription<sensor_msgs::msg::CameraInfo>(
         info_topics_[i], sensor,
         [this, name](sensor_msgs::msg::CameraInfo::ConstSharedPtr m) {on_info(name, *m);}));
@@ -460,6 +485,30 @@ private:
     builder_.add_odometry(stamp_ns, message.pose.pose.position.x, message.pose.pose.position.y,
       q.x, q.y, q.z, q.w, built);
     submit(built);
+  }
+
+  // The JPEG decoded (compressed_input.hpp) and handed to on_image as the raw path would.
+  void on_compressed(const std::string & name, const sensor_msgs::msg::CompressedImage & message)
+  {
+    auto & stats = decode_stats_.at(name);  // inserted for every camera in the constructor
+    const auto start = std::chrono::steady_clock::now();
+    const cv::Mat decoded = compressed_input::decode(message.data, compressed_decode_);
+    if (decoded.empty()) {
+      ++stats.failures;
+      return;
+    }
+    sensor_msgs::msg::Image image;
+    image.header = message.header;
+    image.height = static_cast<uint32_t>(decoded.rows);
+    image.width = static_cast<uint32_t>(decoded.cols);
+    image.encoding = decoded.channels() == 1 ? "mono8" : "bgr8";
+    image.step = static_cast<uint32_t>(decoded.cols * decoded.elemSize());
+    const auto * begin = decoded.ptr<uint8_t>(0);
+    image.data.assign(begin, begin + static_cast<size_t>(image.step) * image.height);
+    stats.add(compressed_input::ms_since(start));
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000, "compressed_decode %s: %s",
+      name.c_str(), stats.summary().c_str());
+    on_image(name, image);
   }
 
   void on_image(const std::string & name, const sensor_msgs::msg::Image & message)
@@ -1183,6 +1232,9 @@ private:
   monoscale_occupancy::JobBuilder builder_;
 
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> image_subs_;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr> compressed_subs_;
+  std::string compressed_decode_ = "color";
+  std::map<std::string, compressed_input::DecodeStats> decode_stats_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr> info_subs_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_pub_;

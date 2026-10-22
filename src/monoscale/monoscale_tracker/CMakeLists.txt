@@ -10,6 +10,8 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(OpenCV REQUIRED)
+# Header-only helper (compressed_input.hpp); OpenCV-only, no message libraries needed.
+find_package(vision_lane_interfaces REQUIRED)
 
 # cv_bridge is deliberately not used. It links against whichever OpenCV the ROS
 # distribution was built with, and this node is meant to be pointed at a second
@@ -33,7 +35,7 @@ if(NOT HAVE_CUDA_OPTFLOW)
 endif()
 
 add_executable(feature_tracker src/feature_tracker.cpp)
-target_include_directories(feature_tracker PRIVATE include ${OpenCV_INCLUDE_DIRS})
+target_include_directories(feature_tracker PRIVATE include ${OpenCV_INCLUDE_DIRS} ${vision_lane_interfaces_INCLUDE_DIRS})
 target_link_libraries(feature_tracker ${OpenCV_LIBS})
 ament_target_dependencies(feature_tracker rclcpp sensor_msgs std_msgs geometry_msgs rosbag2_cpp)
 if(HAVE_CUDA_OPTFLOW)

@@ -8,7 +8,11 @@ def detection_parameters(ctx):
     args, run = ctx.args, ctx.run
     defaults = node_parameters('lane_detection.yaml', 'global_mapping_cpp')
     explicit = {
-        'use_sim_time': ctx.sim_time, 'image_topic': ctx.topics.image,
+        'use_sim_time': ctx.sim_time, 'image_topic': ctx.compressed_topics[0] if ctx.compressed_topics else ctx.topics.image,
+        # Image-input experiment: lanes keep colour; the compressed queue depth matches the raw
+        # one (2) so only the transport changes, 1 when gated.
+        **({'compressed_image_input': True, 'image_queue_depth': ctx.image_queue_depth or 2}
+           if ctx.compressed_topics else {}),
         'odom_topic': ctx.topics.odom, 'camera_frame': FRONT_FRAME,
         'map_frame': ctx.world['frame'], 'base_frame': 'base_link', 'camera_id': FRONT_ID,
         'calibration_yaml': str(run / 'calibration.yaml'),

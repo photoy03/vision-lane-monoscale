@@ -54,6 +54,7 @@
 #include "lane_map/lane_tracker.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
 #include "vision_lane_interfaces/image_quality.hpp"
+#include "vision_lane_interfaces/compressed_input.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include "lane_map/pending_lane_observations.hpp"
 #include "lane_map/pending_readiness.hpp"
@@ -251,6 +252,10 @@ class GlobalMappingNode : public rclcpp::Node {
     std::transform(input_mode_.begin(),input_mode_.end(),input_mode_.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
     image_topic_=declare_parameter<std::string>("image_topic","/camera/image_raw");
     compressed_image_input_=declare_parameter<bool>("compressed_image_input",false);
+    // Image-input experiment (2026-10-22): subscription depth; 0 keeps the historical
+    // depths (raw 2, compressed 40).
+    image_queue_depth_=declare_parameter<int>("image_queue_depth",0);
+    if(image_queue_depth_<0)throw std::invalid_argument("image_queue_depth must be >= 0");
     raw_image_topic_=declare_parameter<std::string>("raw_image_topic","/parking/cpp/image_raw");
     odom_topic_=declare_parameter<std::string>("odom_topic","/parking/odom");
     output_topic_=declare_parameter<std::string>("output_topic","/parking/cpp/marking_segments");
@@ -464,10 +469,10 @@ class GlobalMappingNode : public rclcpp::Node {
     if(input_mode_=="topic"){
       if(compressed_image_input_){
         compressed_image_sub_=create_subscription<sensor_msgs::msg::CompressedImage>(
-          image_topic_,rclcpp::SensorDataQoS().keep_last(40),
+          image_topic_,rclcpp::SensorDataQoS().keep_last(image_queue_depth_>0?image_queue_depth_:40),
           std::bind(&GlobalMappingNode::on_compressed_image,this,std::placeholders::_1));
       }else{
-        image_sub_=create_subscription<sensor_msgs::msg::Image>(image_topic_,rclcpp::SensorDataQoS().keep_last(2),std::bind(&GlobalMappingNode::on_image,this,std::placeholders::_1));
+        image_sub_=create_subscription<sensor_msgs::msg::Image>(image_topic_,rclcpp::SensorDataQoS().keep_last(image_queue_depth_>0?image_queue_depth_:2),std::bind(&GlobalMappingNode::on_image,this,std::placeholders::_1));
       }
     }else if(input_mode_=="v4l2"){
       if(compressed_image_input_)
@@ -790,7 +795,10 @@ class GlobalMappingNode : public rclcpp::Node {
   void process_compressed_image(const sensor_msgs::msg::CompressedImage::SharedPtr &msg,
       std::optional<PoseLookup> pose_override=std::nullopt){
     if(!msg)return;
+    const auto decode_start=std::chrono::steady_clock::now();
     const cv::Mat image=cv::imdecode(msg->data,cv::IMREAD_COLOR);
+    decode_stats_.add(compressed_input::ms_since(decode_start));
+    RCLCPP_INFO_THROTTLE(get_logger(),*get_clock(),10000,"compressed_decode front: %s",decode_stats_.summary().c_str());
     if(image.empty()){
       ++compressed_decode_failures_;
       frame_discard_reason_="decode";
@@ -1615,6 +1623,8 @@ class GlobalMappingNode : public rclcpp::Node {
   uint64_t pending_drain_sequence_{0},pending_oracle_rows_{0};
   bool maps_ready_{false},use_static_{true},publish_map_{false},publish_raw_{false};
   bool compressed_image_input_{false};
+  int image_queue_depth_{0};
+  compressed_input::DecodeStats decode_stats_;
   bool require_odom_for_mapping_{true},allow_local_without_odom_{true};
   bool allow_short_odom_prediction_{true};
   bool sync_images_to_odom_{false},warming_up_{false},publish_vectors_debug_{false};
