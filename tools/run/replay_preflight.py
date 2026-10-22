@@ -23,8 +23,9 @@ TRACKER_OVERRIDES = {
     "tracker_opencv_threads": "opencv_threads",
     "tracker_executor_threads": "executor_threads",
     "tracker_use_cuda": "use_cuda",
+    "tracker_road_step_gpu": "road_step_gpu",
 }
-BOOL_OVERRIDES = {"tracker_motion_prediction", "tracker_motion_warp", "tracker_use_cuda"}
+BOOL_OVERRIDES = {"tracker_motion_prediction", "tracker_motion_warp", "tracker_use_cuda", "tracker_road_step_gpu"}
 TEXT_OVERRIDES = {"tracker_input_reliability", "tracker_gyro_prediction_mode"}
 FLOAT_OVERRIDES = {
     "tracker_gyro_time_offset_sec", "tracker_gyro_history_sec",

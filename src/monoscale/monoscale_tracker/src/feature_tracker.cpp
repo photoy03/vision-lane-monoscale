@@ -71,6 +71,16 @@
 #include <opencv2/cudaoptflow.hpp>
 #include <opencv2/cudawarping.hpp>
 #include <opencv2/cudaimgproc.hpp>
+#include <opencv2/cudaarithm.hpp>
+#endif
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+namespace monoscale_tracker_gpu
+{
+// src/road_warp.cu: K lattices -> K float region patches of `previous` (device).
+void warp_patches(
+  const cv::cuda::GpuMat & previous, const std::vector<cv::Mat> & lattices,
+  const cv::Size & region, bool cubic, std::vector<cv::Mat> & patches);
+}  // namespace monoscale_tracker_gpu
 #endif
 
 namespace
@@ -1064,6 +1074,16 @@ public:
         get_logger(),
         "use_cuda asked for, but this OpenCV has no cudaoptflow; staying on the CPU");
 #endif
+    }
+    // The photometric road-step search on the GPU (2026-10-23, option): the candidate
+    // warp's resize and remap and the five ZNCC sums run there; the lattice stays on the
+    // CPU. Only with the GPU flow active, and only for the path the vehicle runs (lattice
+    // warp, no visibility mask, one tile); anything else stays on the CPU. Not
+    // bit-identical to the CPU path (GPU interpolation).
+    road_step_gpu_ = declare_parameter<bool>("road_step_gpu", false);
+    if (road_step_gpu_ && !cuda_active_) {
+      RCLCPP_WARN(get_logger(), "road_step_gpu needs use_cuda with a CUDA OpenCV; staying on the CPU");
+      road_step_gpu_ = false;
     }
     // Fraction of the image, measured from the top, to leave out of feature
     // detection. The estimator keeps only what projects onto the ground
@@ -3115,6 +3135,107 @@ private:
     return cv::Matx33d(c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c);
   }
 
+  // The source position of every lattice point for one candidate: build_warp_roi without
+  // the stretch (CV_32FC2, the same lattice cv::resize would read).
+  void road_lattice(
+    const GroundModel & model, const double * candidate, int width, int height,
+    const cv::Rect & roi, int stride, cv::Mat & out) const
+  {
+    const cv::Matx33d inverse =
+      model.homography(candidate[0], candidate[1], candidate[2], candidate[3], arc_hop_).inv();
+    const int cols = std::max(roi.width / std::max(stride, 1), 2);
+    const int rows = std::max(roi.height / std::max(stride, 1), 2);
+    out.create(rows, cols, CV_32FC2);
+    const cv::Mat & lattice = warp_lattice(model, roi, width, height, cols, rows);
+    for (int r = 0; r < rows; ++r) {
+      const cv::Vec3d * ray = lattice.ptr<cv::Vec3d>(r);
+      cv::Vec2f * dst = out.ptr<cv::Vec2f>(r);
+      for (int c = 0; c < cols; ++c) {
+        const cv::Point2f p = model.pixel(inverse * ray[c], width, height);
+        dst[c] = cv::Vec2f(p.x, p.y);
+      }
+    }
+  }
+
+  // The previous frame on the device for one search or fit (road_step_gpu). Per thread:
+  // the two cameras run on their own executor threads.
+  struct RoadGpu
+  {
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+    cv::cuda::GpuMat previous;
+#endif
+    int width = 0;
+    int height = 0;
+  };
+
+  // Uploads `previous` and returns the handle, or nullptr when the GPU path does not
+  // apply (option off, no kernel built, not an 8-bit frame).
+  RoadGpu * road_gpu_for(const cv::Mat & previous) const
+  {
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+    if (!road_step_gpu_ || previous.type() != CV_8UC1) {return nullptr;}
+    thread_local RoadGpu gpu;
+    gpu.previous.upload(previous);
+    gpu.width = previous.cols;
+    gpu.height = previous.rows;
+    return &gpu;
+#else
+    (void)previous;
+    return nullptr;
+#endif
+  }
+
+  // K candidates' warped regions (float) in one kernel call.
+  void road_warps_gpu(
+    const GroundModel & model, RoadGpu & gpu, const cv::Rect & roi, int stride,
+    const std::vector<std::array<double, 4>> & candidates, std::vector<cv::Mat> & out) const
+  {
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+    thread_local std::vector<cv::Mat> lattices;
+    thread_local compressed_input::DecodeStats lattice_ms, kernel_ms;
+    auto t0 = std::chrono::steady_clock::now();
+    lattices.resize(candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      road_lattice(model, candidates[i].data(), gpu.width, gpu.height, roi, stride, lattices[i]);
+    }
+    lattice_ms.add(compressed_input::ms_since(t0));
+    t0 = std::chrono::steady_clock::now();
+    monoscale_tracker_gpu::warp_patches(gpu.previous, lattices, roi.size(), road_step_cubic_map_, out);
+    kernel_ms.add(compressed_input::ms_since(t0));
+    if (kernel_ms.ms.size() % 2000 == 0) {
+      RCLCPP_INFO(get_logger(), "road_gpu roi=%dx%d lattice_ms[%s] kernel+copy_ms[%s]", roi.width, roi.height,
+        lattice_ms.summary().c_str(), kernel_ms.summary().c_str());
+    }
+    patch_warps_ += static_cast<long>(candidates.size());
+#else
+    (void)model; (void)gpu; (void)roi; (void)stride; (void)candidates; (void)out;
+#endif
+  }
+
+  // Whole-region ZNCC of each warped candidate against `current(roi)` (one tile, no mask).
+  static void zncc_of(const cv::Mat & target8, const std::vector<cv::Mat> & warped, std::vector<double> & scores)
+  {
+    double sa = 0.0, saa = 0.0;
+    for (int y = 0; y < target8.rows; ++y) {
+      const uchar * a = target8.ptr<uchar>(y);
+      for (int x = 0; x < target8.cols; ++x) {sa += a[x]; saa += static_cast<double>(a[x]) * a[x];}
+    }
+    const double n = static_cast<double>(target8.total());
+    scores.assign(warped.size(), -2.0);
+    for (size_t k = 0; k < warped.size(); ++k) {
+      double sb = 0.0, sbb = 0.0, sab = 0.0;
+      for (int y = 0; y < target8.rows; ++y) {
+        const uchar * a = target8.ptr<uchar>(y);
+        const float * b = warped[k].ptr<float>(y);
+        for (int x = 0; x < target8.cols; ++x) {
+          const double vb = b[x];
+          sb += vb; sbb += vb * vb; sab += a[x] * vb;
+        }
+      }
+      scores[k] = zncc_from_sums(n, sa, sb, saa, sbb, sab);
+    }
+  }
+
   void road_scores(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double hop, double turn, const cv::Rect & roi, std::vector<double> & out,
@@ -3366,12 +3487,33 @@ private:
     return count;
   }
 
+  // Timed (road-step GPU experiment): the search's own wall time per call, logged as a
+  // running summary per thread every 200 calls.
   double measure_step_photometric(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double turn, double reach, double centre, bool have_centre,
     const std::array<double, 4> & band, double predicted_error = -1.0,
     int * votes = nullptr, double * peak_score = nullptr,
     double * spread = nullptr) const
+  {
+    thread_local compressed_input::DecodeStats search_stats;
+    const auto start = std::chrono::steady_clock::now();
+    const double found = measure_step_photometric_impl(
+      model, previous, current, turn, reach, centre, have_centre, band, predicted_error,
+      votes, peak_score, spread);
+    search_stats.add(compressed_input::ms_since(start));
+    if (search_stats.ms.size() % 200 == 0) {
+      RCLCPP_INFO(get_logger(), "road_search_ms(%s): %s",
+        road_step_gpu_ ? "gpu" : "cpu", search_stats.summary().c_str());
+    }
+    return found;
+  }
+
+  double measure_step_photometric_impl(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double turn, double reach, double centre, bool have_centre,
+    const std::array<double, 4> & band, double predicted_error,
+    int * votes, double * peak_score, double * spread) const
   {
     cv::Rect roi = cv::Rect(
       cv::Point(cvRound(band[0] * current.cols), cvRound(band[1] * current.rows)),
@@ -3387,6 +3529,16 @@ private:
         current.cols, current.rows, mask);
     }
     const double span = std::max(reach, 1e-3);
+    // GPU search (road_step_gpu): the full-size pair, the path it implements (lattice
+    // warp, one tile, no fused geometry). The coarse pass on a reduced copy stays on the CPU.
+    RoadGpu * gpu = (!road_step_fused_ && std::max(road_step_tiles_, 1) == 1) ? road_gpu_for(previous) : nullptr;
+    const auto gpu_scores = [&](const std::vector<double> & hops, std::vector<double> & out) {
+        std::vector<std::array<double, 4>> candidates;
+        for (double h : hops) {candidates.push_back({h, turn, 0.0, 0.0});}
+        thread_local std::vector<cv::Mat> warped;
+        road_warps_gpu(model, *gpu, roi, road_step_stride_, candidates, warped);
+        zncc_of(current(roi), warped, out);
+      };
     // Each candidate is warped once; the whole-region score and the per-tile
     // scores both come out of that one warp, so keeping the tiles here costs
     // nothing and saves the separate spread sweep it used to need -- a third of
@@ -3402,6 +3554,27 @@ private:
         bool keep_tiles, double & best_score) {
         double best = low;
         best_score = -2.0;
+        if (gpu != nullptr && &from == &previous && over == roi) {
+          // All of this pass's candidates in one kernel call.
+          std::vector<double> hops;
+          for (int i = 0; i < samples; ++i) {
+            hops.push_back((low + (high - low) * i / std::max(samples - 1, 1)) * span);
+          }
+          std::vector<double> whole_scores;
+          gpu_scores(hops, whole_scores);
+          for (int i = 0; i < samples; ++i) {
+            const double s = low + (high - low) * i / std::max(samples - 1, 1);
+            if (whole_scores[static_cast<size_t>(i)] > best_score) {
+              best_score = whole_scores[static_cast<size_t>(i)];
+              best = s;
+            }
+            if (keep_tiles && tiles == 1 && whole_scores[static_cast<size_t>(i)] > tile_value[0]) {
+              tile_value[0] = whole_scores[static_cast<size_t>(i)];
+              tile_best[0] = s;
+            }
+          }
+          return best;
+        }
         for (int i = 0; i < samples; ++i) {
           const double s = low + (high - low) * i / std::max(samples - 1, 1);
           double whole = -2.0;
@@ -3521,8 +3694,17 @@ private:
       *spread = (*range.second - *range.first) / std::max(std::abs(found), 1e-6);
     }
     const double fine = 2.0 * spacing / std::max(road_step_samples_ - 1, 1);
-    const double left = road_score(model, previous, current, (found - fine) * span, turn, roi);
-    const double right = road_score(model, previous, current, (found + fine) * span, turn, roi);
+    double left = 0.0;
+    double right = 0.0;
+    if (gpu != nullptr) {
+      std::vector<double> both;
+      gpu_scores({(found - fine) * span, (found + fine) * span}, both);
+      left = both[0];
+      right = both[1];
+    } else {
+      left = road_score(model, previous, current, (found - fine) * span, turn, roi);
+      right = road_score(model, previous, current, (found + fine) * span, turn, roi);
+    }
     if (peak_score != nullptr) {
       *peak_score = fine_peak;
     }
@@ -3688,6 +3870,28 @@ private:
     return normalise(warped, out, mask);
   }
 
+  // road_patch for several candidates: one GPU kernel call when `gpu` is given, else the
+  // CPU warp per candidate. Returns false if any patch failed (as road_patch would).
+  bool road_patches(
+    const GroundModel & model, const cv::Mat & previous, RoadGpu * gpu, const cv::Rect & roi,
+    const std::vector<std::array<double, 4>> & candidates, std::vector<cv::Mat> & out,
+    const cv::Mat & mask = cv::Mat()) const
+  {
+    out.resize(candidates.size());
+    if (gpu == nullptr) {
+      for (size_t i = 0; i < candidates.size(); ++i) {
+        if (!road_patch(model, previous, roi, candidates[i].data(), out[i], mask)) {return false;}
+      }
+      return true;
+    }
+    thread_local std::vector<cv::Mat> warped;
+    road_warps_gpu(model, *gpu, roi, road_step_fit_stride_, candidates, warped);
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      if (!normalise(warped[i], out[i], mask)) {return false;}
+    }
+    return true;
+  }
+
   // What the plane fit could not explain, on a coarse grid.
   //
   // Warp the previous frame forward by the motion the fit settled on, then ask
@@ -3789,6 +3993,20 @@ private:
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double turn, double seed_step, const std::array<double, 4> & band) const
   {
+    thread_local compressed_input::DecodeStats esm_ms;
+    const auto start = std::chrono::steady_clock::now();
+    RoadSolve solved = solve_step_esm_impl(model, previous, current, turn, seed_step, band);
+    esm_ms.add(compressed_input::ms_since(start));
+    if (esm_ms.ms.size() % 200 == 0) {
+      RCLCPP_INFO(get_logger(), "esm_ms(%s): %s", road_step_gpu_ ? "gpu" : "cpu", esm_ms.summary().c_str());
+    }
+    return solved;
+  }
+
+  RoadSolve solve_step_esm_impl(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double turn, double seed_step, const std::array<double, 4> & band) const
+  {
     RoadSolve out;
     ++fit_solves_;
     cv::Rect roi = cv::Rect(
@@ -3806,6 +4024,9 @@ private:
     if (!normalise(current(roi), target, mask)) {
       return out;
     }
+    // road_step_gpu: every warp of the fit through the batched kernel.
+    RoadGpu * gpu = road_gpu_for(previous);
+    std::vector<cv::Mat> batch;
     // The geometry that turns a parameter into pixels, taken exactly as the
     // band sweep takes it.
     const double lens = std::abs(model.translation_base_from_camera[2]);
@@ -3900,10 +4121,10 @@ private:
     const double angle_limit = 0.05;
 
     double at[4] = {seed_step, turn, 0.0, 0.0};
-    cv::Mat patch;
-    if (!road_patch(model, previous, roi, at, patch, mask)) {
+    if (!road_patches(model, previous, gpu, roi, {{at[0], at[1], at[2], at[3]}}, batch, mask)) {
       return out;
     }
+    cv::Mat patch = batch[0].clone();  // batch is reused by later warps
     cv::Mat residual = patch - target;
     double cost = residual.dot(residual);
     const double seeded = cost;
@@ -3967,17 +4188,22 @@ private:
           built = false;  // fall through to the numeric loop
         }
       }
-      for (int k = 0; k < freedom && built && rebuild && !road_step_esm_analytic_; ++k) {
-        double up[4] = {at[0], at[1], at[2], at[3]};
-        double down[4] = {at[0], at[1], at[2], at[3]};
-        up[k] += probe[k];
-        down[k] -= probe[k];
-        cv::Mat ahead;
-        cv::Mat behind;
-        built = road_patch(model, previous, roi, up, ahead, mask) &&
-          road_patch(model, previous, roi, down, behind, mask);
-        if (built) {
-          column[k] = (ahead - behind) / (2.0 * probe[k]);
+      if (built && rebuild && !road_step_esm_analytic_) {
+        // All 2 x freedom probes of the numeric Jacobian in one batch (one kernel call
+        // with road_step_gpu; the CPU warps one by one otherwise).
+        std::vector<std::array<double, 4>> probes;
+        for (int k = 0; k < freedom; ++k) {
+          std::array<double, 4> up = {at[0], at[1], at[2], at[3]};
+          std::array<double, 4> down = up;
+          up[static_cast<size_t>(k)] += probe[k];
+          down[static_cast<size_t>(k)] -= probe[k];
+          probes.push_back(up);
+          probes.push_back(down);
+        }
+        built = road_patches(model, previous, gpu, roi, probes, batch, mask);
+        for (int k = 0; k < freedom && built; ++k) {
+          column[k] = (batch[static_cast<size_t>(2 * k)] - batch[static_cast<size_t>(2 * k + 1)]) /
+            (2.0 * probe[k]);
         }
       }
       if (!built) {
@@ -4025,9 +4251,10 @@ private:
             std::abs(trial[0] - seed_step) <= step_limit &&
             std::abs(trial[1] - turn) <= angle_limit &&
             std::abs(trial[2]) <= angle_limit && std::abs(trial[3]) <= angle_limit;
-          cv::Mat moved_patch;
-          if (inside && road_patch(model, previous, roi, trial, moved_patch, mask)) {
-            cv::Mat next = moved_patch - target;
+          if (inside && road_patches(model, previous, gpu, roi,
+              {{trial[0], trial[1], trial[2], trial[3]}}, batch, mask))
+          {
+            cv::Mat next = batch[0] - target;
             const double trial_cost = next.dot(next);
             if (trial_cost < cost) {
               std::copy(trial, trial + 4, at);
@@ -5133,6 +5360,7 @@ private:
   // Whether the GPU path is actually in use, which needs the parameter, an
   // OpenCV that has cudaoptflow, and a device to run on.
   bool cuda_active_ = false;
+  bool road_step_gpu_ = false;
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> forward_flow_;
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> backward_flow_;
