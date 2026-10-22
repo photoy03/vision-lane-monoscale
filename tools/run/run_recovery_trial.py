@@ -236,6 +236,9 @@ def main() -> int:
                              "tools/run/frame_gate_relay.py (--gate-period) with image queues of depth 1")
     parser.add_argument("--gate-period", type=float, default=0.2,
                         help="with --image-input gated: one frame per camera per slot of this many seconds")
+    parser.add_argument("--show", action="store_true",
+                        help="open the fused-map viewer and RViz on the local display (watching a replay; "
+                             "adds GUI load, so not for measurement runs)")
     parser.add_argument("--outputs-light", action="store_true",
                         help="leave the raw occupancy stream /perception/occupancy_grid_map (42 %% of an "
                              "outputs_bag) out of the recording; the snapshot topics the contract checks "
@@ -380,7 +383,7 @@ def main() -> int:
     launch = [
         "ros2", "launch", "vision_mapping_bringup", "single_camera_lane.launch.py",
         "launch_camera:=false", "launch_f9r:=false", "use_sim_time:=true",
-        "launch_viewer:=false", "launch_rviz:=false",
+        f"launch_viewer:={'true' if args.show else 'false'}", f"launch_rviz:={'true' if args.show else 'false'}",
         f"launch_occupancy:={'true' if occupancy_enabled else 'false'}",
         f"launch_lane_fusion:={'true' if lane_fusion_enabled else 'false'}",
         f"stage_diagnostics:={'true' if args.instrumentation == 'on' else 'false'}",
