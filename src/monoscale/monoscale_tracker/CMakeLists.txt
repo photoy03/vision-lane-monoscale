@@ -9,7 +9,21 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
-find_package(OpenCV REQUIRED)
+# MONOSCALE_TRACKER_OPENCV_DIR: build this node against another OpenCV (e.g. one with the
+# CUDA modules, for the GPU optical flow) instead of the system one. Only this node links
+# it, so no process holds two OpenCVs. The libraries are found at run time through the
+# install RPATH below.
+set(MONOSCALE_TRACKER_OPENCV_DIR "$ENV{MONOSCALE_TRACKER_OPENCV_DIR}" CACHE PATH
+  "OpenCVConfig.cmake directory for feature_tracker (empty: the default OpenCV)")
+if(MONOSCALE_TRACKER_OPENCV_DIR)
+  # The workspace build passes -DOpenCV_DIR (the system one) to every package; this
+  # package's own cache entry is pointed elsewhere.
+  set(OpenCV_DIR "${MONOSCALE_TRACKER_OPENCV_DIR}" CACHE PATH "" FORCE)
+  find_package(OpenCV REQUIRED PATHS "${MONOSCALE_TRACKER_OPENCV_DIR}" NO_DEFAULT_PATH)
+  message(STATUS "monoscale_tracker: OpenCV ${OpenCV_VERSION} from ${MONOSCALE_TRACKER_OPENCV_DIR}")
+else()
+  find_package(OpenCV REQUIRED)
+endif()
 # Header-only helper (compressed_input.hpp); OpenCV-only, no message libraries needed.
 find_package(vision_lane_interfaces REQUIRED)
 
@@ -45,6 +59,7 @@ else()
   message(STATUS "monoscale_tracker: no cudaoptflow in OpenCV; CPU only")
 endif()
 target_compile_options(feature_tracker PRIVATE -O3)
+set_target_properties(feature_tracker PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 install(TARGETS feature_tracker DESTINATION lib/${PROJECT_NAME})
 

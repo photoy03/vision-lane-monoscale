@@ -12,6 +12,8 @@ launch_arguments:
   tracker_motion_warp: ''
   tracker_opencv_threads: ''
   tracker_executor_threads: ''
+  # GPU optical flow (needs the tracker built against an OpenCV with cudaoptflow).
+  tracker_use_cuda: ''
   tracker_gyro_prediction_mode: ''
   tracker_gyro_time_offset_sec: ''
   tracker_gyro_history_sec: ''

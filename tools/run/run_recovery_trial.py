@@ -296,7 +296,7 @@ def main() -> int:
         "tracker_gyro_history_sec", "tracker_gyro_max_gap_sec",
         "tracker_imu_yaw_history_sec",
         "lane_pending_commit_budget",
-        "tracker_opencv_threads", "tracker_executor_threads", "odom_executor_threads",
+        "tracker_opencv_threads", "tracker_executor_threads", "tracker_use_cuda", "odom_executor_threads",
         "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
         "lane_mapping_owner", "launch_fusion", "fusion_provenance_topic", "lane_map_observation_topic", "odom_lone_camera_solve",
         "occupancy_camera_liveness", "occupancy_camera_dead_sec", "lane_warmup_sec", "lane_warmup_min_motion_m",
@@ -319,6 +319,7 @@ def main() -> int:
         if not re.fullmatch(pattern, value):
             raise SystemExit(f"invalid value for --launch-arg {name}: {value!r}")
         if name in {"launch_occupancy", "launch_lane_fusion", "tracker_motion_prediction", "tracker_motion_warp",
+                    "tracker_use_cuda",
                     "odom_lone_camera_solve", "occupancy_camera_liveness",
                     "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness"}:
             if value.lower() not in {"true", "false"}:

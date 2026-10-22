@@ -54,11 +54,23 @@ def column_stats(path: Path, columns, where=None, group=None):
 
 
 def map_delay(run: Path):
-    from rclpy.serialization import deserialize_message
-    from rosidl_runtime_py.utilities import get_message
     path = run / "outputs_bag" / "outputs_bag_0.db3"
+    if not path.exists() and path.with_name(path.name + ".zstd").exists():
+        # Compressed outputs: read a temporary decompressed copy (the run folder is not written).
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="stage_timing_") as temp:
+            copy = Path(temp) / path.name
+            subprocess.run(["zstd", "-d", "-q", "-o", str(copy), str(path) + ".zstd"], check=True)
+            return map_delay_db(copy)
     if not path.exists():
         return {}
+    return map_delay_db(path)
+
+
+def map_delay_db(path: Path):
+    from rclpy.serialization import deserialize_message
+    from rosidl_runtime_py.utilities import get_message
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     topics = {n: (i, get_message(t)) for i, n, t in db.execute("SELECT id, name, type FROM topics")}
     out = {}
