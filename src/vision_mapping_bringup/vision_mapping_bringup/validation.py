@@ -36,7 +36,8 @@ def tracker_overrides(args, width):
         ('tracker_motion_prediction', 'motion_prediction'),
         ('tracker_motion_warp', 'motion_warp'),
         ('tracker_use_cuda', 'use_cuda'),
-        ('tracker_road_step_gpu', 'road_step_gpu')):
+        ('tracker_road_step_gpu', 'road_step_gpu'),
+        ('tracker_road_step_gpu_gram', 'road_step_gpu_gram')):
         raw = args.arg(name).strip().lower()
         if raw:
             if raw not in ('true', 'false'):

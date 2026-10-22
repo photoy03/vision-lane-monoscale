@@ -80,6 +80,11 @@ namespace monoscale_tracker_gpu
 void warp_patches(
   const cv::cuda::GpuMat & previous, const std::vector<cv::Mat> & lattices,
   const cv::Size & region, bool cubic, std::vector<cv::Mat> & patches);
+// v2: K candidates' and the target's sums and cross sums, all computed on the device.
+void gram_patches(
+  const cv::cuda::GpuMat & previous, const cv::cuda::GpuMat & current, const cv::Rect & roi,
+  int cols, int rows, bool cubic, const double lens[5], const std::vector<double> & inverses,
+  std::vector<double> & sums, std::vector<double> & cross);
 }  // namespace monoscale_tracker_gpu
 #endif
 
@@ -1081,10 +1086,14 @@ public:
     // warp, no visibility mask, one tile); anything else stays on the CPU. Not
     // bit-identical to the CPU path (GPU interpolation).
     road_step_gpu_ = declare_parameter<bool>("road_step_gpu", false);
+    // v2 on top of road_step_gpu: the products' sums computed on the device too, so a
+    // search pass or a fit iteration costs one round trip of a few dozen numbers.
+    road_step_gpu_gram_ = declare_parameter<bool>("road_step_gpu_gram", false);
     if (road_step_gpu_ && !cuda_active_) {
       RCLCPP_WARN(get_logger(), "road_step_gpu needs use_cuda with a CUDA OpenCV; staying on the CPU");
       road_step_gpu_ = false;
     }
+    road_step_gpu_gram_ = road_step_gpu_gram_ && road_step_gpu_;
     // Fraction of the image, measured from the top, to leave out of feature
     // detection. The estimator keeps only what projects onto the ground
     // between ground_min_distance_m and ground_max_distance_m, so anything
@@ -2189,7 +2198,7 @@ private:
       << milliseconds(stage.detect) << ',' << milliseconds(stage.publish) << ','
       << total_ms << ',' << held << ',' << followed << ',' << stats.raw << ','
       << stats.lost << ',' << stats.noisy << ',' << stats.drifted << ','
-      << road_step_m << ',' << road_score << '\n';
+      << std::setprecision(6) << road_step_m << ',' << std::setprecision(4) << road_score << '\n';
     if (sequence % 128 == 0) {
       diagnostics_csv_.flush();
     }
@@ -3163,6 +3172,7 @@ private:
   {
 #ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
     cv::cuda::GpuMat previous;
+    cv::cuda::GpuMat current;  // only with road_step_gpu_gram
 #endif
     int width = 0;
     int height = 0;
@@ -3170,19 +3180,75 @@ private:
 
   // Uploads `previous` and returns the handle, or nullptr when the GPU path does not
   // apply (option off, no kernel built, not an 8-bit frame).
-  RoadGpu * road_gpu_for(const cv::Mat & previous) const
+  RoadGpu * road_gpu_for(const cv::Mat & previous, const cv::Mat & current = cv::Mat()) const
   {
 #ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
     if (!road_step_gpu_ || previous.type() != CV_8UC1) {return nullptr;}
     thread_local RoadGpu gpu;
     gpu.previous.upload(previous);
+    if (road_step_gpu_gram_ && !current.empty()) {gpu.current.upload(current);}
     gpu.width = previous.cols;
     gpu.height = previous.rows;
     return &gpu;
 #else
     (void)previous;
+    (void)current;
     return nullptr;
 #endif
+  }
+
+  // v2 results: sums and cross sums of K candidates (indices 0..K-1) and the target (K).
+  struct RoadGram
+  {
+    int m = 0;
+    double n = 0.0;
+    std::vector<double> s;
+    std::vector<double> c;
+    double centred(int i, int j) const
+    {
+      return c[static_cast<size_t>(i) * m + j] - s[static_cast<size_t>(i)] * s[static_cast<size_t>(j)] / n;
+    }
+    // normalise()'s rule: a norm above 1e-9 and at least 32 pixels.
+    bool usable(int i) const {return n >= 32.0 && centred(i, i) > 1e-18;}
+    // The dot product of the two normalised (zero mean, unit norm) patches.
+    double rho(int i, int j) const
+    {
+      const double v = centred(i, i) * centred(j, j);
+      return v > 0.0 ? centred(i, j) / std::sqrt(v) : 0.0;
+    }
+  };
+
+  // The candidates (step, yaw, pitch, roll; optionally each its own model) against
+  // current(roi), one device round trip. Needs gpu->current.
+  RoadGram road_gram(
+    const GroundModel & model, RoadGpu & gpu, const cv::Rect & roi, int stride,
+    const std::vector<std::array<double, 4>> & candidates,
+    const std::vector<const GroundModel *> & models = {}) const
+  {
+    RoadGram g;
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+    std::vector<double> inverses;
+    inverses.reserve(candidates.size() * 9);
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      const GroundModel & use = models.empty() ? model : *models[i];
+      const cv::Matx33d inverse = use.homography(
+        candidates[i][0], candidates[i][1], candidates[i][2], candidates[i][3], arc_hop_).inv();
+      for (int r = 0; r < 3; ++r) {for (int c = 0; c < 3; ++c) {inverses.push_back(inverse(r, c));}}
+    }
+    double lens[5];
+    model.scaled(gpu.width, gpu.height, lens[0], lens[1], lens[2], lens[3]);
+    lens[4] = model.equidistant ? 1.0 : 0.0;
+    const int cols = std::max(roi.width / std::max(stride, 1), 2);
+    const int rows = std::max(roi.height / std::max(stride, 1), 2);
+    monoscale_tracker_gpu::gram_patches(
+      gpu.previous, gpu.current, roi, cols, rows, road_step_cubic_map_, lens, inverses, g.s, g.c);
+    g.m = static_cast<int>(candidates.size()) + 1;
+    g.n = static_cast<double>(roi.width) * roi.height;
+    patch_warps_ += static_cast<long>(candidates.size());
+#else
+    (void)model; (void)gpu; (void)roi; (void)stride; (void)candidates; (void)models;
+#endif
+    return g;
   }
 
   // K candidates' warped regions (float) in one kernel call.
@@ -3202,6 +3268,30 @@ private:
     t0 = std::chrono::steady_clock::now();
     monoscale_tracker_gpu::warp_patches(gpu.previous, lattices, roi.size(), road_step_cubic_map_, out);
     kernel_ms.add(compressed_input::ms_since(t0));
+    // MONOSCALE_ROAD_GPU_CHECK=1: the CPU warp of the first candidate beside the GPU's
+    // (diagnostic only; the previous frame is downloaded each time).
+    if (std::getenv("MONOSCALE_ROAD_GPU_CHECK") != nullptr && !candidates.empty()) {
+      cv::Mat host_previous;
+      gpu.previous.download(host_previous);
+      cv::Mat map_x, map_y, cpu;
+      build_warp_roi(model, candidates[0][0], candidates[0][1], gpu.width, gpu.height, roi,
+        map_x, map_y, candidates[0][2], candidates[0][3], stride);
+      cv::remap(host_previous, cpu, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+      cv::Mat cpu_f;
+      cpu.convertTo(cpu_f, CV_32F);
+      cv::Mat diff = cv::abs(cpu_f - out[0]);
+      double worst = 0.0;
+      cv::Point where;
+      cv::minMaxLoc(diff, nullptr, &worst, nullptr, &where);
+      // Where the lattice positions disagree, if they do.
+      cv::Mat lat = lattices[0];
+      static int printed = 0;
+      if (printed++ < 40) {
+        RCLCPP_INFO(get_logger(), "road_gpu_check stride=%d roi=%dx%d lattice=%dx%d mean|d|=%.4f max|d|=%.2f at (%d,%d) cpu=%.1f gpu=%.2f mapx=%.3f mapy=%.3f",
+          stride, roi.width, roi.height, lat.cols, lat.rows, cv::mean(diff)[0], worst, where.x, where.y,
+          cpu_f.at<float>(where), out[0].at<float>(where), map_x.at<float>(where), map_y.at<float>(where));
+      }
+    }
     if (kernel_ms.ms.size() % 2000 == 0) {
       RCLCPP_INFO(get_logger(), "road_gpu roi=%dx%d lattice_ms[%s] kernel+copy_ms[%s]", roi.width, roi.height,
         lattice_ms.summary().c_str(), kernel_ms.summary().c_str());
@@ -3531,10 +3621,19 @@ private:
     const double span = std::max(reach, 1e-3);
     // GPU search (road_step_gpu): the full-size pair, the path it implements (lattice
     // warp, one tile, no fused geometry). The coarse pass on a reduced copy stays on the CPU.
-    RoadGpu * gpu = (!road_step_fused_ && std::max(road_step_tiles_, 1) == 1) ? road_gpu_for(previous) : nullptr;
+    RoadGpu * gpu = (!road_step_fused_ && std::max(road_step_tiles_, 1) == 1) ?
+      road_gpu_for(previous, current) : nullptr;
     const auto gpu_scores = [&](const std::vector<double> & hops, std::vector<double> & out) {
         std::vector<std::array<double, 4>> candidates;
         for (double h : hops) {candidates.push_back({h, turn, 0.0, 0.0});}
+        if (road_step_gpu_gram_) {
+          // v2: zncc_from_sums of each candidate against the target, from the device sums.
+          const RoadGram g = road_gram(model, *gpu, roi, road_step_stride_, candidates);
+          const int t = g.m - 1;
+          out.assign(candidates.size(), -2.0);
+          for (int i = 0; i < t; ++i) {out[static_cast<size_t>(i)] = g.rho(i, t);}
+          return;
+        }
         thread_local std::vector<cv::Mat> warped;
         road_warps_gpu(model, *gpu, roi, road_step_stride_, candidates, warped);
         zncc_of(current(roi), warped, out);
@@ -3989,6 +4088,115 @@ private:
   // Seeded from the search's own answer and the gyro's turn, and it keeps them
   // if it cannot beat them: the caller falls back to the one-dimensional
   // answer, which is the measurement this stack already trusts.
+  // The fit's iterations on the v2 path (road_step_gpu_gram): the same Levenberg-Marquardt
+  // steps as the image loop in solve_step_esm_impl, with every dot product taken from the
+  // device's sums. With u the normalised patches and t the target:
+  //   cost        = |u - t|^2 = 2 - 2 rho(u, t)
+  //   column k    = (u_k+ - u_k-) / (2 probe_k)
+  //   normal(i,j) = column_i . column_j,  gradient_i = -column_i . (u_at - t)
+  // One round trip per Jacobian (its 2 x freedom probes plus the iterate) and one per trial.
+  // Returns false where the image loop would have returned early. Rebuilds the Jacobian
+  // every iteration (road_step_esm_rebuild <= 1, the deployed value).
+  bool esm_gram_loop(
+    const GroundModel & model, RoadGpu & gpu, const cv::Rect & roi, int freedom,
+    const double probe[4], double step_limit, double angle_limit, double px_per_m,
+    double focal, double turn, double seed_step, double at[4], double & cost,
+    double & seeded, int & taken, cv::Matx44d & held_normal, double jacobian_at[4]) const
+  {
+    const int stride = road_step_fit_stride_;
+    {
+      const RoadGram g = road_gram(model, gpu, roi, stride, {{at[0], at[1], at[2], at[3]}});
+      if (!g.usable(0) || !g.usable(1)) {return false;}
+      cost = 2.0 - 2.0 * g.rho(0, 1);
+    }
+    seeded = cost;
+    double lambda = 1e-3;
+    taken = 0;
+    for (int iteration = 0; iteration < 10; ++iteration) {
+      std::vector<std::array<double, 4>> batch;
+      for (int k = 0; k < freedom; ++k) {
+        std::array<double, 4> up = {at[0], at[1], at[2], at[3]};
+        std::array<double, 4> down = up;
+        up[static_cast<size_t>(k)] += probe[k];
+        down[static_cast<size_t>(k)] -= probe[k];
+        batch.push_back(up);
+        batch.push_back(down);
+      }
+      batch.push_back({at[0], at[1], at[2], at[3]});
+      const RoadGram g = road_gram(model, gpu, roi, stride, batch);
+      const int a = 2 * freedom;   // the iterate
+      const int t = a + 1;         // the target
+      bool built = true;
+      for (int i = 0; i <= t; ++i) {built = built && g.usable(i);}
+      if (!built) {break;}
+      // rho(i, i) = 1 for a normalised patch.
+      const auto dot = [&](int i, int j) {return i == j ? 1.0 : g.rho(i, j);};
+      cv::Matx44d normal = cv::Matx44d::zeros();
+      cv::Vec4d gradient(0.0, 0.0, 0.0, 0.0);
+      for (int i = 0; i < freedom; ++i) {
+        const int ui = 2 * i;
+        const int di = 2 * i + 1;
+        gradient[i] = -((dot(ui, a) - dot(ui, t)) - (dot(di, a) - dot(di, t))) / (2.0 * probe[i]);
+        for (int j = i; j < freedom; ++j) {
+          const int uj = 2 * j;
+          const int dj = 2 * j + 1;
+          normal(i, j) = (dot(ui, uj) - dot(ui, dj) - dot(di, uj) + dot(di, dj)) /
+            (4.0 * probe[i] * probe[j]);
+          normal(j, i) = normal(i, j);
+        }
+      }
+      held_normal = normal;
+      std::copy(at, at + 4, jacobian_at);
+      for (int i = freedom; i < 4; ++i) {
+        normal(i, i) = 1.0;
+      }
+      cv::Vec4d delta(0.0, 0.0, 0.0, 0.0);
+      bool accepted = false;
+      for (int attempt = 0; attempt < 6 && !accepted; ++attempt) {
+        cv::Matx44d damped = normal;
+        for (int i = 0; i < 4; ++i) {
+          damped(i, i) += lambda * std::max(normal(i, i), 1e-12);
+        }
+        cv::Vec4d proposal;
+        if (cv::solve(damped, gradient, proposal, cv::DECOMP_CHOLESKY)) {
+          const double trial[4] = {
+            at[0] + proposal[0], at[1] + proposal[1],
+            at[2] + proposal[2], at[3] + proposal[3]};
+          const bool inside =
+            std::abs(trial[0] - seed_step) <= step_limit &&
+            std::abs(trial[1] - turn) <= angle_limit &&
+            std::abs(trial[2]) <= angle_limit && std::abs(trial[3]) <= angle_limit;
+          if (inside) {
+            const RoadGram q = road_gram(model, gpu, roi, stride, {{trial[0], trial[1], trial[2], trial[3]}});
+            if (q.usable(0) && q.usable(1)) {
+              const double trial_cost = 2.0 - 2.0 * q.rho(0, 1);
+              if (trial_cost < cost) {
+                std::copy(trial, trial + 4, at);
+                cost = trial_cost;
+                delta = proposal;
+                accepted = true;
+                ++taken;
+              }
+            }
+          }
+        }
+        if (!accepted) {
+          lambda = std::min(lambda * 10.0, 1e6);
+        }
+      }
+      if (!accepted) {
+        break;
+      }
+      lambda = std::max(lambda * 0.3, 1e-9);
+      const double moved = std::abs(delta[0]) * px_per_m +
+        (std::abs(delta[1]) + std::abs(delta[2]) + std::abs(delta[3])) * focal;
+      if (moved < 0.01) {
+        break;
+      }
+    }
+    return true;
+  }
+
   RoadSolve solve_step_esm(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double turn, double seed_step, const std::array<double, 4> & band) const
@@ -4024,8 +4232,9 @@ private:
     if (!normalise(current(roi), target, mask)) {
       return out;
     }
-    // road_step_gpu: every warp of the fit through the batched kernel.
-    RoadGpu * gpu = road_gpu_for(previous);
+    // road_step_gpu: every warp of the fit through the batched kernel (v1), or the whole
+    // iteration on the device's sums (v2, road_step_gpu_gram).
+    RoadGpu * gpu = road_gpu_for(previous, current);
     std::vector<cv::Mat> batch;
     // The geometry that turns a parameter into pixels, taken exactly as the
     // band sweep takes it.
@@ -4121,18 +4330,61 @@ private:
     const double angle_limit = 0.05;
 
     double at[4] = {seed_step, turn, 0.0, 0.0};
-    if (!road_patches(model, previous, gpu, roi, {{at[0], at[1], at[2], at[3]}}, batch, mask)) {
-      return out;
-    }
-    cv::Mat patch = batch[0].clone();  // batch is reused by later warps
-    cv::Mat residual = patch - target;
-    double cost = residual.dot(residual);
-    const double seeded = cost;
-    double lambda = 1e-3;
+    cv::Mat residual;
+    double cost = 0.0;
+    double seeded = 0.0;
     int taken = 0;
     cv::Mat column[4];
     cv::Matx44d held_normal;
     double jacobian_at[4] = {0.0, 0.0, 0.0, 0.0};
+    const bool gram = road_step_gpu_gram_ && gpu != nullptr && mask.empty() &&
+      road_step_esm_rebuild_ <= 1 && !road_step_esm_analytic_ && !esm_compare_;
+    if (gram) {
+      thread_local compressed_input::DecodeStats loop_ms, images_ms;
+      auto loop_start = std::chrono::steady_clock::now();
+      if (!esm_gram_loop(model, *gpu, roi, freedom, probe, step_limit, angle_limit, px_per_m,
+          focal, turn, seed_step, at, cost, seeded, taken, held_normal, jacobian_at))
+      {
+        return out;
+      }
+      loop_ms.add(compressed_input::ms_since(loop_start));
+      loop_start = std::chrono::steady_clock::now();
+      struct Report {compressed_input::DecodeStats & a; compressed_input::DecodeStats & b;
+        std::chrono::steady_clock::time_point t; const FeatureTracker * self;
+        ~Report() {b.add(compressed_input::ms_since(t));
+          if (b.ms.size() % 400 == 0) {RCLCPP_INFO(self->get_logger(), "esm_gram loop_ms[%s] images_ms[%s]",
+            a.summary().c_str(), b.summary().c_str());}}} report{loop_ms, images_ms, loop_start, this};
+      // The images the rest of this routine reads (residual autocorrelation, tilt
+      // projection): the last Jacobian's columns and the answer's residual, one batch.
+      if (taken > 0) {
+        std::vector<std::array<double, 4>> images;
+        for (int k = 0; k < freedom; ++k) {
+          std::array<double, 4> up = {jacobian_at[0], jacobian_at[1], jacobian_at[2], jacobian_at[3]};
+          std::array<double, 4> down = up;
+          up[static_cast<size_t>(k)] += probe[k];
+          down[static_cast<size_t>(k)] -= probe[k];
+          images.push_back(up);
+          images.push_back(down);
+        }
+        images.push_back({at[0], at[1], at[2], at[3]});
+        if (!road_patches(model, previous, gpu, roi, images, batch, mask)) {
+          return out;
+        }
+        for (int k = 0; k < freedom; ++k) {
+          column[k] = (batch[static_cast<size_t>(2 * k)] - batch[static_cast<size_t>(2 * k + 1)]) /
+            (2.0 * probe[k]);
+        }
+        residual = batch[static_cast<size_t>(2 * freedom)] - target;
+      }
+    } else {
+    if (!road_patches(model, previous, gpu, roi, {{at[0], at[1], at[2], at[3]}}, batch, mask)) {
+      return out;
+    }
+    cv::Mat patch = batch[0].clone();  // batch is reused by later warps
+    residual = patch - target;
+    cost = residual.dot(residual);
+    seeded = cost;
+    double lambda = 1e-3;
     bool have_jacobian = false;
     for (int iteration = 0; iteration < 10; ++iteration) {
       // How often the Jacobian is rebuilt.
@@ -4283,6 +4535,7 @@ private:
         break;
       }
     }
+    }  // image loop (CPU warps, or v1 GPU warps)
     if (taken == 0 || !(cost < seeded)) {
       return out;
     }
@@ -5361,6 +5614,7 @@ private:
   // OpenCV that has cudaoptflow, and a device to run on.
   bool cuda_active_ = false;
   bool road_step_gpu_ = false;
+  bool road_step_gpu_gram_ = false;
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> forward_flow_;
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> backward_flow_;
