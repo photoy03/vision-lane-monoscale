@@ -2,7 +2,10 @@
 
 Run this launch beside ``single_camera_lane.launch.py``. The default image
 mode records a JPEG transport so a multi-minute test does not fill the SSD.
-Use ``image_mode:=raw`` only for short, pixel-exact captures.
+Use ``image_mode:=raw`` only for short, pixel-exact captures. ``image_mode:=camera_jpeg``
+records the camera's own MJPEG frames as the driver passes them on
+(single_camera_lane.launch.py camera_output:=jpeg): no decode, no re-encode, no
+Python compressor, every frame the camera delivered.
 """
 from datetime import datetime
 from pathlib import Path
@@ -71,8 +74,8 @@ def _launch(context):
         )
 
     image_mode = arg("image_mode").strip().lower()
-    if image_mode not in ("compressed", "raw", "none"):
-        raise ValueError("image_mode must be compressed, raw, or none")
+    if image_mode not in ("compressed", "raw", "none", "camera_jpeg"):
+        raise ValueError("image_mode must be compressed, raw, none, or camera_jpeg")
 
     compression_mode = arg("compression_mode").strip().lower()
     if compression_mode not in ("none", "file", "message"):
@@ -104,7 +107,10 @@ def _launch(context):
         topics.extend(DEBUG_IMAGE_TOPICS)
 
     republishers = []
-    if image_mode == "raw":
+    if image_mode == "camera_jpeg":
+        # The driver already publishes the camera's JPEG on the measurement topic.
+        topics.append("/measurement/front/image_raw/compressed")
+    elif image_mode == "raw":
         topics.append(front_raw)
     elif image_mode == "compressed":
         front_compressed = "/measurement/front/image_raw/compressed"
@@ -128,7 +134,9 @@ def _launch(context):
             "/vision/tracks/rear",
         ])
         rear_raw = "/sensing/camera/rear/fisheye/image_raw"
-        if image_mode == "raw":
+        if image_mode == "camera_jpeg":
+            topics.append("/measurement/rear/image_raw/compressed")
+        elif image_mode == "raw":
             topics.append(rear_raw)
         elif image_mode == "compressed":
             rear_compressed = "/measurement/rear/image_raw/compressed"
@@ -155,9 +163,11 @@ def _launch(context):
     # Arrival statistics of the sensor inputs (D-18), recorded into the same bag.
     stats_nodes = []
     if flag("record_topic_stats"):
-        watched = [front_raw, front_info, "/sensing/imu/imu_data"]
+        # camera_jpeg: there are no raw image topics; the measurement topics are watched below.
+        watched = ([] if image_mode == "camera_jpeg" else [front_raw]) + [front_info, "/sensing/imu/imu_data"]
         if flag("record_rear_camera"):
-            watched += ["/sensing/camera/rear/fisheye/image_raw", "/sensing/camera/rear/fisheye/camera_info"]
+            watched += ([] if image_mode == "camera_jpeg" else ["/sensing/camera/rear/fisheye/image_raw"]) + \
+                ["/sensing/camera/rear/fisheye/camera_info"]
         watched += [topic for topic in topics if topic.startswith("/measurement/")]
         topics.append("/recording/topic_stats")
         stats_nodes.append(Node(

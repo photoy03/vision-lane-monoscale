@@ -100,6 +100,9 @@ def _launch(context, group='all'):
     ctx.compressed_topics = [] if ctx.image_input == 'raw' else [
         topic + ('_gated' if ctx.image_input == 'gated' else '') for topic in sources[:len(ctx.camera_names)]]
     ctx.compressed_decode = 'color' if ctx.image_input in ('raw', 'compressed') else 'gray'
+    if ctx.launch_camera and sensors.camera_output(ctx) == 'jpeg' and ctx.image_input == 'raw':
+        raise ValueError('camera_output:=jpeg publishes no raw images: set image_input to compressed, '
+                         'compressed_gray or gated')
     ctx.image_queue_depth = 1 if ctx.image_input == 'gated' else 0  # 0: each node's own default
 
     ctx.mapping_owner = validation.lane_mapping_owner(args)

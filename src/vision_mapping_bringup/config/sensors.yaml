@@ -10,6 +10,10 @@ launch_arguments:
   # compressed_gray: as compressed, tracker and occupancy decode straight to gray (lanes color).
   # gated: compressed_gray from the frame-gate topics (<topic>_gated), image queues depth 1.
   image_input: raw
+  # Camera driver output (with launch_camera:=true). raw (default): MJPEG decoded to rgb8.
+  # jpeg: the camera's MJPEG passed on untouched on /measurement/<camera>/image_raw/compressed
+  # (needs image_input compressed, compressed_gray or gated).
+  camera_output: raw
   # Required when launch_f9r:=true. Prefer /dev/serial/by-id/... names.
   imu_device: ''
   imu_topic: /sensing/imu/imu_data
