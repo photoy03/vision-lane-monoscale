@@ -80,6 +80,7 @@ def run_one(bag: Path, params: Path, folder: Path, mode: str, env_extra: dict):
     env.update(env_extra)
     if "MONOSCALE_SYNTHETIC_STEP" in env_extra:
         env["MONOSCALE_SYNTHETIC_LOG"] = str(folder / "synthetic.csv")
+    env["MONOSCALE_ROAD_ESCAPE_LOG"] = str(folder / "escape.csv")
     env.setdefault("ROS_DOMAIN_ID", "95")
     cmd = [str(BINARY), "--offline", str(bag), str(out_bag), "--ros-args", "-r", "__node:=feature_tracker",
            "--params-file", str(params), "-p", "use_sim_time:=false", "-p", "use_cuda:=true",
@@ -191,7 +192,14 @@ def main():
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--perturb", default=PERTURB)
     ap.add_argument("--jobs", type=int, default=3)
+    ap.add_argument("--arm", action="append", default=[], metavar="NAME=MODE[,param:=value...]",
+                    help="an extra mode: a base mode plus parameter overrides, e.g. "
+                         "guard=cpu,road_step_frame_guard:=true")
     args = ap.parse_args()
+    for item in args.arm:
+        name, _, spec = item.partition("=")
+        base, *overrides = spec.split(",")
+        MODES[name] = MODES[base] + [x for o in overrides for x in ("-p", o)]
     args.out.mkdir(parents=True, exist_ok=True)
     params = params_copy(args.params, args.out / "tracker_params.yaml")
     bags = dict(item.split("=", 1) for item in args.bag)

@@ -34,6 +34,7 @@
 // a silent geometry error out of a configuration mismatch.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -592,6 +593,19 @@ struct RoadSolve
   double sample_inflation = 1.0;
 };
 
+// road_step_bracket_escape: what the search is given and what it did.
+struct RoadEscape
+{
+  std::deque<double> recent;  // in: the last fine-pass scores
+  int reason = 0;             // out: 0 none, 1 bracket edge, 2 score drop
+  int extensions = 0;
+  bool adopted = false;
+  double old_found = 0.0;
+  double old_score = 0.0;
+  double new_found = 0.0;
+  double new_score = 0.0;
+};
+
 struct TrackState
 {
   cv::Mat previous_gray;
@@ -670,6 +684,8 @@ struct TrackState
   // there have been two answers to compare, which is what tells the search to
   // keep its fixed width.
   double road_predict_error = -1.0;
+  // The last fine-pass scores, for road_step_bracket_escape's score condition.
+  std::deque<double> road_recent_scores;
   // How many frames in a row the mirrored bracket has scored higher. The sign
   // only changes when this reaches the threshold; a single frame is noise.
   int road_reverse_votes = 0;
@@ -1095,6 +1111,24 @@ public:
       road_step_gpu_ = false;
     }
     road_step_gpu_gram_ = road_step_gpu_gram_ && road_step_gpu_;
+    // Stage 2 (observer_eval_ROAD2): both off by default, so the default path is unchanged.
+    //
+    // A frame whose decode was cut short arrives with its bottom rows filled with grey
+    // 128 (the decoder's fill for missing MCUs; the recorder re-encodes it, so the JPEG
+    // still ends in EOI and only the pixels show it). Measured on 0924-0928: 14 such
+    // frames, all on the front camera of 0926 and 0928, and nothing else matches. One of
+    // them, the first frame of 0928, put the road step at 0.70 m and the bracket held it
+    // there for 6 s (7 m of motion while standing). With the guard the frame is dropped
+    // as if it never arrived: the next one is measured over the longer hop.
+    road_step_frame_guard_ = declare_parameter<bool>("road_step_frame_guard", false);
+    // When the search's best candidate sits on the bracket's edge, or its score falls
+    // well below the recent ones, the true peak may be outside the bracket: scan up to
+    // three more bracket widths on that side and take the result only if it scores
+    // better by road_step_escape_margin. Never toward zero past 5% of the bracket
+    // centre, so the zero-mode rule stands; a bracket already at that floor is not an
+    // edge. An adopted answer resets the bracket instead of being smoothed into it.
+    road_step_bracket_escape_ = declare_parameter<bool>("road_step_bracket_escape", false);
+    road_step_escape_margin_ = declare_parameter<double>("road_step_escape_margin", 0.01);
     // Fraction of the image, measured from the top, to leave out of feature
     // detection. The estimator keeps only what projects onto the ground
     // between ground_min_distance_m and ground_max_distance_m, so anything
@@ -1565,6 +1599,12 @@ private:
         0, 0, cv::INTER_AREA);
     }
     stage.scale = lap();
+    if (road_step_frame_guard_ && truncated_decode(gray)) {
+      const long count = ++frames_rejected_broken_;
+      RCLCPP_WARN(get_logger(), "frames_rejected_broken=%ld: %s frame at %.3f has a truncated decode",
+        count, name.c_str(), rclcpp::Time(message.header.stamp).seconds());
+      return;
+    }
     // Evaluation only, off unless the variable is set: perturb the frame by a small
     // gain, sensor noise and a sub-pixel shift, drawn per frame from the frame's stamp
     // and a seed, so a rerun with another seed asks how far the answers move under
@@ -1757,7 +1797,7 @@ private:
     // frame that makes that exact is the current one sampled through H.
     //
     // Optional, for a known-answer test on recorded scenes (see
-    // tools/eval/diagnostics/road_synthetic.py): MONOSCALE_SYNTHETIC_JITTER varies the
+    // tools/eval/diagnostics/road_selfcheck.py): MONOSCALE_SYNTHETIC_JITTER varies the
     // step smoothly by up to that fraction, MONOSCALE_SYNTHETIC_PITCH / _ROLL add a
     // tilt (rad) and _TILT_JITTER a per-frame +- on both, _GAIN and _NOISE change the
     // synthetic frame's brightness (+- fraction) and add sensor noise (grey sigma), and
@@ -1832,10 +1872,24 @@ private:
         const bool held = std::isfinite(state.road_bracket);
         double peak = 0.0;
         double spread = 0.0;
+        RoadEscape escape;
+        if (road_step_bracket_escape_) {
+          escape.recent = state.road_recent_scores;
+        }
         const double found = measure_step_photometric(
           model->second, state.previous_gray, gray, turn, reach,
           held ? state.road_bracket : 0.0, held, band_for(name),
-          state.road_predict_error, &state.road_reverse_votes, &peak, &spread);
+          state.road_predict_error, &state.road_reverse_votes, &peak, &spread,
+          road_step_bracket_escape_ ? &escape : nullptr);
+        if (road_step_bracket_escape_ && std::isfinite(found)) {
+          state.road_recent_scores.push_back(peak);
+          if (state.road_recent_scores.size() > 20) {
+            state.road_recent_scores.pop_front();
+          }
+          if (escape.reason != 0) {
+            log_escape(name, stamp, reach, escape);
+          }
+        }
         state.road_score = peak;
         state.road_spread = spread;
         if (road_step_calibrate_ && std::isfinite(found)) {
@@ -1971,7 +2025,7 @@ private:
             }
           }
           state.road_step = answer;
-          state.road_bracket = std::isfinite(state.road_bracket)
+          state.road_bracket = std::isfinite(state.road_bracket) && !escape.adopted
             ? state.road_bracket + 0.7 * (answer - state.road_bracket) : answer;
         }
       }
@@ -3656,13 +3710,13 @@ private:
     double turn, double reach, double centre, bool have_centre,
     const std::array<double, 4> & band, double predicted_error = -1.0,
     int * votes = nullptr, double * peak_score = nullptr,
-    double * spread = nullptr) const
+    double * spread = nullptr, RoadEscape * escape = nullptr) const
   {
     thread_local compressed_input::DecodeStats search_stats;
     const auto start = std::chrono::steady_clock::now();
     const double found = measure_step_photometric_impl(
       model, previous, current, turn, reach, centre, have_centre, band, predicted_error,
-      votes, peak_score, spread);
+      votes, peak_score, spread, escape);
     search_stats.add(compressed_input::ms_since(start));
     if (search_stats.ms.size() % 200 == 0) {
       RCLCPP_INFO(get_logger(), "road_search_ms(%s): %s",
@@ -3675,7 +3729,7 @@ private:
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double turn, double reach, double centre, bool have_centre,
     const std::array<double, 4> & band, double predicted_error,
-    int * votes, double * peak_score, double * spread) const
+    int * votes, double * peak_score, double * spread, RoadEscape * escape) const
   {
     cv::Rect roi = cv::Rect(
       cv::Point(cvRound(band[0] * current.cols), cvRound(band[1] * current.rows)),
@@ -3700,10 +3754,18 @@ private:
         for (double h : hops) {candidates.push_back({h, turn, 0.0, 0.0});}
         if (road_step_gpu_gram_) {
           // v2: zncc_from_sums of each candidate against the target, from the device sums.
-          const RoadGram g = road_gram(model, *gpu, roi, road_step_stride_, candidates);
-          const int t = g.m - 1;
+          // At most 11 candidates per call (the kernel's 12 slots include the target), so
+          // a larger road_step_samples goes in chunks.
           out.assign(candidates.size(), -2.0);
-          for (int i = 0; i < t; ++i) {out[static_cast<size_t>(i)] = g.rho(i, t);}
+          for (size_t from = 0; from < candidates.size(); from += 11) {
+            const size_t to = std::min(candidates.size(), from + 11);
+            const std::vector<std::array<double, 4>> chunk(
+              candidates.begin() + static_cast<std::ptrdiff_t>(from),
+              candidates.begin() + static_cast<std::ptrdiff_t>(to));
+            const RoadGram g = road_gram(model, *gpu, roi, road_step_stride_, chunk);
+            const int t = g.m - 1;
+            for (int i = 0; i < t; ++i) {out[from + static_cast<size_t>(i)] = g.rho(i, t);}
+          }
           return;
         }
         thread_local std::vector<cv::Mat> warped;
@@ -3840,6 +3902,85 @@ private:
     double found = scan(
       previous, current, roi, coarse - spacing, coarse + spacing,
       road_step_samples_, true, fine_peak);
+    if (escape != nullptr && have_centre && magnitude > 0.0) {
+      // Which edge, if any. The side toward zero counts only while it can still move
+      // toward zero: at the 5 % floor it is where a step near zero belongs.
+      const double floor_magnitude = 0.05 * magnitude;
+      const bool at_low = coarse <= low + 1e-12;
+      const bool at_high = coarse >= high - 1e-12;
+      const bool low_is_near = std::abs(low) < std::abs(high);
+      const auto movable = [&](bool near_side) {
+          return !near_side || std::max(magnitude - reachable, 0.0) > floor_magnitude + 1e-12;
+        };
+      int side = 0;  // -1: extend below `low`, +1: above `high`
+      if (at_low && movable(low_is_near)) {side = -1;}
+      if (at_high && movable(!low_is_near)) {side = +1;}
+      const auto & recent = escape->recent;
+      if (side == 0 && recent.size() >= 5) {
+        std::vector<double> sorted(recent.begin(), recent.end());
+        std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+        const double median = sorted[sorted.size() / 2];
+        std::vector<double> deviation;
+        for (double v : recent) {deviation.push_back(std::abs(v - median));}
+        std::nth_element(deviation.begin(), deviation.begin() + deviation.size() / 2, deviation.end());
+        const double spread_sd = 1.4826 * deviation[deviation.size() / 2];
+        if (fine_peak < median - std::max(0.1, 2.5 * spread_sd)) {
+          // No edge to go by: toward the end of the bracket that scored higher.
+          double low_score = -2.0;
+          double high_score = -2.0;
+          scan(previous, current, roi, low, low, 1, false, low_score);
+          scan(previous, current, roi, high, high, 1, false, high_score);
+          const bool up = high_score >= low_score;
+          if (movable(up ? !low_is_near : low_is_near)) {
+            side = up ? +1 : -1;
+          }
+          escape->reason = 2;
+        }
+      }
+      if (side != 0) {
+        if (escape->reason == 0) {escape->reason = 1;}
+        escape->old_found = found;
+        escape->old_score = fine_peak;
+        const double width = high - low;
+        // Signed limit toward zero on the near side.
+        const double near_limit = toward * floor_magnitude;
+        double edge = side > 0 ? high : low;
+        double best_s = found;
+        double best_score = fine_peak;
+        double ext_spacing = spacing;
+        for (int k = 0; k < 3; ++k) {
+          double a = side > 0 ? edge : edge - width;
+          double b = side > 0 ? edge + width : edge;
+          // Clamp the zero-ward end.
+          if (toward > 0.0) {a = std::max(a, std::min(near_limit, b));}
+          if (toward < 0.0) {b = std::min(b, std::max(near_limit, a));}
+          if (!(b > a)) {break;}
+          double ext_score = -2.0;
+          const double ext = scan(previous, current, roi, a, b, road_step_samples_, false, ext_score);
+          ++escape->extensions;
+          ext_spacing = (b - a) / std::max(road_step_samples_ - 1, 1);
+          double ext_fine_score = -2.0;
+          const double ext_fine = scan(
+            previous, current, roi, ext - ext_spacing, ext + ext_spacing, road_step_samples_, false,
+            ext_fine_score);
+          if (ext_fine_score > best_score) {
+            best_score = ext_fine_score;
+            best_s = ext_fine;
+          }
+          // Keep going only while the best of this window is on its outer edge.
+          const bool outer = side > 0 ? ext >= b - 1e-12 : ext <= a + 1e-12;
+          if (!outer) {break;}
+          edge = side > 0 ? b : a;
+        }
+        escape->new_found = best_s;
+        escape->new_score = best_score;
+        if (best_score >= fine_peak + road_step_escape_margin_) {
+          escape->adopted = true;
+          found = best_s;
+          fine_peak = best_score;
+        }
+      }
+    }
     // The sign is not decided here. Three attempts were made to read it off the
     // photometric score -- take the mirrored bracket when it scores higher,
     // when it scores higher three frames running, and only when the bracket
@@ -5680,6 +5821,53 @@ private:
     return h != 0 ? h : 1;
   }
 
+  // Every bracket escape (road_step_bracket_escape), to MONOSCALE_ROAD_ESCAPE_LOG when
+  // set, and a running count in the log. Steps in metres over the hop.
+  void log_escape(const std::string & name, double stamp, double reach, const RoadEscape & e)
+  {
+    const long triggered = ++escapes_triggered_;
+    const long adopted = e.adopted ? ++escapes_adopted_ : escapes_adopted_.load();
+    if (triggered % 50 == 1) {
+      RCLCPP_INFO(get_logger(), "road_escape triggered=%ld adopted=%ld", triggered, adopted);
+    }
+    const char * path = std::getenv("MONOSCALE_ROAD_ESCAPE_LOG");
+    if (path == nullptr) {
+      return;
+    }
+    const double span = std::max(reach, 1e-3);
+    std::lock_guard<std::mutex> guard(road_step_lock_);
+    if (escape_file_ == nullptr) {
+      escape_file_ = std::fopen(path, "w");
+      if (escape_file_ != nullptr) {
+        std::fprintf(escape_file_,
+          "stamp,camera,reason,extensions,adopted,old_step,old_score,new_step,new_score,reach\n");
+      }
+    }
+    if (escape_file_ != nullptr) {
+      std::fprintf(escape_file_, "%.6f,%s,%d,%d,%d,%.6f,%.5f,%.6f,%.5f,%.4f\n",
+        stamp, name.c_str(), e.reason, e.extensions, e.adopted ? 1 : 0, e.old_found * span,
+        e.old_score, e.new_found * span, e.new_score, reach);
+      std::fflush(escape_file_);
+    }
+  }
+
+  // Eight or more rows at the bottom that are flat grey 128: what a JPEG decoder leaves
+  // where the data ran out.
+  static bool truncated_decode(const cv::Mat & gray)
+  {
+    int flat = 0;
+    for (int y = gray.rows - 1; y >= 0 && flat < 8; --y) {
+      cv::Scalar mean;
+      cv::Scalar deviation;
+      cv::meanStdDev(gray.row(y), mean, deviation);
+      if (deviation[0] >= 0.5 || std::abs(mean[0] - 128.0) > 1.5) {
+        break;
+      }
+      ++flat;
+    }
+    return flat >= 8;
+  }
+
   static void perturb_frame(
     const char * spec, const std::string & name,
     const builtin_interfaces::msg::Time & stamp, cv::Mat & gray)
@@ -5755,6 +5943,13 @@ private:
   bool cuda_active_ = false;
   bool road_step_gpu_ = false;
   bool road_step_gpu_gram_ = false;
+  bool road_step_frame_guard_ = false;
+  bool road_step_bracket_escape_ = false;
+  double road_step_escape_margin_ = 0.01;
+  std::atomic<long> frames_rejected_broken_{0};
+  std::atomic<long> escapes_triggered_{0};
+  std::atomic<long> escapes_adopted_{0};
+  std::FILE * escape_file_ = nullptr;
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> forward_flow_;
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> backward_flow_;
