@@ -45,6 +45,7 @@
 #include <mutex>
 #include <memory>
 #include <string>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -1564,6 +1565,14 @@ private:
         0, 0, cv::INTER_AREA);
     }
     stage.scale = lap();
+    // Evaluation only, off unless the variable is set: perturb the frame by a small
+    // gain, sensor noise and a sub-pixel shift, drawn per frame from the frame's stamp
+    // and a seed, so a rerun with another seed asks how far the answers move under
+    // changes no camera could tell apart. MONOSCALE_INPUT_PERTURB="seed=1,gain=0.02,
+    // noise=1.0,shift=0.25" (relative gain, grey levels, pixels; each a +- bound or sigma).
+    if (const char * perturb = std::getenv("MONOSCALE_INPUT_PERTURB")) {
+      perturb_frame(perturb, name, message.header.stamp, gray);
+    }
 
     TrackState & state = states_[name];
     std::vector<cv::Mat> pyramid;
@@ -1746,16 +1755,44 @@ private:
     // Built with `homography(s)` and not its inverse: `road_patch` maps a
     // current pixel to its source in the previous frame with H^-1, so the
     // frame that makes that exact is the current one sampled through H.
+    //
+    // Optional, for a known-answer test on recorded scenes (see
+    // tools/eval/diagnostics/road_synthetic.py): MONOSCALE_SYNTHETIC_JITTER varies the
+    // step smoothly by up to that fraction, MONOSCALE_SYNTHETIC_PITCH / _ROLL add a
+    // tilt (rad) and _TILT_JITTER a per-frame +- on both, _GAIN and _NOISE change the
+    // synthetic frame's brightness (+- fraction) and add sensor noise (grey sigma), and
+    // MONOSCALE_SYNTHETIC_LOG writes the truth next to what the fit returned.
+    SyntheticTruth synthetic_truth;
     if (const char * synthetic = std::getenv("MONOSCALE_SYNTHETIC_STEP")) {
       const auto found = models_.find(name);
       if (found != models_.end() && found->second.ready && !gray.empty()) {
-        const double truth = std::atof(synthetic);
-        const char * spin = std::getenv("MONOSCALE_SYNTHETIC_TURN");
-        const double truth_turn = spin != nullptr ? std::atof(spin) : 0.0;
-        const char * sideways = std::getenv("MONOSCALE_SYNTHETIC_SLIDE");
-        const double truth_slide = sideways != nullptr ? std::atof(sideways) : 0.0;
-        const cv::Matx33d forward =
-          found->second.homography(truth, truth_turn, 0.0, 0.0, arc_hop_, truth_slide);
+        const auto number = [](const char * key, double fallback) {
+            const char * value = std::getenv(key);
+            return value != nullptr ? std::atof(value) : fallback;
+          };
+        cv::RNG draw(frame_seed(name, message.header.stamp, 0x5e7u));
+        // A real step changes smoothly, and the search brackets the last answer, so the
+        // variation is a slow sine over the stamp (period _PERIOD s, default 8) plus an
+        // optional independent per-frame part (_RANDOM, +- fraction).
+        const double jitter = number("MONOSCALE_SYNTHETIC_JITTER", 0.0);
+        const double period = std::max(number("MONOSCALE_SYNTHETIC_PERIOD", 8.0), 1e-3);
+        const double phase = 2.0 * CV_PI * std::fmod(
+          static_cast<double>(message.header.stamp.sec % 100000) +
+          message.header.stamp.nanosec * 1e-9, period) / period;
+        // Per nominal frame interval, so a hop over a dropped frame is longer the way a
+        // real one would be (`reach` is that hop's length in intervals).
+        const double truth = std::atof(synthetic) * reach * (1.0 + jitter * std::sin(phase) +
+          number("MONOSCALE_SYNTHETIC_RANDOM", 0.0) * draw.uniform(-1.0, 1.0));
+        const double truth_turn = number("MONOSCALE_SYNTHETIC_TURN", 0.0);
+        const double truth_slide = number("MONOSCALE_SYNTHETIC_SLIDE", 0.0);
+        const double tilt_jitter = number("MONOSCALE_SYNTHETIC_TILT_JITTER", 0.0);
+        const double truth_pitch =
+          number("MONOSCALE_SYNTHETIC_PITCH", 0.0) + tilt_jitter * draw.uniform(-1.0, 1.0);
+        const double truth_roll =
+          number("MONOSCALE_SYNTHETIC_ROLL", 0.0) + tilt_jitter * draw.uniform(-1.0, 1.0);
+        synthetic_truth = {true, truth, truth_turn, truth_pitch, truth_roll};
+        const cv::Matx33d forward = found->second.homography(
+          truth, truth_turn, truth_pitch, truth_roll, arc_hop_, truth_slide);
         cv::Mat mx(gray.rows, gray.cols, CV_32F);
         cv::Mat my(gray.rows, gray.cols, CV_32F);
         for (int y = 0; y < gray.rows; ++y) {
@@ -1771,6 +1808,18 @@ private:
           }
         }
         cv::remap(gray, state.previous_gray, mx, my, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+        const double gain = 1.0 + number("MONOSCALE_SYNTHETIC_GAIN", 0.0) * draw.uniform(-1.0, 1.0);
+        const double noise = number("MONOSCALE_SYNTHETIC_NOISE", 0.0);
+        if (gain != 1.0 || noise > 0.0) {
+          cv::Mat grey;
+          state.previous_gray.convertTo(grey, CV_32F, gain);
+          if (noise > 0.0) {
+            cv::Mat sensor(grey.size(), CV_32F);
+            draw.fill(sensor, cv::RNG::NORMAL, 0.0, noise);
+            grey += sensor;
+          }
+          grey.convertTo(state.previous_gray, CV_8U);
+        }
         turn = truth_turn;
         turn_known = true;
       }
@@ -1868,6 +1917,29 @@ private:
             band_for(name), state.parallax);
         } else {
           state.parallax.clear();
+        }
+        if (synthetic_truth.on) {
+          if (const char * path = std::getenv("MONOSCALE_SYNTHETIC_LOG")) {
+            const double span = std::max(reach, 1e-3);
+            std::lock_guard<std::mutex> guard(road_step_lock_);
+            if (synthetic_file_ == nullptr) {
+              synthetic_file_ = std::fopen(path, "w");
+              if (synthetic_file_ != nullptr) {
+                std::fprintf(
+                  synthetic_file_,
+                  "stamp,camera,truth_step,truth_turn,truth_pitch,truth_roll,search_step,"
+                  "answer_step,esm_ok,esm_pitch,esm_roll,score,reach\n");
+              }
+            }
+            if (synthetic_file_ != nullptr) {
+              std::fprintf(
+                synthetic_file_, "%.6f,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%.6f,%.6f,%.5f,%.4f\n",
+                stamp, name.c_str(), synthetic_truth.step, synthetic_truth.turn,
+                synthetic_truth.pitch, synthetic_truth.roll, found * span, answer * span,
+                state.road_esm.ok ? 1 : 0, state.road_esm.pitch, state.road_esm.roll, peak, reach);
+              std::fflush(synthetic_file_);
+            }
+          }
         }
         if (std::isfinite(answer)) {
           // Two values, deliberately. The smoothed one brackets the next
@@ -5579,6 +5651,74 @@ private:
   std::string road_step_dump_;
   std::mutex road_step_lock_;
   std::FILE * road_step_file_ = nullptr;
+  std::FILE * synthetic_file_ = nullptr;
+
+  struct SyntheticTruth
+  {
+    bool on = false;
+    double step = 0.0;
+    double turn = 0.0;
+    double pitch = 0.0;
+    double roll = 0.0;
+  };
+
+  // A seed fixed by the camera, the frame's stamp and a salt: the same frame gets the
+  // same draw in every run, whatever arrived before it.
+  static uint64_t frame_seed(
+    const std::string & name, const builtin_interfaces::msg::Time & stamp, uint64_t salt)
+  {
+    uint64_t h = 1469598103934665603ull ^ salt;
+    const auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+      };
+    for (const char c : name) {
+      mix(static_cast<unsigned char>(c));
+    }
+    mix(static_cast<uint64_t>(stamp.sec));
+    mix(static_cast<uint64_t>(stamp.nanosec));
+    return h != 0 ? h : 1;
+  }
+
+  static void perturb_frame(
+    const char * spec, const std::string & name,
+    const builtin_interfaces::msg::Time & stamp, cv::Mat & gray)
+  {
+    double seed = 1.0, gain = 0.0, noise = 0.0, shift = 0.0;
+    std::stringstream items(spec);
+    std::string item;
+    while (std::getline(items, item, ',')) {
+      const auto eq = item.find('=');
+      if (eq == std::string::npos) {
+        continue;
+      }
+      const std::string key = item.substr(0, eq);
+      const double value = std::atof(item.c_str() + eq + 1);
+      if (key == "seed") {seed = value;}
+      if (key == "gain") {gain = value;}
+      if (key == "noise") {noise = value;}
+      if (key == "shift") {shift = value;}
+    }
+    cv::RNG draw(frame_seed(name, stamp, static_cast<uint64_t>(seed)));
+    const double g = 1.0 + gain * draw.uniform(-1.0, 1.0);
+    const double dx = shift * draw.uniform(-1.0, 1.0);
+    const double dy = shift * draw.uniform(-1.0, 1.0);
+    cv::Mat grey;
+    gray.convertTo(grey, CV_32F, g);
+    if (dx != 0.0 || dy != 0.0) {
+      const cv::Matx23d move(1.0, 0.0, dx, 0.0, 1.0, dy);
+      cv::warpAffine(grey, grey, move, grey.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    }
+    if (noise > 0.0) {
+      cv::Mat sensor(grey.size(), CV_32F);
+      draw.fill(sensor, cv::RNG::NORMAL, 0.0, noise);
+      grey += sensor;
+    }
+    // Into a new buffer: `gray` may still view the message's own pixels.
+    cv::Mat out;
+    grey.convertTo(out, CV_8U);
+    gray = out;
+  }
   std::FILE * esm_sigma_file_ = nullptr;
   std::unordered_map<std::string, GroundModel> models_;
   // The step the reference camera last measured, shared with the others. The
