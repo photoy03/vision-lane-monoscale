@@ -18,8 +18,9 @@ launch_arguments:
   tracker_road_step_gpu: ''
   # v2 of it: the products' sums on the device too (needs tracker_road_step_gpu).
   tracker_road_step_gpu_gram: ''
-  # Stage-2 road-step options (observer_eval_ROAD2), default off: drop truncated decodes,
-  # and widen the search bracket when its peak sits on the edge.
+  # Stage-2 road-step options (observer_eval_ROAD2/ROAD3). frame_guard drops truncated decodes,
+  # on by default in the tracker since 2026-10-24 (false rolls it back); bracket_escape widens
+  # the search bracket when its peak sits on the edge (option only, default off).
   tracker_road_step_frame_guard: ''
   tracker_road_step_bracket_escape: ''
   tracker_gyro_prediction_mode: ''

@@ -1120,7 +1120,10 @@ public:
     // them, the first frame of 0928, put the road step at 0.70 m and the bracket held it
     // there for 6 s (7 m of motion while standing). With the guard the frame is dropped
     // as if it never arrived: the next one is measured over the longer hop.
-    road_step_frame_guard_ = declare_parameter<bool>("road_step_frame_guard", false);
+    // Default true since 2026-10-24 (observer_eval_ROAD3): bit-identical on bags without
+    // such frames (0924, 0925), 0928's 7 m startup phantom gone. Roll back with
+    // road_step_frame_guard:=false (launch: tracker_road_step_frame_guard:=false).
+    road_step_frame_guard_ = declare_parameter<bool>("road_step_frame_guard", true);
     // When the search's best candidate sits on the bracket's edge, or its score falls
     // well below the recent ones, the true peak may be outside the bracket: scan up to
     // three more bracket widths on that side and take the result only if it scores
@@ -5943,7 +5946,7 @@ private:
   bool cuda_active_ = false;
   bool road_step_gpu_ = false;
   bool road_step_gpu_gram_ = false;
-  bool road_step_frame_guard_ = false;
+  bool road_step_frame_guard_ = true;
   bool road_step_bracket_escape_ = false;
   double road_step_escape_margin_ = 0.01;
   std::atomic<long> frames_rejected_broken_{0};
