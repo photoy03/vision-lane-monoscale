@@ -15,6 +15,7 @@ the CDR bytes, where every std_msgs/Header-first message keeps it at offset 4.
 Only used by measurement.launch.py, never in the replay path.
 """
 import json
+import signal
 import struct
 import time
 
@@ -123,6 +124,10 @@ def main():
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        # Ctrl+C in the terminal reaches this process twice (the terminal's process group
+        # and the launch forwarding it); a second one during cleanup used to end it with a
+        # traceback and "process has died" in the recording's log.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         node.destroy_node()
         rclpy.try_shutdown()
 
