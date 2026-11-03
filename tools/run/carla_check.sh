@@ -50,11 +50,15 @@ for drive in "${drives[@]}"; do
     echo "[$name] converting"
     python3 -s "$root/tools/run/carla_to_measurement.py" "$src" "$conv" 2>&1 | grep -v '^\[INFO\]'
   fi
+  # The lane detector's window is in base_link (the rear axle here): put it where the
+  # vehicle's sits relative to its camera, 0..5 m ahead of the front camera.
+  forward=$(python3 -c "import yaml;print(yaml.safe_load(open('$conv/rig_carla.yaml'))['camera_forward_m'])")
+  bev=(--launch-arg "lane_bev_y_min_m=$forward" --launch-arg "lane_bev_y_max_m=$(python3 -c "print($forward + 5.0)")")
   run="${name}_r${rate//./}_$(date +%H%M%S)"
   echo "[$name] replaying at ${rate}x as $run"
   python3 "$root/tools/run/run_recovery_trial.py" --bag "$conv/bag" --run-id "$run" --playback-rate "$rate" \
     --pending on --instrumentation on --record-outputs on --outputs-light --output-root "$out" \
-    --repo "$root" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --launch-arg launch_fusion=true "${show[@]}" \
+    --repo "$root" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --launch-arg launch_fusion=true "${bev[@]}" "${show[@]}" \
     --calibration "$conv/calibration_carla.npz" --rig "$conv/rig_carla.yaml" --rear-rig "$conv/rear_rig_carla.yaml" \
     > "$out/${run}_console.log" 2>&1 || { echo "[$name] replay failed: $out/${run}_console.log" >&2; continue; }
   python3 "$root/tools/eval/diagnostics/carla_ate.py" --truth "$conv/bag" "$out/$run" --json "$out/$run/carla_ate.json" \

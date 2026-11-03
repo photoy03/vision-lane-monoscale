@@ -305,6 +305,7 @@ def main() -> int:
         "occupancy_camera_liveness", "occupancy_camera_dead_sec", "lane_warmup_sec", "lane_warmup_min_motion_m",
         "occupancy_parallel_cameras", "occupancy_publish_rate_hz", "occupancy_publish_commit_neutralise",
         "occupancy_carve_on_keyframe", "lane_debug_images",
+        "lane_bev_x_min_m", "lane_bev_x_max_m", "lane_bev_y_min_m", "lane_bev_y_max_m",
     }
     launch_overrides: dict[str, str] = {}
     if args.image_input == "gated" and not any(i.startswith("tracker_input_queue_depth=") for i in args.launch_arg):

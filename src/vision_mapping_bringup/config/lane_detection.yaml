@@ -37,3 +37,11 @@ launch_arguments:
   # drawn on it (/parking/cpp/vector_bev; green = confirmed, orange = candidate). With
   # launch_viewer it also opens windows for it and for the front camera. Default off.
   lane_debug_images: ''
+  # The detector's bird's-eye window in base_link metres (x across, y ahead; package
+  # defaults -4..4 and 0..5). Empty keeps the package values. The window is in base_link,
+  # not the camera: on the vehicle base_link sits 0.08 m behind the camera, on the CARLA
+  # kit it is the rear axle 3.694 m behind it, so tools/run/carla_check.sh moves y by that.
+  lane_bev_x_min_m: ''
+  lane_bev_x_max_m: ''
+  lane_bev_y_min_m: ''
+  lane_bev_y_max_m: ''
