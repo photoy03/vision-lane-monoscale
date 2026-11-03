@@ -304,7 +304,7 @@ def main() -> int:
         "lane_mapping_owner", "launch_fusion", "fusion_provenance_topic", "lane_map_observation_topic", "odom_lone_camera_solve",
         "occupancy_camera_liveness", "occupancy_camera_dead_sec", "lane_warmup_sec", "lane_warmup_min_motion_m",
         "occupancy_parallel_cameras", "occupancy_publish_rate_hz", "occupancy_publish_commit_neutralise",
-        "occupancy_carve_on_keyframe",
+        "occupancy_carve_on_keyframe", "lane_debug_images",
     }
     launch_overrides: dict[str, str] = {}
     if args.image_input == "gated" and not any(i.startswith("tracker_input_queue_depth=") for i in args.launch_arg):
@@ -324,7 +324,8 @@ def main() -> int:
         if name in {"launch_occupancy", "launch_lane_fusion", "tracker_motion_prediction", "tracker_motion_warp",
                     "tracker_use_cuda", "tracker_road_step_gpu", "tracker_road_step_gpu_gram", "tracker_road_step_frame_guard", "tracker_road_step_bracket_escape",
                     "odom_lone_camera_solve", "occupancy_camera_liveness",
-                    "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness"}:
+                    "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
+                    "lane_debug_images"}:
             if value.lower() not in {"true", "false"}:
                 raise SystemExit(f"{name} must be true or false")
             value = value.lower()

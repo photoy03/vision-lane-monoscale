@@ -34,7 +34,8 @@ def detection_parameters(ctx):
             ('lane_pending_readiness', 'pending_readiness_enabled', bool),
             ('lane_pending_blocked_head_grace_sec', 'pending_blocked_head_grace_sec', float),
             ('lane_pending_drop_unresolvable', 'pending_drop_unresolvable_head', bool),
-            ('image_quality_min_sharpness', 'image_quality_min_sharpness', float))),
+            ('image_quality_min_sharpness', 'image_quality_min_sharpness', float),
+            ('lane_debug_images', 'publish_debug_vectors', bool))),
         'pending_observations_enabled': args.flag('lane_pending_recovery'),
         'recovered_output_enabled': args.flag('lane_pending_recovery'),
         'recovered_output_topic': '/parking/cpp/marking_segments_recovered',
@@ -170,6 +171,11 @@ def viewers(ctx, share):
                 package='rqt_image_view', executable='rqt_image_view',
                 name='lane_map_registration_compare_viewer', output='screen',
                 arguments=['/parking/cpp/global_marking_map_registered_compare']))
+    if ctx.args.flag('launch_viewer') and ctx.args.arg('lane_debug_images').strip().lower() == 'true':
+        for name, topic in (('front_camera_viewer', ctx.topics.image),
+                            ('lane_detection_viewer', '/parking/cpp/vector_bev')):
+            out.append(ctx.make_node(package='rqt_image_view', executable='rqt_image_view',
+                                     name=name, output='screen', arguments=[topic]))
     if ctx.launch_rviz:
         out.append(ctx.make_node(
             package='rviz2', executable='rviz2', name='lane_occupancy_rviz',

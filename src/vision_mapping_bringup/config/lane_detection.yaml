@@ -33,3 +33,7 @@ launch_arguments:
   lane_warmup_min_motion_m: '1.0'
   image_quality_gate_mode: monitor
   image_quality_min_sharpness: ''
+  # Watching a replay: the detector's per-frame bird's-eye view with the detected segments
+  # drawn on it (/parking/cpp/vector_bev; green = confirmed, orange = candidate). With
+  # launch_viewer it also opens windows for it and for the front camera. Default off.
+  lane_debug_images: ''

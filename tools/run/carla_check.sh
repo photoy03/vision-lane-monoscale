@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the current pipeline on CARLA drives and score the pose against the recorded truth.
 #
-#   bash tools/run/carla_check.sh [--rate 0.35] [--out ~/vision_lane_runs/carla_<date>] DRIVE [DRIVE ...]
+#   bash tools/run/carla_check.sh [--rate 0.35] [--show] [--out ~/vision_lane_runs/carla_<date>] DRIVE [DRIVE ...]
 #
 # DRIVE is a folder name under /media/$USER/*/HERO/hero_bags (e.g. park_h89 turn_h89) or a
 # path to a CARLA bag folder. Per drive:
@@ -13,19 +13,26 @@
 #   3. tools/eval/diagnostics/carla_ate.py: ATE / final error / path ratio against the truth
 # The table goes to <out>/CARLA_CHECK.md.
 #
+# --show: watch it on this screen while it runs -- RViz (occupancy grid, lane map markers,
+# fused map image, vehicle TF), the fused lane map, the front camera, and the lane
+# detector's per-frame bird's-eye view with the detected segments (green confirmed,
+# orange candidate). The windows close with the run.
+#
 # --rate: CARLA's cameras run at 60 fps, twice the vehicle's 30, and at 1.0 the tracker
 # keeps a third of the frames and the path comes out about 20 % short. 0.35 (about 21
 # frames a second per camera) is what the 2026-11-03 check used.
 set -eo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 rate=0.35
+show=()
 out="$HOME/vision_lane_runs/carla_$(date +%Y%m%d)"
 drives=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rate) rate=$2; shift 2 ;;
+    --show) show=(--show --launch-arg lane_debug_images=true); shift ;;
     --out) out=$2; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n "2,26p" "$0"; exit 0 ;;
     *) drives+=("$1"); shift ;;
   esac
 done
@@ -47,7 +54,7 @@ for drive in "${drives[@]}"; do
   echo "[$name] replaying at ${rate}x as $run"
   python3 "$root/tools/run/run_recovery_trial.py" --bag "$conv/bag" --run-id "$run" --playback-rate "$rate" \
     --pending on --instrumentation on --record-outputs on --outputs-light --output-root "$out" \
-    --repo "$root" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --launch-arg launch_fusion=true \
+    --repo "$root" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --launch-arg launch_fusion=true "${show[@]}" \
     --calibration "$conv/calibration_carla.npz" --rig "$conv/rig_carla.yaml" --rear-rig "$conv/rear_rig_carla.yaml" \
     > "$out/${run}_console.log" 2>&1 || { echo "[$name] replay failed: $out/${run}_console.log" >&2; continue; }
   python3 "$root/tools/eval/diagnostics/carla_ate.py" --truth "$conv/bag" "$out/$run" --json "$out/$run/carla_ate.json" \
