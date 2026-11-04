@@ -28,6 +28,6 @@
     "monoscale_core", "monoscale_tracker", "monoscale_odometry", "monoscale_pose",
     "monoscale_occupancy_grid_map", "monoscale_ublox",
     "vision_lane_interfaces", "lane_detection",
-    "lane_map", "map_assembly", "vision_mapping_bringup"
+    "lane_map", "map_assembly", "parking_assist", "vision_mapping_bringup"
   ]
 }

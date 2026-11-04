@@ -33,6 +33,7 @@
   <exec_depend>monoscale_ublox</exec_depend>
   <exec_depend>lane_detection</exec_depend>
   <exec_depend>lane_map</exec_depend>
+  <exec_depend>parking_assist</exec_depend>
   <exec_depend>map_assembly</exec_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

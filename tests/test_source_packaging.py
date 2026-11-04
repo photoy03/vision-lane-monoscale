@@ -16,7 +16,7 @@ import export_source_package
 def test_assets_and_packages():
     result = check_package.check_source(ROOT)
     assert result['errors'] == []
-    assert len(result['packages']) == 11
+    assert len(result['packages']) == 12  # + parking_assist (2026-11-04)
 
 
 def test_reject_path_escape(tmp_path):

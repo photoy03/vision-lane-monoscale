@@ -20,7 +20,7 @@ from launch_ros.actions import Node
 from vision_mapping_bringup import camera, run_files, validation
 from vision_mapping_bringup.config import (
     LaunchArgs, bringup_share, load_launch_defaults, map_definition, node_parameters)
-from vision_mapping_bringup.nodes import fusion, lanes, monoscale, sensors
+from vision_mapping_bringup.nodes import fusion, lanes, monoscale, parking, sensors
 from vision_mapping_bringup.odom_policy import odom_policy
 
 # Kept importable from here for existing callers.
@@ -32,7 +32,7 @@ LAUNCH_GROUPS = ('all', 'sensors', 'monoscale', 'lanes')
 def _category(package):
     if package in ('gscam', 'monoscale_ublox', 'tf2_ros'):
         return 'sensors'
-    if package in ('lane_detection', 'lane_map', 'map_assembly', 'rqt_image_view', 'rviz2'):
+    if package in ('lane_detection', 'lane_map', 'map_assembly', 'parking_assist', 'rqt_image_view', 'rviz2'):
         return 'lanes'
     return 'monoscale'
 
@@ -117,6 +117,7 @@ def _launch(context, group='all'):
     if ctx.shadow:
         nodes.append(monoscale.shadow_odometry(ctx))
     nodes += fusion.nodes(ctx)
+    nodes += parking.nodes(ctx)
     # A clock that jumps back (bag played again) cannot be continued by the pose
     # path, so the pipeline stops and is started again clean (guards below).
     nodes.append(make_node(package='vision_mapping_bringup', executable='clock_guard.py', name='clock_guard',

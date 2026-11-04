@@ -1,0 +1,31 @@
+# parking_assist goal_pose_node. Defaults are the owner's parking_goal_pose.py values
+# (2026-11-04); slot_width / slot_depth fit the CARLA parking lots -- a Korean standard
+# bay is 2.5 x 5.0 m, so set them for the lot being tested.
+parking_goal_pose_node:
+  ros__parameters:
+    input_mode: detections
+    detections_topic: /parking/cpp/marking_segments
+    pose_wait_sec: 0.5
+    segments_topic: /parking/cpp/marking_segments_recovered
+    lines_topic: /parking/lines
+    odom_topic: /localization/kinematic_state
+    map_frame: map
+    slot_width: 2.60
+    slot_depth: 4.37
+    width_tolerance: 0.50
+    depth_tolerance: 1.17
+    side_depth_difference_max: 1.0
+    orthogonal_tolerance_deg: 15.0
+    intersection_tolerance: 0.45
+    reverse_parking: true
+    entrance_to_goal_distance: 3.75
+    corner_memory_sec: 3.0
+    corner_memory_distance: 4.0
+    corner_match_distance: 0.35
+    corner_match_angle_deg: 12.0
+    corner_confirm_hits: 1
+    corner_side_min_length: 1.0
+    vehicle_length: 4.5135
+    vehicle_width: 2.0067
+    rear_overhang: 0.90
+    goal_republish_hz: 10.0
