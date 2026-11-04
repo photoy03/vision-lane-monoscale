@@ -73,7 +73,7 @@ ros2 launch monoscale_odometry hardware_single_camera.launch.py
 `/sensing/camera/front/fisheye/camera_info`로 발행한다. 렌즈 고유의 내부 파라미터와
 왜곡 계수는 자동으로 알 수 없으므로, 실제 카메라를 보정한 뒤
 `vision_fisheye.param.yaml`의 `front` 보정값도 같은 해상도에 맞춰야 한다.
-실기 launch는 `/home/tukorea32/calib_output/fisheye_calibration.npz`의 2560x1440
+실기 launch는 `<보정 폴더>/fisheye_calibration.npz`의 2560x1440
 fisheye `K`, `D`를 사용하며 1920x1080 입력에는 내부적으로 비례 축소한다.
 
 u-blox C102-F9R은 ZED-F9R 포트(`/dev/gps0`)를 다음처럼 연결한다. 노드는

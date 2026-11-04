@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Run the current pipeline on CARLA drives and score the pose against the recorded truth.
 #
-#   bash tools/run/carla_check.sh [--rate 0.35] [--show] [--parking] [--out ~/vision_lane_runs/carla_<date>] DRIVE [DRIVE ...]
+#   bash tools/run/carla_check.sh [--rate 0.35] [--show] [--parking] [--out $VISION_RUNS/carla_<date>] DRIVE [DRIVE ...]
 #
-# DRIVE is a folder name under /media/$USER/*/HERO/hero_bags (e.g. park_h89 turn_h89) or a
-# path to a CARLA bag folder. Per drive:
+# DRIVE is a folder name under $CARLA_BAGS (e.g. park_h89 turn_h89; default: the first
+# /media/$USER/*/HERO/hero_bags, an external drive) or a path to a CARLA bag folder. Per drive:
 #   1. tools/run/carla_to_measurement.py: CARLA bag (read-only) -> measurement session with
 #      the images reprojected to an equidistant fisheye, plus calibration and mounts
 #      (skipped when <out>/<drive> exists)
@@ -29,7 +29,7 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 rate=0.35
 show=()
 parking=()
-out="$HOME/vision_lane_runs/carla_$(date +%Y%m%d)"
+out="${VISION_RUNS:-$HOME/vision_lane_runs}/carla_$(date +%Y%m%d)"
 drives=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,7 +47,9 @@ source "$root/install/setup.bash"
 mkdir -p "$out"
 runs=()
 for drive in "${drives[@]}"; do
-  if [[ -d "$drive" ]]; then src=$drive; else src=$(ls -d /media/"$USER"/*/HERO/hero_bags/"$drive" 2>/dev/null | head -1); fi
+  if [[ -d "$drive" ]]; then src=$drive
+  elif [[ -n "$CARLA_BAGS" ]]; then src=$CARLA_BAGS/$drive
+  else src=$(ls -d /media/"$USER"/*/HERO/hero_bags/"$drive" 2>/dev/null | head -1); fi
   [[ -n "$src" && -f "$src/metadata.yaml" ]] || { echo "CARLA bag not found: $drive" >&2; exit 2; }
   name=$(basename "$src")
   conv="$out/$name"

@@ -4,7 +4,7 @@
 #   bash tools/run/record_vehicle.sh --front /dev/v4l/by-id/<front>-video-index0 \
 #       --rear /dev/v4l/by-id/<rear>-video-index0 --imu /dev/serial/by-id/<f9r>-if00 \
 #       --trial straight_01 [--width 2560 --height 1440 --fps 30] [--no-rear] [--no-imu]
-#       [--base-dir ~/vision_lane_measurements] [--notes "..."]
+#       [--base-dir $VISION_MEASUREMENTS (default ~/vision_lane_measurements)] [--notes "..."]
 #
 # The cameras' own MJPEG frames are recorded untouched (camera_output:=jpeg,
 # image_mode:=camera_jpeg): no decode, no re-encode, nothing else running. Stop with Ctrl+C
@@ -19,7 +19,7 @@
 set -eo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 front="" rear="" imu="" trial="" notes="" width=2560 height=1440 fps=30
-use_rear=1 use_imu=1 base_dir="$HOME/vision_lane_measurements"
+use_rear=1 use_imu=1 base_dir="${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --front) front=$2; shift 2 ;;
