@@ -12,7 +12,7 @@ work=$(mktemp -d -t vision_lane_golden.XXXXXX)
 trap 'rm -rf -- "$work"' EXIT
 det=$root/src/lane_mapping/lane_detection/test/golden
 map=$root/src/lane_mapping/lane_map/test/golden
-bag=${GOLDEN_BAG:-$HOME/vision_lane_measurements/20260928_181330_dual_input_check_01/bag/bag_0.db3}
+bag=${GOLDEN_BAG:-${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}/20260928_181330_dual_input_check_01/bag/bag_0.db3}
 status=0
 if [ -f "$bag" ]; then
   python3 - "$bag" "$det/frames_0928.txt" "$work" <<'PY'

@@ -168,7 +168,7 @@ ros2 bag play <bag 경로> --clock
 
 ```bash
 bash tools/run/watch.sh <녹화 폴더 또는 bag 경로>     # 예: ~/vision_lane_measurements/<세션>
-bash tools/run/watch.sh <CARLA 주행 이름>            # /media/$USER/*/HERO/hero_bags/<이름>, 변환·0.35배속·정답 비교
+bash tools/run/watch.sh <CARLA 주행 이름>            # $CARLA_BAGS/<이름> (기본: /media/$USER/*/HERO/hero_bags), 변환·0.35배속·정답 비교
 ```
 
 **실차 기록만 하기** (처리 없이 카메라 MJPEG + IMU 저장, 끝나면 자동 점검)
@@ -177,6 +177,16 @@ bash tools/run/watch.sh <CARLA 주행 이름>            # /media/$USER/*/HERO/h
 bash tools/run/record_vehicle.sh --front /dev/v4l/by-id/<전방> --rear /dev/v4l/by-id/<후방> \
   --imu /dev/serial/by-id/<F9R> --trial <이름>
 ```
+
+**데이터 위치** (환경변수, 없으면 괄호 안 기본값)
+
+| 변수 | 내용 |
+|---|---|
+| `VISION_MEASUREMENTS` | 측정 녹화 폴더 (`~/vision_lane_measurements`) |
+| `VISION_RUNS` | 실행 결과 폴더 (`~/vision_lane_runs`) |
+| `CARLA_BAGS` | CARLA bag 폴더 (첫 번째 `/media/$USER/*/HERO/hero_bags`) |
+| `MONOSCALE_TRACKER_OPENCV_DIR` | 추적기용 CUDA OpenCV (`~/opt/opencv-4.5.4-cuda-of/lib/cmake/opencv4`, 없으면 시스템 OpenCV) |
+| `GOLDEN_BAG` | golden 검사용 bag |
 
 **시계 역행 시 자동 재시작**
 
