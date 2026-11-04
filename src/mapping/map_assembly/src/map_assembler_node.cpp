@@ -3,7 +3,9 @@
 // and docs/STRUCTURE_KO.md "통합 지도"). Control pose and TF never pass here.
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -42,27 +44,38 @@ class MapAssembler : public rclcpp::Node {
     allow_incomplete_ = declare_parameter<bool>("allow_incomplete", false);
     pose_max_gap_ = declare_parameter<double>("pose_max_gap_sec", 0.25);
     const double tick_hz = declare_parameter<double>("tick_hz", 5.0);
+    const int64_t provenance_wait_ns = seconds_ns(declare_parameter<double>("provenance_wait_sec", 0.5));
     const auto pose_topic = declare_parameter<std::string>("pose_topic", "/localization/kinematic_state");
     const auto output_topic = declare_parameter<std::string>("output_topic", "/mapping/fused_map");
-    if (history_ns_ <= 0 || stall_ns_ <= 0 || !(pose_max_gap_ > 0.0) || !(tick_hz > 0.0) || tick_hz > 50.0)
+    auto provenance_topic = declare_parameter<std::string>("provenance_topic", "");
+    if (provenance_topic.empty()) provenance_topic = pose_topic + "/provenance";
+    if (history_ns_ <= 0 || stall_ns_ <= 0 || !(pose_max_gap_ > 0.0) || !(tick_hz > 0.0) || tick_hz > 50.0 ||
+        provenance_wait_ns < 0)
       throw std::invalid_argument("invalid map_assembler parameters");
     output_topic_ = output_topic;
+    gate_.emplace(provenance_wait_ns);
 
     const auto snapshots = rclcpp::QoS(20).reliable();
     lane_sub_ = create_subscription<LaneSnapshot>(map_snapshot::kLaneTopic, snapshots,
       [this](LaneSnapshot::ConstSharedPtr m) {
         check_time_line();
-        if (current(m->meta)) lanes_.add(now().nanoseconds(), meta_of(m->meta), m);
+        if (current(m->meta)) {
+          lanes_.add(now().nanoseconds(), meta_of(m->meta), m);
+          readiness_.lane(m->meta.valid, now().nanoseconds());
+        }
       });
     occupancy_sub_ = create_subscription<OccupancySnapshot>(map_snapshot::kOccupancyTopic, snapshots,
       [this](OccupancySnapshot::ConstSharedPtr m) {
         check_time_line();
-        if (current(m->meta)) occupancy_.add(now().nanoseconds(), meta_of(m->meta), m);
+        if (current(m->meta)) {
+          occupancy_.add(now().nanoseconds(), meta_of(m->meta), m);
+          readiness_.occupancy(m->meta.valid, now().nanoseconds());
+        }
       });
     pose_sub_ = create_subscription<nav_msgs::msg::Odometry>(pose_topic, rclcpp::QoS(200).reliable(),
       [this](nav_msgs::msg::Odometry::ConstSharedPtr m) { check_time_line(); on_pose(*m); });
     provenance_sub_ = create_subscription<vision_lane_interfaces::msg::PoseProvenance>(
-      pose_topic + "/provenance", rclcpp::QoS(200).reliable(),
+      provenance_topic, rclcpp::QoS(200).reliable(),
       [this](vision_lane_interfaces::msg::PoseProvenance::ConstSharedPtr m) { check_time_line(); on_provenance(*m); });
     fused_pub_ = create_publisher<FusedMap>(output_topic, rclcpp::QoS(5).reliable());
     status_pub_ = create_publisher<std_msgs::msg::String>(output_topic + "/status", 10);
@@ -79,6 +92,33 @@ class MapAssembler : public rclcpp::Node {
   }
 
  private:
+  // One fused map before publishing: T, its layer pair and the pose at T.
+  struct Candidate {
+    int64_t t;
+    map_assembly::LayerHistory<LaneSnapshot>::Entry lane;
+    map_assembly::LayerHistory<OccupancySnapshot>::Entry occupancy;
+    std::vector<std::string> stale;
+    monoscale_pose::PoseMatch match;
+  };
+
+  static int64_t steady_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+  static std::string env_or(const char *name, const std::string &fallback) {
+    const char *v = std::getenv(name);
+    return v ? std::string(v) : fallback;
+  }
+  static std::string json_escape(const std::string &in) {
+    std::string out;
+    for (const char c : in) {
+      if (c == '"' || c == '\\') { out += '\\'; out += c; }
+      else if (c == '\n' || c == '\r' || c == '\t') out += ' ';
+      else if (static_cast<unsigned char>(c) >= 0x20) out += c;
+    }
+    return out;
+  }
+
   static int64_t seconds_ns(double s) { return std::isfinite(s) ? static_cast<int64_t>(s * 1e9) : -1; }
 
   // Only snapshots of this node's time line enter the histories.
@@ -96,8 +136,10 @@ class MapAssembler : public rclcpp::Node {
     occupancy_ = {};
     poses_ = monoscale_pose::PoseTimeline{30.0};
     provenance_.clear();
+    gate_->reset();
     last_t_ = 0;
     ++time_line_resets_;
+    readiness_.generation_reset(steady_ns());
     RCLCPP_WARN(get_logger(), "ROS clock jumped back: fused map restarts on clock generation %lu",
       static_cast<unsigned long>(clock_generation_.value()));
   }
@@ -119,12 +161,30 @@ class MapAssembler : public rclcpp::Node {
       sample.covariance_source_valid = true;
     }
     if (!poses_.insert(sample)) ++pose_rejected_;
+    else readiness_.pose(now().nanoseconds());
   }
 
   void on_provenance(const vision_lane_interfaces::msg::PoseProvenance &m) {
     if (clock_generation_.stale(ns(m.header.stamp), now().nanoseconds())) return;
     const auto kind = m.kind <= 4 ? static_cast<map_assembly::PoseKind>(m.kind) : map_assembly::PoseKind::kUnknown;
     provenance_.add(ns(m.header.stamp), {kind, ns(m.raw_lower), ns(m.raw_upper)});
+    // A held fused map goes out as soon as its provenance is complete.
+    release_held(now().nanoseconds());
+  }
+
+  void release_held(int64_t now_ns) {
+    if (auto r = gate_->poll(now_ns, provenance_)) emit(r->payload);
+  }
+
+  // T, its layer pair and its pose are fixed here; publishing may wait for provenance.
+  void offer(int64_t t, const map_assembly::LayerHistory<LaneSnapshot>::Entry &lane,
+             const map_assembly::LayerHistory<OccupancySnapshot>::Entry &occupancy,
+             const std::vector<std::string> &stale, int64_t now_ns) {
+    Candidate c{t, lane, occupancy, stale, poses_.lookup(t, pose_max_gap_, pose_max_gap_, false)};
+    const auto &match = c.match;
+    const bool ready = gate_->offer(t, match.valid, match.lower_stamp_ns, match.upper_stamp_ns, c, now_ns, provenance_);
+    if (auto released = gate_->take_released()) emit(released->payload);
+    if (ready) emit(c);
   }
 
   void tick() {
@@ -135,36 +195,44 @@ class MapAssembler : public rclcpp::Node {
     const bool lane_stalled = lanes_.stalled(now_ns, stall_ns_);
     const bool occupancy_stalled = occupancy_.stalled(now_ns, stall_ns_);
     std::string state = "waiting";
-    if (const auto choice = map_assembly::choose_strict(lanes_, occupancy_, newest_pose, last_t_)) {
-      publish(choice->t, lanes_.entries()[choice->lane], occupancy_.entries()[choice->occupancy], {});
+    release_held(now_ns);
+    const int64_t floor = gate_->floor(last_t_);
+    if (const auto choice = map_assembly::choose_strict(lanes_, occupancy_, newest_pose, floor)) {
+      offer(choice->t, lanes_.entries()[choice->lane], occupancy_.entries()[choice->occupancy], {}, now_ns);
       state = "ok";
     } else if (allow_incomplete_ && lane_stalled != occupancy_stalled) {
       // Exactly one layer stopped: the other alone decides T, the stopped one is attached as stale.
       if (occupancy_stalled) {
-        const auto c = map_assembly::choose_single(lanes_, newest_pose, last_t_);
+        const auto c = map_assembly::choose_single(lanes_, newest_pose, floor);
         if (c && occupancy_.latest()) {
-          publish(c->t, lanes_.entries()[c->lane], *occupancy_.latest(), {"occupancy"});
+          offer(c->t, lanes_.entries()[c->lane], *occupancy_.latest(), {"occupancy"}, now_ns);
           state = "incomplete";
         }
       } else {
-        const auto c = map_assembly::choose_single(occupancy_, newest_pose, last_t_);
+        const auto c = map_assembly::choose_single(occupancy_, newest_pose, floor);
         if (c && lanes_.latest()) {
-          publish(c->t, *lanes_.latest(), occupancy_.entries()[c->occupancy], {"lane"});
+          offer(c->t, *lanes_.latest(), occupancy_.entries()[c->occupancy], {"lane"}, now_ns);
           state = "incomplete";
         }
       }
     }
+    if (gate_->holding()) state = "provenance_wait";
     if (state == "waiting" && (lane_stalled || occupancy_stalled))
       state = std::string("stalled:") + (lane_stalled ? "lane" : "") +
               (lane_stalled && occupancy_stalled ? "+" : "") + (occupancy_stalled ? "occupancy" : "");
     publish_status(now_ns, state, newest_pose);
+    // queue_size (PipelineProgress.msg: inputs held inside the stage, not yet
+    // final) = the fused map held for provenance, 0 or 1. The snapshot
+    // histories are kept for choosing T, not waiting to be finalised.
     progress_pub_->publish(pipeline_progress::make_progress(now_ns, "map_assembler", output_topic_, last_t_,
-      static_cast<uint32_t>(lanes_.entries().size() + occupancy_.entries().size()), published_, 0));
+      gate_->holding() ? 1U : 0U, published_, 0));
   }
 
-  void publish(int64_t t, const map_assembly::LayerHistory<LaneSnapshot>::Entry &lane,
-               const map_assembly::LayerHistory<OccupancySnapshot>::Entry &occupancy,
-               const std::vector<std::string> &stale) {
+  void emit(const Candidate &c) {
+    const int64_t t = c.t;
+    const auto &lane = c.lane;
+    const auto &occupancy = c.occupancy;
+    const auto &stale = c.stale;
     if (lane.payload->header.frame_id != occupancy.payload->header.frame_id) {
       ++frame_mismatch_;
       return;
@@ -178,7 +246,7 @@ class MapAssembler : public rclcpp::Node {
     out.stale_layers = stale;
     out.lanes = *lane.payload;
     out.occupancy = *occupancy.payload;
-    const auto match = poses_.lookup(t, pose_max_gap_, pose_max_gap_, false);
+    const auto &match = c.match;
     out.pose_valid = match.valid;
     out.pose_match = monoscale_pose::pose_match_kind_name(match.kind);
     if (match.valid) {
@@ -207,12 +275,14 @@ class MapAssembler : public rclcpp::Node {
     out.pose_position_variance = out.pose_covariance_valid ? match.position_variance : -1.0;
     out.pose_yaw_variance = out.pose_covariance_valid ? match.yaw_variance : -1.0;
     fused_pub_->publish(out);
+    readiness_.published(steady_ns());
     last_t_ = t;
     last_lane_age_ms_ = (t - lane.meta.content_max) * 1e-6;
     last_occupancy_age_ms_ = (t - occupancy.meta.content_max) * 1e-6;
   }
 
   void publish_status(int64_t now_ns, const std::string &state, int64_t newest_pose) {
+    const auto &w = gate_->counts();
     std::ostringstream s;
     s << "{\"state\":\"" << state << "\",\"t_ns\":" << last_t_
       << ",\"lag_ms\":" << (last_t_ > 0 ? (now_ns - last_t_) * 1e-6 : -1.0)
@@ -220,7 +290,15 @@ class MapAssembler : public rclcpp::Node {
       << ",\"lane_history\":" << lanes_.entries().size() << ",\"occupancy_history\":" << occupancy_.entries().size()
       << ",\"lane_invalid\":" << lanes_.invalid() << ",\"occupancy_invalid\":" << occupancy_.invalid()
       << ",\"lane_complete_ns\":" << lanes_.last_complete() << ",\"occupancy_complete_ns\":" << occupancy_.last_complete()
+      << ",\"lane_received\":" << (lanes_.received() ? "true" : "false")
+      << ",\"occupancy_received\":" << (occupancy_.received() ? "true" : "false")
       << ",\"provenance_missing\":" << provenance_missing_ << ",\"provenance_held\":" << provenance_.size()
+      << ",\"provenance_wait_started\":" << w.started << ",\"provenance_attached_late\":" << w.attached_late
+      << ",\"provenance_expired_lower\":" << w.expired_lower << ",\"provenance_expired_upper\":" << w.expired_upper
+      << ",\"provenance_expired_both\":" << w.expired_both << ",\"provenance_superseded\":" << w.superseded
+      << ",\"provenance_reset_discarded\":" << w.reset_discarded
+      << ",\"provenance_released_for_poseless\":" << w.released_for_poseless
+      << ",\"provenance_dropped_while_holding\":" << w.dropped_while_holding
       << ",\"clock_generation\":" << clock_generation_.value()
       << ",\"time_line_resets\":" << time_line_resets_ << ",\"generation_mismatch\":" << generation_mismatch_
       << ",\"pose_stale\":" << pose_stale_
@@ -228,12 +306,27 @@ class MapAssembler : public rclcpp::Node {
       << ",\"occupancy_timeline_resets\":" << occupancy_.timeline_resets()
       << ",\"newest_pose_ns\":" << newest_pose << ",\"pose_missing\":" << pose_missing_
       << ",\"pose_rejected\":" << pose_rejected_ << ",\"frame_mismatch\":" << frame_mismatch_
-      << ",\"lane_age_ms\":" << last_lane_age_ms_ << ",\"occupancy_age_ms\":" << last_occupancy_age_ms_ << "}";
+      << ",\"lane_age_ms\":" << last_lane_age_ms_ << ",\"occupancy_age_ms\":" << last_occupancy_age_ms_;
+    // Readiness (C-3): added next to the unchanged "state".
+    s << ",\"phase\":\"" << readiness_.phase_name() << "\",\"restart_index\":" << readiness_.restart_index()
+      << ",\"restart_reason\":\"" << json_escape(restart_reason_) << "\",\"run_id\":\"" << json_escape(run_id_) << "\""
+      << ",\"missing\":[";
+    const auto missing = readiness_.missing();
+    for (size_t i = 0; i < missing.size(); ++i) s << (i ? "," : "") << "\"" << missing[i] << "\"";
+    s << "],\"ready_after_ms\":" << readiness_.ready_after_ms()
+      << ",\"first_valid_ns\":{\"lane\":" << readiness_.first_lane_ns()
+      << ",\"occupancy\":" << readiness_.first_occupancy_ns() << ",\"pose\":" << readiness_.first_pose_ns() << "}"
+      << ",\"readiness_generation_resets\":" << readiness_.generation_resets() << "}";
     std_msgs::msg::String msg;
     msg.data = s.str();
     status_pub_->publish(msg);
   }
 
+  // Set by tools/run/supervise_launch.sh: 0 (or unset) on a first start.
+  std::string restart_reason_{env_or("VISION_RESTART_REASON", "")};
+  std::string run_id_{env_or("VISION_RUN_ID", "")};
+  map_assembly::Readiness readiness_{
+    static_cast<uint64_t>(std::strtoull(env_or("VISION_RESTART_INDEX", "0").c_str(), nullptr, 10)), steady_ns()};
   map_assembly::LayerHistory<LaneSnapshot> lanes_;
   map_assembly::LayerHistory<OccupancySnapshot> occupancy_;
   monoscale_pose::PoseTimeline poses_{30.0};
@@ -243,6 +336,7 @@ class MapAssembler : public rclcpp::Node {
   uint64_t published_{0}, pose_missing_{0}, pose_rejected_{0}, frame_mismatch_{0};
   uint64_t time_line_resets_{0}, generation_mismatch_{0}, pose_stale_{0}, provenance_missing_{0};
   map_assembly::ProvenanceBuffer provenance_{4000};
+  std::optional<map_assembly::ProvenanceGate<Candidate>> gate_;
   rclcpp::Subscription<vision_lane_interfaces::msg::PoseProvenance>::SharedPtr provenance_sub_;
   clock_generation::Tracker clock_generation_;
   std::string output_topic_;

@@ -1,5 +1,5 @@
 """Lane detection and the lane map (launch group: lanes), plus the lane viewers."""
-from vision_mapping_bringup.camera import FRONT_FRAME, lane_rig
+from vision_mapping_bringup.camera import FRONT_FRAME, FRONT_ID, lane_rig
 from vision_mapping_bringup.config import node_parameters
 
 
@@ -8,14 +8,20 @@ def detection_parameters(ctx):
     args, run = ctx.args, ctx.run
     defaults = node_parameters('lane_detection.yaml', 'global_mapping_cpp')
     explicit = {
-        'use_sim_time': ctx.sim_time, 'image_topic': ctx.topics.image,
+        'use_sim_time': ctx.sim_time, 'image_topic': ctx.compressed_topics[0] if ctx.compressed_topics else ctx.topics.image,
+        # Image-input experiment: lanes keep colour; the compressed queue depth matches the raw
+        # one (2) so only the transport changes, 1 when gated.
+        **({'compressed_image_input': True, 'image_queue_depth': ctx.image_queue_depth or 2}
+           if ctx.compressed_topics else {}),
         'odom_topic': ctx.topics.odom, 'camera_frame': FRONT_FRAME,
-        'map_frame': ctx.world['frame'], 'base_frame': 'base_link', 'camera_id': 'front',
+        'map_frame': ctx.world['frame'], 'base_frame': 'base_link', 'camera_id': FRONT_ID,
         'calibration_yaml': str(run / 'calibration.yaml'),
         'pending_oracle_enabled': ctx.stage_diagnostics,
         'profile_csv_path': str(run / 'profile.csv'),
         **args.given((
             ('warmup_frames', 'startup_warmup_frames', int),
+            ('lane_warmup_sec', 'startup_warmup_sec', float),
+            ('lane_warmup_min_motion_m', 'startup_warmup_min_motion_m', float),
             ('image_quality_gate_mode', 'image_quality_gate_mode', str),
             ('lane_sync_wait_sec', 'sync_max_wait_sec', float),
             ('lane_prediction_wait_sec', 'odom_prediction_wait_sec', float),
@@ -28,7 +34,10 @@ def detection_parameters(ctx):
             ('lane_pending_readiness', 'pending_readiness_enabled', bool),
             ('lane_pending_blocked_head_grace_sec', 'pending_blocked_head_grace_sec', float),
             ('lane_pending_drop_unresolvable', 'pending_drop_unresolvable_head', bool),
-            ('image_quality_min_sharpness', 'image_quality_min_sharpness', float))),
+            ('image_quality_min_sharpness', 'image_quality_min_sharpness', float),
+            ('lane_debug_images', 'publish_debug_vectors', bool),
+            ('lane_bev_x_min_m', 'x_min_m', float), ('lane_bev_x_max_m', 'x_max_m', float),
+            ('lane_bev_y_min_m', 'y_min_m', float), ('lane_bev_y_max_m', 'y_max_m', float))),
         'pending_observations_enabled': args.flag('lane_pending_recovery'),
         'recovered_output_enabled': args.flag('lane_pending_recovery'),
         'recovered_output_topic': '/parking/cpp/marking_segments_recovered',
@@ -53,7 +62,7 @@ def _mapper_parameters(ctx, lane):
         return {}
     return {
         'mapper_enabled': True,
-        'observation_topic': '/parking/cpp/lane_observations',
+        'observation_topic': ctx.args.arg('lane_map_observation_topic').strip() or '/parking/cpp/lane_observations',
         'odom_topic': ctx.topics.odom,
         'mapper_odom_buffer_sec': float(lane['odom_buffer_duration_sec']),
         'mapper_max_odom_age_sec': float(lane['max_odom_age_sec']),
@@ -164,6 +173,11 @@ def viewers(ctx, share):
                 package='rqt_image_view', executable='rqt_image_view',
                 name='lane_map_registration_compare_viewer', output='screen',
                 arguments=['/parking/cpp/global_marking_map_registered_compare']))
+    if ctx.args.flag('launch_viewer') and ctx.args.arg('lane_debug_images').strip().lower() == 'true':
+        for name, topic in (('front_camera_viewer', ctx.topics.image),
+                            ('lane_detection_viewer', '/parking/cpp/vector_bev')):
+            out.append(ctx.make_node(package='rqt_image_view', executable='rqt_image_view',
+                                     name=name, output='screen', arguments=[topic]))
     if ctx.launch_rviz:
         out.append(ctx.make_node(
             package='rviz2', executable='rviz2', name='lane_occupancy_rviz',

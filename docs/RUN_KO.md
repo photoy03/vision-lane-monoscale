@@ -32,7 +32,7 @@ CPU-only: tools/build/build.sh cpu. ROS와 pip opencv/numpy를 혼용하지 않�
 | `bash tools/with_cpu_env.sh <cmd>` | `bash tools/run/with_env.sh cpu <cmd>` |
 | `cpu_environment.bash` / `cuda_environment.bash` | `source tools/build/environment.bash cpu\|cuda` |
 | `scripts/run_recovery_trial.py` | `tools/run/run_recovery_trial.py` |
-| `scripts/test_v4.sh` | `tools/eval/test_lane_registration.sh` |
+| `scripts/test_v4.sh` | `tools/eval/checks/test_lane_registration.sh` |
 | `scripts/rebuild_v4.py`, `scripts/replay_v4.py` | `tools/experiments/rebuild_lane_map.py`, `tools/experiments/replay_lane_registration.py` |
 | `tests/test_launch_v4.py` | `tests/test_launch_pipeline.py` |
 | `tests/test_pose_timeline.cpp` | `src/monoscale/monoscale_pose/test/test_pose_timeline_lookup.cpp` (colcon test) |
@@ -95,9 +95,9 @@ compressed bag에는 기존 압축 영상 replay 도구도 필요하다. replay.
 
 ```bash
 source /opt/ros/humble/setup.bash && source install/setup.bash
-python3 tools/eval/repeat_compare.py --bag /실제/session/bag --repeats 3 \
+python3 tools/eval/metrics/repeat_compare.py --bag /실제/session/bag --repeats 3 \
   --run-prefix before --output-root ~/vision_lane_runs/<새폴더> --report ~/vision_lane_runs/<새폴더>/before.md
-python3 tools/eval/repeat_compare.py --group before=<run1>,<run2>,<run3> \
+python3 tools/eval/metrics/repeat_compare.py --group before=<run1>,<run2>,<run3> \
   --group after=<run1>,<run2>,<run3> --report ~/vision_lane_runs/<새폴더>/before_after.md
 ```
 

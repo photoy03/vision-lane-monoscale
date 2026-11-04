@@ -9,7 +9,23 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
-find_package(OpenCV REQUIRED)
+# MONOSCALE_TRACKER_OPENCV_DIR: build this node against another OpenCV (e.g. one with the
+# CUDA modules, for the GPU optical flow) instead of the system one. Only this node links
+# it, so no process holds two OpenCVs. The libraries are found at run time through the
+# install RPATH below.
+set(MONOSCALE_TRACKER_OPENCV_DIR "$ENV{MONOSCALE_TRACKER_OPENCV_DIR}" CACHE PATH
+  "OpenCVConfig.cmake directory for feature_tracker (empty: the default OpenCV)")
+if(MONOSCALE_TRACKER_OPENCV_DIR)
+  # The workspace build passes -DOpenCV_DIR (the system one) to every package; this
+  # package's own cache entry is pointed elsewhere.
+  set(OpenCV_DIR "${MONOSCALE_TRACKER_OPENCV_DIR}" CACHE PATH "" FORCE)
+  find_package(OpenCV REQUIRED PATHS "${MONOSCALE_TRACKER_OPENCV_DIR}" NO_DEFAULT_PATH)
+  message(STATUS "monoscale_tracker: OpenCV ${OpenCV_VERSION} from ${MONOSCALE_TRACKER_OPENCV_DIR}")
+else()
+  find_package(OpenCV REQUIRED)
+endif()
+# Header-only helper (compressed_input.hpp); OpenCV-only, no message libraries needed.
+find_package(vision_lane_interfaces REQUIRED)
 
 # cv_bridge is deliberately not used. It links against whichever OpenCV the ROS
 # distribution was built with, and this node is meant to be pointed at a second
@@ -33,16 +49,35 @@ if(NOT HAVE_CUDA_OPTFLOW)
 endif()
 
 add_executable(feature_tracker src/feature_tracker.cpp)
-target_include_directories(feature_tracker PRIVATE include ${OpenCV_INCLUDE_DIRS})
+target_include_directories(feature_tracker PRIVATE include ${OpenCV_INCLUDE_DIRS} ${vision_lane_interfaces_INCLUDE_DIRS})
 target_link_libraries(feature_tracker ${OpenCV_LIBS})
 ament_target_dependencies(feature_tracker rclcpp sensor_msgs std_msgs geometry_msgs rosbag2_cpp)
 if(HAVE_CUDA_OPTFLOW)
   message(STATUS "monoscale_tracker: OpenCV has cudaoptflow; the GPU path is built")
   target_compile_definitions(feature_tracker PRIVATE MONOSCALE_TRACKER_HAS_CUDA)
+  # The road-step warps on the GPU (road_step_gpu): a CUDA kernel of this package.
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    # The deployment GPU (RTX 3050 Laptop, sm_86), as monoscale_occupancy_grid_map; the
+    # Gram kernel needs >= 6.0 for double atomicAdd.
+    set(MONOSCALE_TRACKER_CUDA_ARCH "${MONOSCALE_CUDA_ARCHITECTURES}")
+    if(NOT MONOSCALE_TRACKER_CUDA_ARCH)
+      set(MONOSCALE_TRACKER_CUDA_ARCH 86)
+    endif()
+    target_sources(feature_tracker PRIVATE src/road_warp.cu)
+    set_target_properties(feature_tracker PROPERTIES CUDA_ARCHITECTURES "${MONOSCALE_TRACKER_CUDA_ARCH}")
+    target_compile_definitions(feature_tracker PRIVATE MONOSCALE_TRACKER_ROAD_WARP_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    target_link_libraries(feature_tracker CUDA::cudart)
+    message(STATUS "monoscale_tracker: road-step GPU kernel built (arch ${MONOSCALE_TRACKER_CUDA_ARCH})")
+  endif()
 else()
   message(STATUS "monoscale_tracker: no cudaoptflow in OpenCV; CPU only")
 endif()
 target_compile_options(feature_tracker PRIVATE -O3)
+set_target_properties(feature_tracker PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 install(TARGETS feature_tracker DESTINATION lib/${PROJECT_NAME})
 

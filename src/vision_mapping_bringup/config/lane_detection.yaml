@@ -3,7 +3,6 @@
 # launch_arguments: command-line knobs. An empty value means "use the package default".
 global_mapping_cpp:
   ros__parameters:
-    camera_frame: front_camera_optical_frame
     capture_buffer_size: 1
     capture_fourcc: MJPG
     capture_fps: 30.0
@@ -27,5 +26,22 @@ launch_arguments:
   lane_pending_blocked_head_grace_sec: ''
   lane_pending_drop_unresolvable: ''
   warmup_frames: ''
+  # Warm-up ends after 12 s once the car has moved 1 m net (or at warmup_frames,
+  # whichever comes first): observer_eval_lane_warmup_motion_results 2-2, adopted
+  # 2026-10-19 on the wm3 pair. Watch the 0928 lane false ratio (LANE_WARMUP_REPORT_KO).
+  lane_warmup_sec: '12.0'
+  lane_warmup_min_motion_m: '1.0'
   image_quality_gate_mode: monitor
   image_quality_min_sharpness: ''
+  # Watching a replay: the detector's per-frame bird's-eye view with the detected segments
+  # drawn on it (/parking/cpp/vector_bev; green = confirmed, orange = candidate). With
+  # launch_viewer it also opens windows for it and for the front camera. Default off.
+  lane_debug_images: ''
+  # The detector's bird's-eye window in base_link metres (x across, y ahead; package
+  # defaults -4..4 and 0..5). Empty keeps the package values. The window is in base_link,
+  # not the camera: on the vehicle base_link sits 0.08 m behind the camera, on the CARLA
+  # kit it is the rear axle 3.694 m behind it, so tools/run/carla_check.sh moves y by that.
+  lane_bev_x_min_m: ''
+  lane_bev_x_max_m: ''
+  lane_bev_y_min_m: ''
+  lane_bev_y_max_m: ''

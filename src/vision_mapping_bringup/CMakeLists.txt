@@ -6,6 +6,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(DIRECTORY launch config rviz DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/measurement_image_compressor.py
+  scripts/recording_topic_stats.py
   scripts/clock_guard.py
   DESTINATION lib/${PROJECT_NAME})
 ament_package()

@@ -82,6 +82,18 @@ complete_through 이전 것은 1개만 남기고 정리)를 모아 조립한다.
 점유지도 발행의 시각/내용 경합(시각을 먼저 읽고 격자를 나중에 복사하던 것)은 고쳤다. 기존 /perception/occupancy_grid_map의 header 시각도
 이제 내용과 같은 잠금에서 정한 content_max(ns 정수)다. 격자 값은 그대로다.
 
+## 차선층 완결 (프레임별 완료 표시, 2026-10-18, docs/C1_CRITERIA_KO.md)
+- lane_detection(map 모드)은 번호 붙인 영상마다 /parking/cpp/lane_observations에 메시지를 정확히 하나씩, 받은 순서대로 낸다.
+  - 결과는 OBSERVED(그 프레임의 선, 0개 가능) 또는 DISCARDED(사유)다.
+  - 필드: frame_sequence(카메라·epoch별 1부터), frame_outcome, discard_reason
+  - stamp ≤ 0이거나 순서가 역전된 영상은 번호 없이 따로만 센다.
+- lane_map 완결 W = 단조(min(카메라별 연속 확정 frontier, mapper 대기 최오래 − 1))
+  - /pipeline/progress의 lane_detection W는 완결에 쓰지 않는다. 감시 지표 lane_complete_beyond_detection에만 쓴다.
+  - 반영 전에 거부한다: 번호가 뒤로 간 관측(sequence_behind), stamp ≤ W인 관측(stamp_behind_watermark, 옛 형식 메시지 포함)
+  - 번호 건너뜀은 전달 유실로 확정한다(transport_gap). 상태 JSON completion 블록에 집계한다.
+  - camera_ids에 실제로 보내지 않는 카메라를 적으면 W가 0에 머문다(엄격).
+- 통합 지도 소비자: 차선층이 valid이고 complete_through ≥ T인데 segments가 0이면 "그 시각까지 확정된 차선 없음"이다. warmup 동안 이런 묶음이 나간다(약 15 %). content_max = 0은 아직 내용이 없다는 뜻이다.
+
 ## 통합 지도 (map_assembly, 2026-10-17 추가, 기본 꺼짐)
 
 패키지 src/mapping/map_assembly. launch 인수 `launch_fusion:=true`로 켠다(launch_occupancy·launch_lane_fusion 필요). 제어용 pose·TF는 거치지 않는다.
@@ -98,11 +110,21 @@ complete_through 이전 것은 1개만 남기고 정리)를 모아 조립한다.
 - pose 출처 계약(2026-10-18, PoseProvenance)
   - stabilizer는 내보내는 pose마다 같은 stamp로 /localization/kinematic_state/provenance를 낸다. 내용은 생성 방식, stabilizer 내부 이름, 공분산 유효 여부, 그 pose를 만든 raw 측정 두 시각이다.
     - 생성 방식: RAW(raw 측정 그대로) / INTERPOLATED(두 raw 사이 선형 보간: short·moving·stationary·straight) / IMU_FILL(IMU yaw로 모양을 잡은 보간·채움: imu_fill·imu_straight·imu_stationary) / HELD(마지막 값 유지, 지금은 생성 경로가 없어 예약)
-  - 모르는 공분산은 0이 아니라 covariance[0] = −1로 낸다.
-    - MonoScale은 이 설정(fusion_model: velocity)에서 공분산을 내지 않고 모두 0으로 둔다.
-    - lane_map·lane_detection·PoseTimeline은 원래 0과 음수를 똑같이 "모름"으로 읽으므로 동작은 같다.
-  - FusedMap은 T 시각 pose의 pose_kind, pose_covariance_valid, 분산(모르면 −1), pose_raw_lower/upper를 싣는다.
+  - 표준 Odometry의 covariance는 provenance.covariance_valid가 true일 때만 의미가 있다(2026-10-18 정정).
+    - raw 통과: 상류 값을 그대로 둔다(MonoScale은 이 설정, fusion_model: velocity에서 모두 0).
+    - 보간·채움: 입력 공분산이 유효하면 기존대로 전파하고, 아니면 메시지 기본값(0 행렬)으로 둔다. 음수 표식은 쓰지 않는다.
+    - 마지막 raw 공분산을 채움에 복사하지 않는다.
+    - lane_map·lane_detection·PoseTimeline은 0을 원래대로 "모름"으로 읽는다.
+  - FusedMap은 T 시각 pose의 pose_kind, pose_covariance_valid, 분산(모르면 −1: FusedMap 자체 규약), pose_raw_lower/upper를 싣는다.
     - pose_match와 함께 읽는다. exact면 그 표본의 kind, 보간이면 RAW가 아니라 최소 INTERPOLATED이고 두 끝 중 약한 쪽이다. 출처를 못 받았으면 UNKNOWN이다.
+  - 출처가 pose보다 늦게 오는 경우(2026-10-18): 출처가 준비돼 있으면 바로 낸다. 아니면 그 묶음(T, 층 짝, T의 pose)을 그대로 보류하고 기다린다.
+    - 콜백을 막지 않는다. 출처가 도착하는 콜백에서 바로 낸다.
+    - 기한은 provenance_wait_sec(0.5 s, ROS 시계)이고 첫 시도 때 고정된다. 지나면 UNKNOWN으로 내고 빠진 쪽(lower/upper/둘 다)별로 센다.
+      만료 검사는 5 Hz tick과 출처 콜백에서 하므로 실제 대기는 최대 tick 한 주기(0.2 s) 더 길 수 있다.
+    - 보류 중 더 새 T가 출처까지 준비되면 새 T를 내고 보류 건은 내지 않는다(superseded). T는 계속 증가한다.
+    - 재생 일시정지(ROS 시계 정지) 동안 기한도 멈춘다. 시계 역행·세대 변경 리셋 때 보류 건은 버린다(reset_discarded).
+    - 상태 JSON: provenance_wait_started, provenance_attached_late, provenance_expired_lower/upper/both, provenance_superseded, provenance_reset_discarded.
+    - 제어 pose·TF는 기다리지 않는다(stabilizer 출력은 그대로).
   - 이것은 불확실도를 만드는 작업이 아니다. 지금 설정에서 pose_covariance_valid는 늘 false다. 채움 한도·pose 선택·누적 조건은 바꾸지 않았다.
 - map_visualizer: /mapping/fused_map 한 메시지를 이미지 한 장(/mapping/fused_map/image)으로 그린다. 점유 격자(회색), 차선(하늘색), T 시각 차량 화살표(빨강), T·지연·층별 T−content_max·pose 상태 글자.
   두 토픽을 따로 그리는 RViz와 달리 항상 같은 묶음이다. 위치·yaw 오차, 차선 중복은 그대로 보인다(고치지 않는다).

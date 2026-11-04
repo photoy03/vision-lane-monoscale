@@ -11,21 +11,27 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
+#include <fstream>
+#include <iomanip>
 #include <condition_variable>
 #include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include <cv_bridge/cv_bridge.h>
@@ -34,36 +40,26 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
+#include "monoscale_occupancy_grid_map/camera_liveness.hpp"
 #include "monoscale_occupancy_grid_map/pose_interpolation.hpp"
 #include "monoscale_pose/pose_timeline.hpp"
 #include "vision_lane_interfaces/pipeline_progress.hpp"
 #include "vision_lane_interfaces/map_snapshot.hpp"
 #include "vision_lane_interfaces/clock_generation.hpp"
+#include "vision_lane_interfaces/image_quality.hpp"
+#include "vision_lane_interfaces/compressed_input.hpp"
 #include "vision_lane_interfaces/msg/occupancy_snapshot.hpp"
 #include "monoscale_occupancy_grid_map/sweep.hpp"
+#include "monoscale_occupancy_grid_map/job_builder.hpp"
+
+// The input path lives in JobBuilder (E-9, observer_eval_E9j 2); harnesses test for it.
+#define SWEEP_NODE_HAS_JOB_BUILDER 1
 
 namespace
 {
-
-double yaw_of(const geometry_msgs::msg::Quaternion & q)
-{
-  return std::atan2(2.0 * (q.w * q.z + q.x * q.y),
-    1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-}
-
-// One camera's ring of recent frames, each tagged with the pose it was seen
-// from. Bounded by travelled distance rather than count so a stop does not
-// flush it.
-struct Frame
-{
-  double stamp = 0.0;
-  int64_t stamp_ns = 0;
-  cv::Mat gray;      // CV_32F at processing width
-  monoscale_occupancy::Pose5 pose;
-  double travelled = 0.0;
-};
 
 // One camera's grid as it stood right after one of its keyframes. Each camera
 // has its own grid, so a map that is exact at time T can be assembled from the
@@ -98,9 +94,11 @@ struct KeyframeJob
   double stamp = 0.0;
   int64_t stamp_ns = 0;
   uint64_t time_line = 1;   // clock generation it was made in
+  uint64_t sequence = 0;    // order made (c2: the integration order)
   std::vector<cv::Mat> source_grays;
   std::vector<monoscale_occupancy::Pose5> source_poses;
   monoscale_occupancy::Lens lens;
+  std::chrono::steady_clock::time_point queued_at;  // E-7: queue wait
 };
 
 }  // namespace
@@ -140,6 +138,10 @@ public:
       "image_quality_gate_mode", "reject");
     image_quality_min_sharpness_ = declare_parameter<double>(
       "image_quality_min_sharpness", 25.0);
+    // Shared sharpness measure (D-17). The defaults keep the occupancy scale: the
+    // processing image as is (0) with ksize 1. 640/3 is the lane scale (stage 2, A/B).
+    image_quality_sample_width_ = declare_parameter<int>("image_quality_sample_width", 0);
+    image_quality_laplacian_ksize_ = declare_parameter<int>("image_quality_laplacian_ksize", 1);
     const bool use_cuda = declare_parameter<bool>("use_cuda", true);
     const double rolling_radius = declare_parameter<double>("rolling_radius_m", 60.0);
     const double keyframe_travel = declare_parameter<double>("keyframe_travel_m", 0.25);
@@ -150,6 +152,47 @@ public:
     const int min_blob_reference_pixels = declare_parameter<int>(
       "min_blob_reference_pixels", 80);
     max_pending_keyframes_ = declare_parameter<int>("max_pending_keyframes", 2);
+    // E-9: one dedicated worker per camera (each with its own queue of
+    // max_pending_keyframes) instead of one worker for all cameras. Default since (c2)
+    // (observer_eval_E9i 5, E9k): with keyframe carves the workers integrate in job order,
+    // byte-identical to one worker in the job harness.
+    parallel_cameras_ = declare_parameter<bool>("parallel_cameras", true);
+    // E-9 diagnostic (observer_eval_E9c 3): true = publish() writes neutralise_slab back
+    // into the grids, as upstream does; false leaves the stored grids to keyframes only.
+    publish_commit_neutralise_ = declare_parameter<bool>("publish_commit_neutralise", true);
+    // E-9 (c1, observer_eval_E9i): carve (neutralise_slab written back, as a publish does)
+    // once after every keyframe, so the stored grids no longer depend on when publish ran
+    // (the write-back is idempotent between keyframes). Default since observer_eval_E9k:
+    // the measured map change is below resolution (occ_offline 8 variants). false = upstream:
+    // only publish carves.
+    carve_on_keyframe_ = declare_parameter<bool>("carve_on_keyframe", true);
+    // With keyframe carves the publish timer only reads the grids (observer_eval_E9j 5):
+    // the map is then a function of the job order alone.
+    if (carve_on_keyframe_) {publish_commit_neutralise_ = false;}
+    // E-9 (c2, observer_eval_E9i 3 / E9l 4): with parallel workers the sweeps run in
+    // parallel but integrate (+ carve) go in the order the jobs were made, so the map is the
+    // serial node's whatever carve_on_keyframe says. To get upstream behaviour back, turn
+    // carve_on_keyframe and parallel_cameras off together.
+    ordered_ = parallel_cameras_;
+    if (const char * dump = std::getenv("VISION_SWEEP_JOB_DUMP")) {job_dump_dir_ = dump;}
+    // E-9 harness only: a random 0..N ms pause before each keyframe, to vary how the
+    // camera workers interleave. Unset in every real run.
+    if (const char * jitter = std::getenv("VISION_SWEEP_TEST_JITTER_MS")) {test_jitter_ms_ = std::atoi(jitter);}
+    // E-7 measurement: one CSV row per finished keyframe (stage times, queue wait).
+    // Empty (the default) writes nothing.
+    const auto timing_path = declare_parameter<std::string>("keyframe_timing_csv_path", "");
+    if (!timing_path.empty()) {
+      timing_csv_.open(timing_path);
+      timing_csv_ << "stamp_ns,camera,sources,cuda,queued_at_start,jobs_dropped_total,wait_ms,prep_ms,"
+        "match_ms,volume_copy_ms,verdict_ms,subplane_ms,integrate_ms,lock_hold_ms,grid_wait_ms,carve_ms,turn_wait_ms\n";
+    }
+    // Camera liveness (C-2 6): off keeps complete_through bound by every
+    // camera, as before. dead_sec: the widest raw image gap of the 2026-09
+    // recordings (5.66 s, 0928 front) + 1 s, so sparse images never count as a
+    // dead camera.
+    liveness_ = monoscale_occupancy::CameraLiveness(
+      declare_parameter<bool>("camera_liveness_enabled", false),
+      static_cast<int64_t>(declare_parameter<double>("camera_dead_sec", 7.0) * 1e9));
     const double free_cost_max = declare_parameter<double>(
       "free_cost_max", 60.0);
     const double free_cap = declare_parameter<double>("free_cap", 8.0);
@@ -216,6 +259,10 @@ public:
       !std::isfinite(max_odom_interpolation_yaw_deg_) ||
       max_odom_interpolation_yaw_deg_ <= 0.0 || max_odom_interpolation_yaw_deg_ > 180.0 ||
       !std::isfinite(image_quality_min_sharpness_) || image_quality_min_sharpness_ < 0.0 ||
+      image_quality_sample_width_ < 0 ||
+      (image_quality_sample_width_ > 0 && image_quality_sample_width_ < 64) ||
+      (image_quality_laplacian_ksize_ != 1 && image_quality_laplacian_ksize_ != 3 &&
+      image_quality_laplacian_ksize_ != 5 && image_quality_laplacian_ksize_ != 7) ||
       !std::isfinite(occupied_probability) || occupied_probability <= 0.5 ||
       occupied_probability >= 1.0 || !std::isfinite(free_probability) ||
       free_probability <= 0.0 || free_probability >= 0.5 ||
@@ -274,10 +321,30 @@ public:
       throw std::invalid_argument("keyframe_travel_m must be finite and positive");
     }
     settings_ = settings;
+    monoscale_occupancy::JobBuilderSettings input;
+    input.cameras = cameras_;
+    input.processing_width = processing_width_;
+    input.max_odom_gap_sec = max_odom_interpolation_gap_sec_;
+    input.max_odom_translation_m = max_odom_interpolation_translation_m_;
+    input.max_odom_yaw_deg = max_odom_interpolation_yaw_deg_;
+    input.quality_gate_mode = image_quality_gate_mode_;
+    input.min_sharpness = image_quality_min_sharpness_;
+    input.quality_sample_width = image_quality_sample_width_;
+    input.quality_laplacian_ksize = image_quality_laplacian_ksize_;
+    input.source_offsets = settings_.source_offsets;
+    input.source_tolerance = settings_.source_tolerance;
+    input.keyframe_travel = settings_.keyframe_travel;
+    builder_ = monoscale_occupancy::JobBuilder(input);
     for (const auto & name : cameras_) {
       grids_[name].reset(settings_);
+      grid_line_[name] = time_line_;
+      sweeps_[name] = nullptr;   // filled by the camera's worker; the map itself never changes again
+      grid_mutex_[name] = std::make_unique<std::mutex>();
       versions_[name].push_back({0, 0, clone_grid(grids_[name])});
     }
+    queues_.assign(parallel_cameras_ ? cameras_.size() : 1, {});
+    inflight_stamp_ns_.assign(queues_.size(), 0);
+    busy_.assign(queues_.size(), false);
 
 #ifdef MONOSCALE_OCCUPANCY_HAS_CUDA
     const bool cuda_runtime = !settings_.use_cuda || monoscale_occupancy::cuda_available();
@@ -296,15 +363,43 @@ public:
       settings_.use_cuda ? "CUDA" : "CPU");
 #endif
 
-    worker_ = std::thread([this]() {worker_loop();});
+#ifdef MONOSCALE_OCCUPANCY_HAS_CUDA
+    if (settings_.use_cuda) {monoscale_occupancy::cuda_configure(settings_);}  // before any worker exists
+#endif
+    for (size_t q = 0; q < queues_.size(); ++q) {
+      workers_.emplace_back([this, q]() {worker_loop(q);});
+    }
 
+    // Image-input experiment (2026-10-22): each camera's JPEG decoded here (color = what
+    // the raw republisher publishes, gray = straight to luma) instead of the raw topic.
+    // Empty (the default) = raw topics. image_queue_depth: the image subscription depth.
+    const auto compressed_topics = declare_parameter<std::vector<std::string>>(
+      "compressed_image_topics", std::vector<std::string>{});
+    compressed_decode_ = declare_parameter<std::string>("compressed_decode", "color");
+    const int image_depth = static_cast<int>(declare_parameter<int>("image_queue_depth", 10));
+    if ((!compressed_topics.empty() &&
+      (compressed_topics.size() != cameras_.size() || !compressed_input::valid_mode(compressed_decode_))) ||
+      image_depth < 1)
+    {
+      throw std::invalid_argument("compressed_image_topics must match cameras; compressed_decode color|gray; image_queue_depth >= 1");
+    }
     rclcpp::QoS sensor(10);
     sensor.best_effort();
+    rclcpp::QoS image_qos(static_cast<size_t>(image_depth));
+    image_qos.best_effort();
     for (size_t i = 0; i < cameras_.size(); ++i) {
       const std::string name = cameras_[i];
-      image_subs_.push_back(create_subscription<sensor_msgs::msg::Image>(
-        image_topics_[i], sensor,
-        [this, name](sensor_msgs::msg::Image::ConstSharedPtr m) {check_time_line(); on_image(name, *m);}));
+      if (!compressed_topics.empty()) {
+        decode_stats_[name];
+        compressed_subs_.push_back(create_subscription<sensor_msgs::msg::CompressedImage>(
+          compressed_topics[i], image_qos,
+          [this, name](sensor_msgs::msg::CompressedImage::ConstSharedPtr m) {
+            check_time_line(); on_compressed(name, *m);}));
+      } else {
+        image_subs_.push_back(create_subscription<sensor_msgs::msg::Image>(
+          image_topics_[i], image_qos,
+          [this, name](sensor_msgs::msg::Image::ConstSharedPtr m) {check_time_line(); on_image(name, *m);}));
+      }
       info_subs_.push_back(create_subscription<sensor_msgs::msg::CameraInfo>(
         info_topics_[i], sensor,
         [this, name](sensor_msgs::msg::CameraInfo::ConstSharedPtr m) {on_info(name, *m);}));
@@ -342,7 +437,9 @@ public:
       stop_worker_ = true;
     }
     job_ready_.notify_all();
-    if (worker_.joinable()) {worker_.join();}
+    for (auto & worker : workers_) {
+      if (worker.joinable()) {worker.join();}
+    }
   }
 
 private:
@@ -383,72 +480,35 @@ private:
         message.child_frame_id.c_str());
       return;
     }
-    if (stamp_ns <= 0 || (odometry_.size() > 0 && stamp_ns <= odometry_.latest_stamp_ns())) {
-      ++odom_stamp_rejected_;
-      return;
-    }
-    const double raw_x = message.pose.pose.position.x;
-    const double raw_y = message.pose.pose.position.y;
-    const auto & raw_q = message.pose.pose.orientation;
-    const double qnorm = std::sqrt(
-      raw_q.x * raw_q.x + raw_q.y * raw_q.y + raw_q.z * raw_q.z + raw_q.w * raw_q.w);
-    if (!std::isfinite(raw_x) || !std::isfinite(raw_y) || !std::isfinite(qnorm) || qnorm < 1e-9) {
-      ++odom_value_rejected_;
-      return;
-    }
-    geometry_msgs::msg::Quaternion q = raw_q;
-    q.x /= qnorm; q.y /= qnorm; q.z /= qnorm; q.w /= qnorm;
-    monoscale_occupancy::Pose5 pose;
-    // This message already expresses base_link in map.  A mapping consumer
-    // must not hide a second private origin behind the same frame_id: lane
-    // vectors and occupancy cells now use this exact pose contract.
-    pose.x = raw_x;
-    pose.y = raw_y;
-    pose.yaw = yaw_of(q);
-    // Roll and pitch from the same quaternion: the sweep places the road as a
-    // world-horizontal plane, and a pitched vehicle over a flat road needs
-    // them or the ground ten metres out moves by metres.
-    pose.roll = std::atan2(2.0 * (q.w * q.x + q.y * q.z),
-      1.0 - 2.0 * (q.x * q.x + q.y * q.y));
-    const double sinp = 2.0 * (q.w * q.y - q.z * q.x);
-    pose.pitch = std::abs(sinp) >= 1.0 ? std::copysign(M_PI / 2.0, sinp) : std::asin(sinp);
-    monoscale_pose::TimedPose sample{stamp_ns, pose.x, pose.y, pose.yaw};
-    sample.roll = pose.roll;
-    sample.pitch = pose.pitch;
-    if (!odometry_.insert(sample)) {
-      ++odom_value_rejected_;
-      return;
-    }
-    // The pose that just arrived is what the held frames were waiting for.
-    for (const auto & name : cameras_) {drain(name);}
+    const auto & q = message.pose.pose.orientation;
+    std::vector<monoscale_occupancy::BuiltJob> built;
+    builder_.add_odometry(stamp_ns, message.pose.pose.position.x, message.pose.pose.position.y,
+      q.x, q.y, q.z, q.w, built);
+    submit(built);
   }
 
-  // The pose at an image stamp from the shared pose timeline: an exact sample
-  // or a gap/translation/yaw-bounded blend of the bracketing pair. Nullopt
-  // until odometry brackets the stamp -- a frame with no pose is not keyframed.
-  std::optional<monoscale_occupancy::Pose5> pose_at(int64_t stamp_ns)
+  // The JPEG decoded (compressed_input.hpp) and handed to on_image as the raw path would.
+  void on_compressed(const std::string & name, const sensor_msgs::msg::CompressedImage & message)
   {
-    const auto match = odometry_.lookup_bounded(stamp_ns, {max_odom_interpolation_gap_sec_,
-      max_odom_interpolation_translation_m_, max_odom_interpolation_yaw_deg_});
-    using Kind = monoscale_pose::PoseMatchKind;
-    switch (match.kind) {
-      case Kind::exact:
-      case Kind::interpolated: {
-          monoscale_occupancy::Pose5 pose;
-          pose.x = match.pose.x;
-          pose.y = match.pose.y;
-          pose.yaw = match.pose.yaw;
-          pose.roll = match.pose.roll;
-          pose.pitch = match.pose.pitch;
-          return pose;
-        }
-      case Kind::gap_too_large: ++pose_gap_rejected_; break;
-      case Kind::translation_too_large: ++pose_motion_rejected_; break;
-      case Kind::yaw_too_large: ++pose_yaw_rejected_; break;
-      case Kind::invalid: ++pose_invalid_rejected_; break;
-      default: break;  // Outside the history: wait or expire in drain().
+    auto & stats = decode_stats_.at(name);  // inserted for every camera in the constructor
+    const auto start = std::chrono::steady_clock::now();
+    const cv::Mat decoded = compressed_input::decode(message.data, compressed_decode_);
+    if (decoded.empty()) {
+      ++stats.failures;
+      return;
     }
-    return std::nullopt;
+    sensor_msgs::msg::Image image;
+    image.header = message.header;
+    image.height = static_cast<uint32_t>(decoded.rows);
+    image.width = static_cast<uint32_t>(decoded.cols);
+    image.encoding = decoded.channels() == 1 ? "mono8" : "bgr8";
+    image.step = static_cast<uint32_t>(decoded.cols * decoded.elemSize());
+    const auto * begin = decoded.ptr<uint8_t>(0);
+    image.data.assign(begin, begin + static_cast<size_t>(image.step) * image.height);
+    stats.add(compressed_input::ms_since(start));
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000, "compressed_decode %s: %s",
+      name.c_str(), stats.summary().c_str());
+    on_image(name, image);
   }
 
   void on_image(const std::string & name, const sensor_msgs::msg::Image & message)
@@ -480,114 +540,24 @@ private:
       RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000, "cv_bridge: %s", error.what());
       return;
     }
-    const double scale = processing_width_ / static_cast<double>(gray.cols);
-    cv::Mat resized;
-    cv::resize(gray, resized, cv::Size(), scale, scale, cv::INTER_AREA);
-    if (image_quality_gate_mode_ != "off") {
-      cv::Mat laplacian;
-      cv::Laplacian(resized, laplacian, CV_32F);
-      cv::Scalar mean;
-      cv::Scalar deviation;
-      cv::meanStdDev(laplacian, mean, deviation);
-      const double sharpness = deviation[0] * deviation[0];
-      last_sharpness_ = sharpness;
-      if (image_quality_gate_mode_ == "reject" && sharpness < image_quality_min_sharpness_) {
-        ++blur_rejected_;
-        return;
-      }
-    }
-    cv::Mat gray32;
-    resized.convertTo(gray32, CV_32F);
+    const auto gray32 = builder_.prepare(gray);
+    if (!gray32) {return;}
 
     std::lock_guard<std::mutex> guard(mutex_);
     auto & newest = newest_image_ns_[name];
     newest = std::max(newest, rclcpp::Time(message.header.stamp).nanoseconds());
-    // Hold the frame rather than resolving its pose now. The odometry is
-    // solved from these very images, so its stamps can never lead them: at
-    // arrival every frame is newer than the newest pose, `pose_at` returns
-    // nothing, and dropping it here meant the live node made no keyframes at
-    // all -- ever, at any speed. Measured 09-08 on the driving rig: 400 of
-    // 400 frames arrived ahead of the newest pose, by a median of 0.70 s.
-    // Offline never saw this because there the whole trajectory is loaded
-    // before the first frame is placed.
-    auto & queue = pending_[name];
-    queue.push_back({rclcpp::Time(message.header.stamp).nanoseconds(), stamp, gray32});
-    while (queue.size() > kPendingFrames) {
-      queue.pop_front();
-      ++pending_overflow_dropped_;
-    }
-    drain(name);
-  }
-
-  // Admit every held frame the odometry can now place, oldest first so the
-  // ring stays ordered and `travelled` keeps accumulating along the path.
-  void drain(const std::string & name)
-  {
-    auto & queue = pending_[name];
-    while (!queue.empty()) {
-      const auto & held = queue.front();
-      const auto pose = pose_at(held.stamp_ns);
-      if (!pose) {
-        if (odometry_.size() > 0 && held.stamp_ns < odometry_.oldest_stamp_ns()) {
-          // Older than any pose still held: it can never be placed now.
-          queue.pop_front();
-          ++pending_expired_dropped_;
-          continue;
-        }
-        if (odometry_.size() > 0 && held.stamp_ns <= odometry_.latest_stamp_ns()) {
-          // The right bracket already arrived. A gap that is too wide cannot
-          // be repaired by future odometry; do not block all newer images.
-          queue.pop_front();
-          ++pending_gap_dropped_;
-          continue;
-        }
-        return;  // Newer than the newest pose. Wait for the odometry.
-      }
-      admit(name, held.stamp, held.stamp_ns, held.gray, *pose);
-      queue.pop_front();
-    }
-  }
-
-  void admit(
-    const std::string & name, const double stamp, const int64_t stamp_ns, const cv::Mat & gray,
-    const monoscale_occupancy::Pose5 & pose)
-  {
-    auto & ring = rings_[name];
-    double travelled = 0.0;
-    if (!ring.empty()) {
-      const auto & last = ring.back();
-      travelled = last.travelled +
-        std::hypot(pose.x - last.pose.x, pose.y - last.pose.y);
-    }
-    Frame frame;
-    frame.stamp = stamp;
-    frame.stamp_ns = stamp_ns;
-    frame.gray = gray;
-    frame.pose = pose;
-    frame.travelled = travelled;
-    // A frame from where the last one already stands carries no baseline the
-    // ring does not have, so take its place instead of joining it. Without
-    // this a stationary vehicle grows the ring at the frame rate for ever --
-    // the travel-based trim below cannot fire when travel does not advance,
-    // and the node reached 8.3 GB in three minutes of standing still.
-    const bool moved = ring.empty() ||
-      travelled - ring.back().travelled > kRingMinStep;
-    if (moved) {
-      ring.push_back(std::move(frame));
-    } else {
-      ring.back() = std::move(frame);
-    }
-    // Keep enough baseline for the widest source offset, plus a margin.
-    while (ring.size() > 2 &&
-      travelled - ring.front().travelled > 6.0)
+    // Newest first, then the late check: a camera back from the dead is in
+    // place with its first image, and only images already behind the
+    // published complete_through are discarded (always kept with liveness off).
+    if (!liveness_.arrive(name, now().nanoseconds(), rclcpp::Time(message.header.stamp).nanoseconds(),
+      published_through_ns_))
     {
-      ring.pop_front();
+      return;
     }
-    // Backstop: the trim above is distance-based, so anything that keeps the
-    // travel small keeps the ring long. Each frame is a float image.
-    while (ring.size() > kRingFrames) {ring.pop_front();}
-    ++placed_;
-    maybe_keyframe(name);
+    // Held until odometry brackets it (JobBuilder::add_frame).
+    std::vector<monoscale_occupancy::BuiltJob> built;
+    builder_.add_frame(name, rclcpp::Time(message.header.stamp).nanoseconds(), stamp, *gray32, built);
+    submit(built);
   }
 
   Lens scaled_lens(const std::string & name) const
@@ -600,100 +570,249 @@ private:
     lens.cx *= ratio;
     lens.cy *= ratio;
     if (!(lens.fx > 0.0) || !(lens.fy > 0.0) || !std::isfinite(ratio) || ratio <= 0.0) {
-      throw std::runtime_error(name + " has no valid fisheye calibration");
+      // Checked when the camera's first keyframe is chosen (JobBuilder), not at start-up.
+      throw std::runtime_error(name + " has no valid fisheye calibration (at its first keyframe)");
     }
     return lens;
   }
 
-  void maybe_keyframe(const std::string & name)
+  // Keyframes the input path chose, to the workers in the order chosen. Caller holds mutex_.
+  void submit(std::vector<monoscale_occupancy::BuiltJob> & built)
   {
-    auto & ring = rings_[name];
-    const Frame & reference = ring.back();
-    if (reference.travelled < next_at_[name]) {return;}
-
-    // Sources at the configured offsets of camera travel, nearest frame in
-    // the ring within tolerance. Offsets are along the driven path here (the
-    // ring is short), matching the offline --source-offsets without
-    // --baseline-select.
-    KeyframeJob job;
-    job.camera = name;
-    job.reference_gray = reference.gray;
-    job.reference_pose = reference.pose;
-    job.stamp = reference.stamp;
-    job.stamp_ns = reference.stamp_ns;
-    job.time_line = time_line_;
-    job.lens = scaled_lens(name);
-    for (double offset : settings_.source_offsets) {
-      const double want = reference.travelled + offset;
-      const Frame * best = nullptr;
-      double gap = settings_.source_tolerance;
-      for (const auto & frame : ring) {
-        const double error = std::abs(frame.travelled - want);
-        if (error < gap && &frame != &reference) {gap = error; best = &frame;}
-      }
-      if (best) {
-        job.source_grays.push_back(best->gray);
-        job.source_poses.push_back(best->pose);
-      }
+    for (auto & b : built) {
+      KeyframeJob job;
+      job.camera = b.camera;
+      job.reference_gray = b.reference_gray;
+      job.reference_pose = b.reference_pose;
+      job.stamp = b.stamp;
+      job.stamp_ns = b.stamp_ns;
+      job.time_line = time_line_;
+      job.lens = scaled_lens(b.camera);
+      job.source_grays = std::move(b.source_grays);
+      job.source_poses = std::move(b.source_poses);
+      if (!job_dump_dir_.empty()) {dump_job(job);}
+      enqueue(std::move(job));
     }
-    if (job.source_grays.size() < 2) {return;}
-    next_at_[name] = reference.travelled + settings_.keyframe_travel;
-    {
-      std::lock_guard<std::mutex> guard(job_mutex_);
-      while (static_cast<int>(jobs_.size()) >= max_pending_keyframes_) {
-        jobs_.pop_front();
-        ++jobs_dropped_;
-      }
-      jobs_.push_back(std::move(job));
-    }
-    job_ready_.notify_one();
   }
 
-  void worker_loop()
+  // (c2) A job's integration turn is over (integrated, dropped or stale): later ones may
+  // go once every earlier sequence is over. Caller holds job_mutex_.
+  void finish_turn(uint64_t sequence)
+  {
+    if (!ordered_) {return;}
+    turns_done_.insert(sequence);
+    while (turns_done_.count(next_to_integrate_)) {turns_done_.erase(next_to_integrate_++);}
+    turn_ready_.notify_all();
+  }
+
+  // The worker queue a camera's jobs go to: one shared queue in serial mode.
+  size_t queue_of(const std::string & name) const
+  {
+    if (!parallel_cameras_) {return 0;}
+    return static_cast<size_t>(std::find(cameras_.begin(), cameras_.end(), name) - cameras_.begin());
+  }
+
+  void enqueue(KeyframeJob job)
+  {
+    {
+      std::lock_guard<std::mutex> guard(job_mutex_);
+      auto & queue = queues_[queue_of(job.camera)];
+      job.sequence = next_sequence_++;
+      while (static_cast<int>(queue.size()) >= max_pending_keyframes_) {
+        ++jobs_dropped_by_camera_[queue.front().camera];
+        finish_turn(queue.front().sequence);  // never integrated: its turn passes
+        queue.pop_front();
+        ++jobs_dropped_;
+      }
+      job.queued_at = std::chrono::steady_clock::now();
+      queue.push_back(std::move(job));
+    }
+    job_ready_.notify_all();
+  }
+
+  // VISION_SWEEP_JOB_DUMP=<dir>: every keyframe job as files, for the E-9 job harness
+  // (sweep_jobs_golden). Diagnostic only; the images are the 8-bit gray values the
+  // float frames were made from, so the dump is lossless.
+  void dump_job(const KeyframeJob & job)
+  {
+    const std::string base = job_dump_dir_ + "/" + std::to_string(job_dump_count_++);
+    std::ofstream meta(base + ".txt");
+    meta << std::setprecision(17) << job.camera << ' ' << job.stamp_ns << ' ' << job.stamp << ' '
+         << job.source_grays.size() << '\n';
+    auto pose = [&](const monoscale_occupancy::Pose5 & p) {
+        meta << p.x << ' ' << p.y << ' ' << p.yaw << ' ' << p.roll << ' ' << p.pitch << '\n';};
+    pose(job.reference_pose);
+    for (const auto & p : job.source_poses) {pose(p);}
+    auto image = [&](const cv::Mat & gray, const std::string & suffix) {
+        cv::Mat bytes;
+        gray.convertTo(bytes, CV_8U);
+        cv::imwrite(base + suffix + ".png", bytes);};
+    image(job.reference_gray, "_ref");
+    for (size_t i = 0; i < job.source_grays.size(); ++i) {image(job.source_grays[i], "_src" + std::to_string(i));}
+  }
+
+  // Every camera's grid lock without holding one while blocking on another
+  // (observer_eval_E9b 3): block on one, try the rest, start over from the one that
+  // was busy. Returned locks release on destruction.
+  std::vector<std::unique_lock<std::mutex>> lock_all_grids()
+  {
+    std::vector<std::mutex *> all;
+    for (const auto & name : cameras_) {all.push_back(grid_mutex_[name].get());}
+    size_t first = 0;
+    while (true) {
+      std::vector<std::unique_lock<std::mutex>> held;
+      held.emplace_back(*all[first]);
+      size_t busy = all.size();
+      for (size_t k = 1; k < all.size(); ++k) {
+        const size_t i = (first + k) % all.size();
+        std::unique_lock<std::mutex> lock(*all[i], std::try_to_lock);
+        if (!lock.owns_lock()) {busy = i; break;}
+        held.push_back(std::move(lock));
+      }
+      if (busy == all.size()) {return held;}
+      first = busy;
+    }
+  }
+
+  void worker_loop(size_t q)
   {
     while (true) {
       KeyframeJob job;
+      size_t queued_at_start = 0;
+      int64_t dropped_at_start = 0;
       {
         std::unique_lock<std::mutex> guard(job_mutex_);
-        job_ready_.wait(guard, [this]() {return stop_worker_ || !jobs_.empty();});
-        if (stop_worker_ && jobs_.empty()) {return;}
-        job = std::move(jobs_.front());
-        jobs_.pop_front();
-        worker_busy_ = true;
-        inflight_stamp_ns_ = job.stamp_ns;
+        job_ready_.wait(guard, [this, q]() {return stop_worker_ || !queues_[q].empty();});
+        if (stop_worker_ && queues_[q].empty()) {return;}
+        job = std::move(queues_[q].front());
+        queues_[q].pop_front();
+        queued_at_start = queues_[q].size();
+        dropped_at_start = jobs_dropped_;
+        busy_[q] = true;
+        inflight_stamp_ns_[q] = job.stamp_ns;
       }
+      run_job(job, queued_at_start, dropped_at_start);
+      {
+        std::lock_guard<std::mutex> guard(job_mutex_);
+        busy_[q] = false;
+        inflight_stamp_ns_[q] = 0;
+      }
+      job_idle_.notify_all();
+    }
+  }
+
+  // One keyframe job, start to end: sweep into its camera's grid, keep the version, the
+  // (c1) carve, the timing row and the counters. The workers call it; so does occ_offline,
+  // serially, with the workers stopped.
+  void run_job(KeyframeJob & job, size_t queued_at_start, int64_t dropped_at_start)
+  {
+    {
       const auto sweep_start = std::chrono::steady_clock::now();
+      const double wait_ms = std::chrono::duration<double, std::milli>(sweep_start - job.queued_at).count();
+      monoscale_occupancy::KeyframeTiming timing;
       int64_t pruned = 0;
       bool stale = false;  // made before the clock jumped back: not for this map
       monoscale_occupancy::SweepDiagnostics diagnostics;
       {
-        // The worker is the only writer. Publishing takes this short-lived
-        // map lock but image and odom callbacks never do, so a 300 ms GPU/CPU
-        // sweep cannot make their queues spiral into a multi-second batch.
-        std::lock_guard<std::mutex> guard(map_mutex_);
+        std::lock_guard<std::mutex> guard(job_mutex_);
         stale = job.time_line != time_line_;
-        if (!stale) {
-        if (!sweeps_.count(job.camera)) {
-          sweeps_.emplace(
-            job.camera,
-            std::make_unique<monoscale_occupancy::Sweep>(settings_, job.lens));
+      }
+      if (test_jitter_ms_ > 0) {
+        thread_local std::minstd_rand jitter(static_cast<unsigned>(std::hash<std::thread::id>{}(std::this_thread::get_id())));
+        std::this_thread::sleep_for(std::chrono::milliseconds(jitter() % (test_jitter_ms_ + 1)));
+      }
+      double grid_wait_ms = 0.0;
+      double turn_wait_ms = 0.0;
+      monoscale_occupancy::KeyframeResult result;
+      if (!stale) {
+        // The sweep itself reads only the job (images, poses): no lock. The camera's Sweep
+        // is this worker's alone.
+        auto & sweep = sweeps_[job.camera];
+        if (!sweep) {sweep = std::make_unique<monoscale_occupancy::Sweep>(settings_, job.lens);}
+        result = sweep->compute_keyframe(job.reference_gray, job.reference_pose, job.source_grays, job.source_poses);
+      }
+      if (!stale && ordered_) {
+        // (c2): integrate and carve in the order the jobs were made, whatever camera
+        // finished computing first, so the grids are those of the serial node.
+        const auto turn_start = std::chrono::steady_clock::now();
+        std::unique_lock<std::mutex> guard(job_mutex_);
+        turn_ready_.wait(guard, [this, &job]() {
+            return next_to_integrate_ == job.sequence || job.time_line != time_line_;});
+        stale = job.time_line != time_line_;
+        turn_wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - turn_start).count();
+      }
+      if (!stale) {
+        // The camera's grid and sweep are written by this worker only (E-9), under the
+        // camera's own lock: publish() also writes into the live grids (neutralise_slab
+        // is committed back, publish.cpp), so it takes every camera's lock. The other
+        // camera's worker and the image/odometry callbacks never wait on this one.
+        const auto grid_wait_start = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> grid_lock(*grid_mutex_[job.camera]);
+        grid_wait_ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - grid_wait_start).count();
+        auto & grid = grids_[job.camera];
+        if (job.time_line < grid_line_[job.camera]) {
+          // check_time_line emptied this grid for a newer time line while the job
+          // waited: an older job must not write into it (observer_eval_E9b 2).
+          stale = true;
+        } else {
+          if (job.time_line > grid_line_[job.camera]) {
+            grid.reset(settings_);
+            grid_line_[job.camera] = job.time_line;
+          }
+          auto & sweep = sweeps_[job.camera];
+          sweep->integrate_keyframe(result, grid);
+          diagnostics = sweep->diagnostics();
+          timing = sweep->timing();
+          if (!settings_.fixed_extent) {
+            pruned = grid.prune(settings_, job.reference_pose.x, job.reference_pose.y, settings_.rolling_radius);
+          }
+          std::lock_guard<std::mutex> guard(map_mutex_);
+          stale = job.time_line != time_line_;
+          if (!stale) {
+            // Content time moves with the content, under the same lock.
+            contract_.changed(job.stamp_ns);
+            keep_version(job.camera, job.stamp_ns);
+          }
         }
-        sweeps_[job.camera]->keyframe(
-          job.reference_gray, job.reference_pose, job.source_grays,
-          job.source_poses, grids_[job.camera]);
-        diagnostics = sweeps_[job.camera]->diagnostics();
-        if (!settings_.fixed_extent) {
-          pruned = grids_[job.camera].prune(
-            settings_, job.reference_pose.x, job.reference_pose.y,
-            settings_.rolling_radius);
-        }
-        // Content time moves with the content, under the same lock.
-        contract_.changed(job.stamp_ns);
-        keep_version(job.camera, job.stamp_ns);
-        }
+      }
+      double carve_ms = 0.0;
+      if (carve_on_keyframe_ && !stale) {
+        // (c1): this keyframe's version is kept as swept (what a publish right after it
+        // would have seen), then every grid gets the publish write-back. Every camera's
+        // lock, as publish() takes them; the job's own lock was released above. A publish
+        // in between carves the same cells (idempotent), so the order does not matter.
+        const auto carve_start = std::chrono::steady_clock::now();
+        const auto grid_locks = lock_all_grids();
+        std::vector<monoscale_occupancy::CameraGrid *> grids;
+        for (const auto & name : cameras_) {grids.push_back(&grids_[name]);}
+        const int cells = settings_.fixed_extent ?
+          monoscale_occupancy::carve(settings_, grids, monoscale_occupancy::legacy_window(settings_)) :
+          monoscale_occupancy::carve(settings_, grids);
+        carve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - carve_start).count();
+        ++carves_;
+        carved_cells_ += static_cast<uint64_t>(cells);
+      }
+      if (ordered_) {
+        std::lock_guard<std::mutex> guard(job_mutex_);
+        finish_turn(job.sequence);
       }
       const double elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - sweep_start).count();
+      {
+        // C-4 measurement: wall time per keyframe (no longer all under map_mutex_, E-9).
+        std::lock_guard<std::mutex> stats(lock_stats_mutex_);
+        if (lock_hold_ms_.size() < 20000) {lock_hold_ms_.push_back(elapsed);}
+      }
+      if (timing_csv_.is_open() && !stale) {
+        std::lock_guard<std::mutex> csv(timing_csv_mutex_);
+        timing_csv_ << job.stamp_ns << ',' << job.camera << ',' << job.source_grays.size() << ','
+                    << (timing.cuda ? 1 : 0) << ',' << queued_at_start << ',' << dropped_at_start << ','
+                    << wait_ms << ',' << timing.prep_ms << ',' << timing.match_ms << ','
+                    << timing.volume_copy_ms << ',' << timing.verdict_ms << ',' << timing.subplane_ms << ','
+                    << timing.integrate_ms << ',' << elapsed << ',' << grid_wait_ms << ',' << carve_ms << ',' << turn_wait_ms << '\n';
+        timing_csv_.flush();
+      }
       {
         std::lock_guard<std::mutex> guard(mutex_);
         if (stale || job.time_line != time_line_) {
@@ -714,11 +833,6 @@ private:
         have_stamp_ = true;
         }
       }
-      {
-        std::lock_guard<std::mutex> guard(job_mutex_);
-        worker_busy_ = false;
-        inflight_stamp_ns_ = 0;
-      }
     }
   }
 
@@ -727,17 +841,23 @@ private:
   void check_time_line()
   {
     if (!clock_generation_.take_reset()) {return;}
+    // Camera grid locks first (a worker may be sweeping), then the rest (E-9).
+    const auto grid_locks = lock_all_grids();
     std::scoped_lock all(mutex_, job_mutex_, map_mutex_);
     time_line_ = clock_generation_.value();
-    pending_.clear();
-    rings_.clear();
-    next_at_.clear();
-    odometry_ = monoscale_pose::PoseTimeline{1.0e6, 4000};
-    jobs_.clear();
+    builder_.reset();
+    for (auto & queue : queues_) {
+      for (const auto & dropped : queue) {finish_turn(dropped.sequence);}
+      queue.clear();
+    }
+    turn_ready_.notify_all();  // jobs waiting for a turn on the old time line give up
     newest_image_ns_.clear();
+    liveness_ = monoscale_occupancy::CameraLiveness(liveness_.enabled(), liveness_dead_ns());
+    published_through_ns_ = 0;
     versions_.clear();
     for (const auto & name : cameras_) {
       grids_[name].reset(settings_);
+      grid_line_[name] = time_line_;
       versions_[name].push_back({0, 0, clone_grid(grids_[name])});
     }
     watermark_ = pipeline_progress::MonotonicWatermark{};
@@ -776,6 +896,7 @@ private:
     uint32_t queue = 0;
     uint64_t processed = 0;
     std::vector<std::pair<std::string, uint64_t>> discards;
+    std::vector<std::string> excluded;  // cameras left out by liveness
     uint64_t dropped() const
     {
       uint64_t total = 0;
@@ -797,8 +918,8 @@ private:
     {
       std::lock_guard<std::mutex> guard(mutex_);
       for (const auto & name : cameras_) {
-        const auto held = pending_.find(name);
-        if (held != pending_.end() && !held->second.empty()) {
+        const auto held = builder_.pending().find(name);
+        if (held != builder_.pending().end() && !held->second.empty()) {
           oldest = pipeline_progress::oldest_of(oldest, held->second.front().stamp_ns);
           out.queue += static_cast<uint32_t>(held->second.size());
         }
@@ -807,21 +928,42 @@ private:
         // Every configured camera must have delivered before anything is final.
         newest = (name == cameras_.front()) ? camera_newest : std::min(newest, camera_newest);
       }
+      if (liveness_.enabled()) {
+        // A camera that stopped delivering no longer holds everything back.
+        const auto before = liveness_.deaths();
+        newest = liveness_.bound(cameras_, now().nanoseconds(), published_through_ns_, &out.excluded);
+        for (const auto & [name, count] : liveness_.deaths()) {
+          const auto old = before.find(name);
+          if (old == before.end() || old->second != count) {
+            RCLCPP_WARN(get_logger(), "camera %s declared dead (no image for %.1f s): left out of complete_through",
+              name.c_str(), camera_dead_sec());
+          }
+        }
+      }
       out.processed = static_cast<uint64_t>(keyframes_);
       out.discards = {
-        {"pose_gap", static_cast<uint64_t>(pending_gap_dropped_)},
-        {"pose_expired", static_cast<uint64_t>(pending_expired_dropped_)},
-        {"overflow", static_cast<uint64_t>(pending_overflow_dropped_)},
-        {"blur", static_cast<uint64_t>(blur_rejected_)}};
+        {"pose_gap", static_cast<uint64_t>(builder_.counters().pending_gap_dropped)},
+        {"pose_expired", static_cast<uint64_t>(builder_.counters().pending_expired_dropped)},
+        {"overflow", static_cast<uint64_t>(builder_.counters().pending_overflow_dropped)},
+        {"blur", static_cast<uint64_t>(builder_.counters().blur_rejected)}};
+      if (liveness_.enabled()) {
+        out.discards.push_back({"late_after_revival", liveness_.late_after_revival()});
+      }
     }
     {
       std::lock_guard<std::mutex> guard(job_mutex_);
-      for (const auto & job : jobs_) {oldest = pipeline_progress::oldest_of(oldest, job.stamp_ns);}
-      oldest = pipeline_progress::oldest_of(oldest, inflight_stamp_ns_);
-      out.queue += static_cast<uint32_t>(jobs_.size()) + (worker_busy_ ? 1U : 0U);
+      for (size_t q = 0; q < queues_.size(); ++q) {
+        for (const auto & job : queues_[q]) {oldest = pipeline_progress::oldest_of(oldest, job.stamp_ns);}
+        oldest = pipeline_progress::oldest_of(oldest, inflight_stamp_ns_[q]);
+        out.queue += static_cast<uint32_t>(queues_[q].size()) + (busy_[q] ? 1U : 0U);
+      }
       out.discards.push_back({"job_dropped", static_cast<uint64_t>(jobs_dropped_)});
     }
     out.watermark = watermark_.update(pipeline_progress::watermark_from(oldest, newest));
+    {
+      std::lock_guard<std::mutex> guard(mutex_);
+      published_through_ns_ = out.watermark;
+    }
     return out;
   }
 
@@ -856,12 +998,25 @@ private:
     uint64_t exact_version = 0;
     bool exact_available = true;
     {
+      const auto wait_start = std::chrono::steady_clock::now();
+      // Every camera's grid lock (lock_all_grids), then the map lock: a worker takes
+      // its own grid lock then map_mutex_, so no cycle (E-9).
+      const auto grid_locks = lock_all_grids();
       std::lock_guard<std::mutex> guard(map_mutex_);
+      {
+        // C-4 measurement: how long publishing waited for the worker's lock.
+        const double waited = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - wait_start).count();
+        std::lock_guard<std::mutex> stats(lock_stats_mutex_);
+        if (publish_wait_ms_.size() < 20000) {publish_wait_ms_.push_back(waited);}
+      }
       published = settings_.fixed_extent ?
         monoscale_occupancy::publish(
-          settings_, grids, monoscale_occupancy::legacy_window(settings_)) :
-        monoscale_occupancy::publish(settings_, grids);
+          settings_, grids, monoscale_occupancy::legacy_window(settings_), publish_commit_neutralise_) :
+        monoscale_occupancy::publish(settings_, grids, monoscale_occupancy::GridWindow(), publish_commit_neutralise_);
       if (published.window.empty()) {return;}
+      ++publishes_;
+      neutralised_cells_ += static_cast<uint64_t>(published.neutralised_cells);
       // The grid just computed holds every keyframe so far: its own time.
       latest_content_max = contract_.content_max();
       // The snapshot is the map exact at complete_through: every camera's grid
@@ -891,6 +1046,7 @@ private:
       snapshot.meta = map_snapshot::fill_meta(
         "occupancy", snapshot_session_, time_line_, contract_.epoch(), exact_version, sequence,
         exact_content_max, done.watermark, done.discards, contract_.late_changes());
+      snapshot.meta.excluded_cameras = done.excluded;
       trim_versions();
     }
     const cv::Mat & values = published.values;
@@ -924,8 +1080,9 @@ private:
       std::vector<monoscale_occupancy::CameraGrid *> held;
       for (const auto & grid : exact) {held.push_back(grid.get());}
       const auto older = settings_.fixed_extent ?
-        monoscale_occupancy::publish(settings_, held, monoscale_occupancy::legacy_window(settings_)) :
-        monoscale_occupancy::publish(settings_, held);
+        monoscale_occupancy::publish(settings_, held, monoscale_occupancy::legacy_window(settings_),
+          publish_commit_neutralise_) :
+        monoscale_occupancy::publish(settings_, held, monoscale_occupancy::GridWindow(), publish_commit_neutralise_);
       snapshot.grid.header = message.header;
       snapshot.grid.info = message.info;
       snapshot.grid.info.width = static_cast<uint32_t>(older.window.width);
@@ -962,16 +1119,58 @@ private:
     // invisible: no frame was ever placed, so nothing was ever logged.
     size_t held = 0;
     size_t ringed = 0;
-    for (const auto & entry : pending_) {held += entry.second.size();}
-    for (const auto & entry : rings_) {ringed += entry.second.size();}
+    for (const auto & entry : builder_.pending()) {held += entry.second.size();}
+    for (const auto & entry : builder_.rings()) {ringed += entry.second.size();}
+    const auto & input = builder_.counters();
     size_t queued = 0;
     bool busy = false;
     int64_t dropped = 0;
+    std::string dropped_by_camera;
+    size_t worker_count = 0;
     {
       std::lock_guard<std::mutex> jobs(job_mutex_);
-      queued = jobs_.size();
-      busy = worker_busy_;
+      for (size_t q = 0; q < queues_.size(); ++q) {
+        queued += queues_[q].size();
+        busy = busy || busy_[q];
+      }
       dropped = jobs_dropped_;
+      for (const auto & [name, n] : jobs_dropped_by_camera_) {
+        dropped_by_camera += " " + name + "=" + std::to_string(n);
+      }
+      worker_count = queues_.size();
+    }
+    if (liveness_.enabled()) {
+      std::string deaths, revivals;
+      uint64_t late = 0;
+      // report() already holds mutex_.
+      for (const auto & [name, n] : liveness_.deaths()) {deaths += " " + name + "=" + std::to_string(n);}
+      for (const auto & [name, n] : liveness_.revivals()) {revivals += " " + name + "=" + std::to_string(n);}
+      late = liveness_.late_after_revival();
+      RCLCPP_INFO(get_logger(), "camera_liveness: dead_sec=%.1f deaths[%s] revivals[%s] late_after_revival=%lu",
+        camera_dead_sec(), deaths.c_str(), revivals.c_str(), static_cast<unsigned long>(late));
+    }
+    {
+      std::vector<double> hold, wait;
+      const uint64_t publishes = publishes_.load(), neutralised = neutralised_cells_.load();
+      const uint64_t carves = carves_.load(), carved = carved_cells_.load();
+      {
+        std::lock_guard<std::mutex> stats(lock_stats_mutex_);
+        hold = lock_hold_ms_;
+        wait = publish_wait_ms_;
+      }
+      const auto q = [](std::vector<double> & v, double p) {
+        if (v.empty()) {return -1.0;}
+        std::sort(v.begin(), v.end());
+        return v[static_cast<size_t>(p * static_cast<double>(v.size() - 1))];
+      };
+      RCLCPP_INFO(
+        get_logger(),
+        "sweep_lock: hold_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] publish_wait_ms[n=%zu p50=%.1f p90=%.1f max=%.1f] jobs_dropped=%ld by_camera[%s] workers=%zu publishes=%lu neutralised_cells=%lu commit=%d "
+        "keyframe_carves=%lu carved_cells=%lu",
+        hold.size(), q(hold, 0.5), q(hold, 0.9), q(hold, 1.0),
+        wait.size(), q(wait, 0.5), q(wait, 0.9), q(wait, 1.0), dropped, dropped_by_camera.c_str(), worker_count,
+        static_cast<unsigned long>(publishes), static_cast<unsigned long>(neutralised), publish_commit_neutralise_ ? 1 : 0,
+        static_cast<unsigned long>(carves), static_cast<unsigned long>(carved));
     }
     RCLCPP_INFO(
       get_logger(),
@@ -984,9 +1183,9 @@ private:
       "reject[odom_frame=%ld odom_stamp=%ld odom_value=%ld pose_gap=%ld pose_move=%ld pose_yaw=%ld pose_invalid=%ld image=%ld blur=%ld] "
       "pending_drop[gap=%ld expired=%ld overflow=%ld] stamp_regressions=%ld tiles_pruned=%ld "
       "exact_snapshot[older_versions=%lu fallback=%lu] time_line[generation=%lu resets=%ld drops=%ld]",
-      keyframes_, placed_, held, ringed, odometry_.size(), queued,
+      keyframes_, input.placed, held, ringed, builder_.odometry().size(), queued,
       max_pending_keyframes_, busy ? 1 : 0, dropped, published_,occupied_cells_,free_cells_,
-      unknown_cells_,other_cells_,last_sweep_ms_,last_sharpness_,
+      unknown_cells_,other_cells_,last_sweep_ms_,input.last_sharpness,
       free_before_slab_cells_, free_after_slab_cells_, free_after_erode_cells_,
       last_judgeable_pixels_,last_believed_pixels_,last_clear_pixels_,
       last_free_diagnostics_.free_textured_pixels,last_free_diagnostics_.free_finite_pixels,
@@ -996,10 +1195,10 @@ private:
       last_free_diagnostics_.free_cost_500_pixels,last_free_diagnostics_.free_cost_1000_pixels,
       last_free_diagnostics_.free_cost_2000_pixels,last_free_diagnostics_.free_cost_5000_pixels,
       last_free_diagnostics_.free_cost_10000_pixels,odom_frame_rejected_,
-      odom_stamp_rejected_,odom_value_rejected_,pose_gap_rejected_,pose_motion_rejected_,
-      pose_yaw_rejected_,pose_invalid_rejected_,image_frame_rejected_,
-      blur_rejected_,pending_gap_dropped_,pending_expired_dropped_,
-      pending_overflow_dropped_,stamp_regressions_,pruned_tiles_,
+      input.odom_stamp_rejected,input.odom_value_rejected,input.pose_gap_rejected,input.pose_motion_rejected,
+      input.pose_yaw_rejected,input.pose_invalid_rejected,image_frame_rejected_,
+      input.blur_rejected,input.pending_gap_dropped,input.pending_expired_dropped,
+      input.pending_overflow_dropped,stamp_regressions_,pruned_tiles_,
       static_cast<unsigned long>(older_snapshots_), static_cast<unsigned long>(snapshot_fallbacks_),
       static_cast<unsigned long>(time_line_), time_line_resets_, time_line_drops_);
   }
@@ -1018,6 +1217,8 @@ private:
   double max_odom_interpolation_translation_m_ = 0.10;
   double max_odom_interpolation_yaw_deg_ = 3.0;
   double image_quality_min_sharpness_ = 25.0;
+  int image_quality_sample_width_ = 0;
+  int image_quality_laplacian_ksize_ = 1;
   int max_pending_keyframes_ = 2;
 
   monoscale_occupancy::SweepSettings settings_;
@@ -1026,28 +1227,14 @@ private:
   std::map<std::string, std::string> camera_frames_;
   std::map<std::string, std::unique_ptr<monoscale_occupancy::Sweep>> sweeps_;
   std::map<std::string, monoscale_occupancy::CameraGrid> grids_;
-  std::map<std::string, std::deque<Frame>> rings_;
-  // Frames waiting for odometry to reach their stamp. At 22 Hz this bounds
-  // the wait at about twenty seconds, well past the 0.7 s actually seen.
-  static constexpr size_t kPendingFrames = 512;
-  // A frame closer than this to the ring's newest replaces it rather than
-  // extending the ring: half the smallest source offset's tolerance.
-  static constexpr double kRingMinStep = 0.02;
-  // Hard cap on ring length. 6 m of baseline at the 5 cm keyframe spacing
-  // needs 120; this is double that, and bounds the ring near 1 GB per camera.
-  static constexpr size_t kRingFrames = 256;
-  struct HeldFrame
-  {
-    int64_t stamp_ns;  // matched against the pose timeline
-    double stamp;      // carried into keyframes and the grid header
-    cv::Mat gray;
-  };
-  std::map<std::string, std::deque<HeldFrame>> pending_;
-  std::map<std::string, double> next_at_;
-  // Odometry history; strictly increasing stamps (checked in on_odometry).
-  monoscale_pose::PoseTimeline odometry_{1.0e6, 4000};
+  // The input path: odometry, held frames, rings and the keyframe choice. Guarded by
+  // mutex_ (prepare() runs before it, as the image preprocessing always did).
+  monoscale_occupancy::JobBuilder builder_;
 
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> image_subs_;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr> compressed_subs_;
+  std::string compressed_decode_ = "color";
+  std::map<std::string, compressed_input::DecodeStats> decode_stats_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr> info_subs_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_pub_;
@@ -1056,11 +1243,44 @@ private:
 
   std::mutex mutex_;
   std::mutex map_mutex_;
+  std::mutex lock_stats_mutex_;
+  std::vector<double> lock_hold_ms_, publish_wait_ms_;  // guarded by lock_stats_mutex_
   std::mutex job_mutex_;
   std::condition_variable job_ready_;
-  std::deque<KeyframeJob> jobs_;
-  int64_t inflight_stamp_ns_ = 0;
+  std::condition_variable job_idle_;  // a worker finished a job (the E-9 harness waits on it)
+  // One queue per worker: a single one in serial mode, one per camera with
+  // parallel_cameras. Guarded by job_mutex_, as are inflight_stamp_ns_ and busy_.
+  std::vector<std::deque<KeyframeJob>> queues_;
+  std::vector<int64_t> inflight_stamp_ns_;
+  std::vector<bool> busy_;
+  bool parallel_cameras_ = true;
+  std::map<std::string, int64_t> jobs_dropped_by_camera_;  // guarded by job_mutex_
+  std::map<std::string, uint64_t> grid_line_;  // time line each camera's grid was built on; its worker only
+  // Per-camera grid locks (E-9): a worker holds its camera's while it sweeps; publish()
+  // holds all of them. Taken before map_mutex_. The map of locks never changes.
+  std::map<std::string, std::unique_ptr<std::mutex>> grid_mutex_;
+  std::string job_dump_dir_;
+  int test_jitter_ms_ = 0;
+  bool publish_commit_neutralise_ = true;
+  // E-9 diagnostic counters: publishes that drew a map and the free cells neutralise_slab
+  // reset in them (written back when publish_commit_neutralise_). Atomic: report() reads
+  // them under mutex_, which must not take map_mutex_.
+  std::atomic<uint64_t> publishes_{0}, neutralised_cells_{0};
+  bool carve_on_keyframe_ = true;
+  bool ordered_ = false;  // (c2)
+  // (c2) integration turns, guarded by job_mutex_: the next sequence to integrate and the
+  // finished ones above it.
+  uint64_t next_sequence_ = 0;
+  uint64_t next_to_integrate_ = 0;
+  std::set<uint64_t> turns_done_;
+  std::condition_variable turn_ready_;
+  std::atomic<uint64_t> carves_{0}, carved_cells_{0};  // (c1) keyframe carves and the cells they reset
+  uint64_t job_dump_count_ = 0;
   std::map<std::string, int64_t> newest_image_ns_;
+  monoscale_occupancy::CameraLiveness liveness_{false, 0};  // guarded by mutex_
+  int64_t published_through_ns_{0};  // last complete_through claimed; guarded by mutex_
+  int64_t liveness_dead_ns() const {return static_cast<int64_t>(get_parameter("camera_dead_sec").as_double() * 1e9);}
+  double camera_dead_sec() const {return get_parameter("camera_dead_sec").as_double();}
   pipeline_progress::MonotonicWatermark watermark_;
   map_snapshot::Contract contract_;  // guarded by map_mutex_
   clock_generation::Tracker clock_generation_;
@@ -1073,12 +1293,12 @@ private:
   std::string snapshot_session_;
   rclcpp::Publisher<vision_lane_interfaces::msg::PipelineProgress>::SharedPtr progress_pub_;
   rclcpp::TimerBase::SharedPtr progress_timer_;
-  std::thread worker_;
+  std::vector<std::thread> workers_;
+  std::ofstream timing_csv_;  // E-7
+  std::mutex timing_csv_mutex_;
   bool stop_worker_ = false;
-  bool worker_busy_ = false;
   int64_t jobs_dropped_ = 0;
   int64_t keyframes_ = 0;
-  int64_t placed_ = 0;
   int64_t pruned_tiles_ = 0;
   int occupied_cells_ = 0;
   int free_cells_ = 0;
@@ -1092,23 +1312,12 @@ private:
   int last_believed_pixels_ = 0;
   int last_clear_pixels_ = 0;
   double last_sweep_ms_ = 0.0;
-  double last_sharpness_ = 0.0;
   double last_stamp_ = 0.0;
   bool have_stamp_ = false;
   int published_ = 0;
   int64_t odom_frame_rejected_ = 0;
-  int64_t odom_stamp_rejected_ = 0;
-  int64_t odom_value_rejected_ = 0;
-  int64_t pose_gap_rejected_ = 0;
-  int64_t pose_motion_rejected_ = 0;
-  int64_t pose_yaw_rejected_ = 0;
-  int64_t pose_invalid_rejected_ = 0;
-  int64_t pending_gap_dropped_ = 0;
-  int64_t pending_expired_dropped_ = 0;
-  int64_t pending_overflow_dropped_ = 0;
   int64_t stamp_regressions_ = 0;
   int64_t image_frame_rejected_ = 0;
-  int64_t blur_rejected_ = 0;
 };
 
 // Diagnosis of the intermittent exit -11 at shutdown (2 of 7 replays, never
@@ -1131,12 +1340,25 @@ int main(int argc, char ** argv)
   rclcpp::init(argc, argv);
   auto node = std::make_shared<SweepNode>();
   rclcpp::spin(node);
-  // The exit -11 at shutdown (caught twice by the handler above) is in Fast DDS
-  // 2.6's discovery thread, EDP::unpairWriterProxy, while this node deletes its
-  // readers as the other nodes leave at the same moment. The node writes no
-  // files, so stop the worker and leave without tearing the DDS entities down.
   node->stop();
+  // Shutdown (C-5 11-1, observer_eval_C5_sweep_exit): the normal destruction
+  // path is the default again. The exit -11 that std::_Exit used to dodge (Fast
+  // DDS 2.6 EDP::unpairWriterProxy, 2 of 7 replays on 2026-10-17) did not occur
+  // in 24 replays with this code (16 without the recorder at 2x, 8 with it at 1x)
+  // nor in the supervised clock-jump restarts; its cause was never confirmed.
+  // VISION_SWEEP_EXIT_MODE=legacy_exit goes back to leaving without tearing the
+  // DDS entities down; clean_late waits 2 s first (diagnosis only).
+  const char * mode = std::getenv("VISION_SWEEP_EXIT_MODE");
+  const std::string exit_mode = mode != nullptr ? std::string(mode) : std::string("clean");
+  if (exit_mode == "legacy_exit") {
+    rclcpp::shutdown();
+    std::fflush(nullptr);
+    std::_Exit(0);
+  }
+  if (exit_mode == "clean_late") {
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+  node.reset();
   rclcpp::shutdown();
-  std::fflush(nullptr);
-  std::_Exit(0);
+  return 0;
 }

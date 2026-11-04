@@ -304,10 +304,25 @@ void Sweep::integrate(
   (void)best;
 }
 
-Published publish(
-  const SweepSettings & s, std::vector<CameraGrid *> grids, const GridWindow & request)
+namespace
 {
-  Published out;
+
+// The first half of the publish chain: the extent, dense views of every camera, and
+// neutralise_slab applied to the views. Shared by publish() and carve(), so a carve is
+// exactly the write-back a publish makes.
+struct Neutralised
+{
+  GridWindow window;
+  std::vector<GridView> views;
+  cv::Mat failing;  // empty when slab_carve is off
+  int cells = 0;
+  bool drawn = false;  // false: nothing mapped yet, nothing to draw
+};
+
+Neutralised neutralise(
+  const SweepSettings & s, const std::vector<CameraGrid *> & grids, const GridWindow & request)
+{
+  Neutralised out;
   // The extent to draw: what was asked for, or -- for the live node, which
   // asks for nothing -- the union of what the cameras have actually mapped.
   GridWindow window = request;
@@ -344,12 +359,13 @@ Published publish(
     window.origin_y = s.origin_y + window.cell_y * s.resolution;
   }
   out.window = window;
+  out.drawn = true;
 
   const int W = window.width;
   const int H = window.height;
   // Dense working copies. Nothing below this line knows the storage is
   // sparse, which is the point: the chain is the one that was measured.
-  std::vector<GridView> views;
+  auto & views = out.views;
   views.reserve(grids.size());
   for (auto * g : grids) {views.push_back(g->view(s, window, false));}
   std::vector<GridView *> views_ptr;
@@ -381,7 +397,7 @@ Published publish(
   // neutralise_slab: reset the failing cells' free belief to neutral, gated to
   // a local radius around occupancy so open road (which rarely collects upper
   // slab sweeps) is left alone.
-  cv::Mat failing;
+  cv::Mat & failing = out.failing;
   if (s.slab_carve) {
     failing = cv::Mat::zeros(H, W, CV_8U);
     for (int r = 0; r < H; ++r) {
@@ -409,11 +425,33 @@ Published publish(
         const uint8_t * f = failing.ptr<uint8_t>(r);
         float * lo = g->log_odds.ptr<float>(r);
         for (int c = 0; c < W; ++c) {
-          if (f[c] && lo[c] < 0.0f) {lo[c] = 0.0f;}
+          if (f[c] && lo[c] < 0.0f) {lo[c] = 0.0f; ++out.cells;}
         }
       }
     }
   }
+  return out;
+}
+
+}  // namespace
+
+Published publish(
+  const SweepSettings & s, std::vector<CameraGrid *> grids, const GridWindow & request,
+  bool commit_neutralise)
+{
+  Published out;
+  Neutralised n = neutralise(s, grids, request);
+  if (!n.drawn) {return out;}
+  const GridWindow window = n.window;
+  out.window = window;
+  out.neutralised_cells = n.cells;
+  const int W = window.width;
+  const int H = window.height;
+  auto & views = n.views;
+  const cv::Mat & failing = n.failing;
+  std::vector<GridView *> views_ptr;
+  views_ptr.reserve(views.size());
+  for (auto & v : views) {views_ptr.push_back(&v);}
 
   // message_values per camera, then union: occupied where any camera is
   // occupied, free where any is free.
@@ -478,9 +516,19 @@ Published publish(
   }
   out.free_after_erode = cv::countNonZero(values == 0);
   // neutralise_slab wrote into the views' log odds; put that back.
-  for (size_t i = 0; i < grids.size(); ++i) {grids[i]->commit(s, views[i]);}
+  if (commit_neutralise) {
+    for (size_t i = 0; i < grids.size(); ++i) {grids[i]->commit(s, views[i]);}
+  }
   out.values = values;
   return out;
+}
+
+int carve(const SweepSettings & s, std::vector<CameraGrid *> grids, const GridWindow & request)
+{
+  Neutralised n = neutralise(s, grids, request);
+  if (!n.drawn) {return 0;}
+  for (size_t i = 0; i < grids.size(); ++i) {grids[i]->commit(s, n.views[i]);}
+  return n.cells;
 }
 
 }  // namespace monoscale_occupancy

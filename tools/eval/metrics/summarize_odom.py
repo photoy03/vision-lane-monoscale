@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarize odom_diagnostics.jsonl; no ROS, NumPy or pandas required.
 
-Example: python3 tools/eval/summarize_odom.py /tmp/vision_lane_stage1_.../
+Example: python3 tools/eval/metrics/summarize_odom.py /tmp/vision_lane_stage1_.../
 This checks delivery/cadence, NOT metric pose accuracy without ground truth.
 """
 import argparse

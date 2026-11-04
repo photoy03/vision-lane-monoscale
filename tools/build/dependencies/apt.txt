@@ -13,6 +13,7 @@ python3-matplotlib
 python3-psutil
 libopencv-dev
 libeigen3-dev
+libsqlite3-dev
 libgomp1
 gstreamer1.0-tools
 gstreamer1.0-plugins-base

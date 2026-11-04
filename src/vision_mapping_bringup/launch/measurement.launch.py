@@ -2,7 +2,10 @@
 
 Run this launch beside ``single_camera_lane.launch.py``. The default image
 mode records a JPEG transport so a multi-minute test does not fill the SSD.
-Use ``image_mode:=raw`` only for short, pixel-exact captures.
+Use ``image_mode:=raw`` only for short, pixel-exact captures. ``image_mode:=camera_jpeg``
+records the camera's own MJPEG frames as the driver passes them on
+(single_camera_lane.launch.py camera_output:=jpeg): no decode, no re-encode, no
+Python compressor, every frame the camera delivered.
 """
 from datetime import datetime
 from pathlib import Path
@@ -71,8 +74,8 @@ def _launch(context):
         )
 
     image_mode = arg("image_mode").strip().lower()
-    if image_mode not in ("compressed", "raw", "none"):
-        raise ValueError("image_mode must be compressed, raw, or none")
+    if image_mode not in ("compressed", "raw", "none", "camera_jpeg"):
+        raise ValueError("image_mode must be compressed, raw, none, or camera_jpeg")
 
     compression_mode = arg("compression_mode").strip().lower()
     if compression_mode not in ("none", "file", "message"):
@@ -104,7 +107,10 @@ def _launch(context):
         topics.extend(DEBUG_IMAGE_TOPICS)
 
     republishers = []
-    if image_mode == "raw":
+    if image_mode == "camera_jpeg":
+        # The driver already publishes the camera's JPEG on the measurement topic.
+        topics.append("/measurement/front/image_raw/compressed")
+    elif image_mode == "raw":
         topics.append(front_raw)
     elif image_mode == "compressed":
         front_compressed = "/measurement/front/image_raw/compressed"
@@ -128,7 +134,9 @@ def _launch(context):
             "/vision/tracks/rear",
         ])
         rear_raw = "/sensing/camera/rear/fisheye/image_raw"
-        if image_mode == "raw":
+        if image_mode == "camera_jpeg":
+            topics.append("/measurement/rear/image_raw/compressed")
+        elif image_mode == "raw":
             topics.append(rear_raw)
         elif image_mode == "compressed":
             rear_compressed = "/measurement/rear/image_raw/compressed"
@@ -151,6 +159,24 @@ def _launch(context):
            for topic in extra_topics):
         raise ValueError("extra_topics must be comma-separated absolute topic names")
     topics.extend(extra_topics)
+
+    # Arrival statistics of the sensor inputs (D-18), recorded into the same bag.
+    stats_nodes = []
+    if flag("record_topic_stats"):
+        # camera_jpeg: there are no raw image topics; the measurement topics are watched below.
+        watched = ([] if image_mode == "camera_jpeg" else [front_raw]) + [front_info, "/sensing/imu/imu_data"]
+        if flag("record_rear_camera"):
+            watched += ([] if image_mode == "camera_jpeg" else ["/sensing/camera/rear/fisheye/image_raw"]) + \
+                ["/sensing/camera/rear/fisheye/camera_info"]
+        watched += [topic for topic in topics if topic.startswith("/measurement/")]
+        topics.append("/recording/topic_stats")
+        stats_nodes.append(Node(
+            package="vision_mapping_bringup",
+            executable="recording_topic_stats.py",
+            name="recording_topic_stats",
+            output="screen",
+            parameters=[{"topics": list(dict.fromkeys(watched)), "period_sec": 10.0}],
+        ))
     topics = list(dict.fromkeys(topics))
 
     shared = Path(get_package_share_directory("vision_mapping_bringup"))
@@ -191,6 +217,7 @@ def _launch(context):
         "max_bag_duration_sec": max_duration_sec,
         "cache_size_mb": cache_mb,
         "compression_mode": compression_mode,
+        "record_topic_stats": flag("record_topic_stats"),
         "topics": topics,
         "stop_instruction": "Stop with Ctrl+C and wait for rosbag metadata finalization.",
     }
@@ -215,6 +242,7 @@ def _launch(context):
             f"topics={len(topics)}. Stop this launch with Ctrl+C and wait for metadata.yaml."
         )),
         *republishers,
+        *stats_nodes,
         recorder,
         *guards,
     ]
@@ -233,6 +261,7 @@ def generate_launch_description():
         "record_rear_camera": "false",
         "record_occupancy": "true",
         "record_debug_images": "false",
+        "record_topic_stats": "true",
         "max_bag_size_mb": "2048",
         "max_bag_duration_sec": "300",
         "cache_size_mb": "256",

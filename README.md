@@ -10,6 +10,7 @@
                   ├──► lane_detection ──► lane_map ─────────► /mapping/snapshot/lanes ─────┐
                   │     (차선 검출)        (pose 매칭·누적)                                 ├──► map_assembly ──► /mapping/fused_map
                   └──► monoscale_occupancy_grid_map ────────► /mapping/snapshot/occupancy ─┘     (옵션, 같은 시각 T로 묶음)
+ 카메라 + pose ──► parking_assist (주차선 검출 + 주차 목표 pose) ──► /parking/goal_pose   (옵션)
 ```
 
 ## 목차
@@ -32,6 +33,9 @@
 - **차선 지도**: `lane_detection`은 프레임별 차선을 검출만 하고, `lane_map`이 pose와 시각을 맞춰 누적 지도를 만듭니다.
 - **점유 지도**: 카메라 sweep으로 점유 격자를 만들며, CUDA 가속을 선택할 수 있습니다.
 - **시간 정합**: 각 노드가 진행 시각(`/pipeline/progress`)과 시각 약속이 붙은 지도 스냅샷을 내고, `map_assembly`가 두 지도가 모두 완결된 같은 시각 T의 묶음을 냅니다.
+- **주차 목표 pose** (`parking_assist`, 옵션): 주차선으로 빈 주차 칸을 찾아 map 기준 후진 주차 목표 pose를 냅니다. 경로 생성 노드가 `/parking/goal_pose`를 받아 씁니다.
+- **GPU 가속 (옵션)**: 추적기의 광류와 도로면 이동 추정을 CUDA로 돌릴 수 있습니다 (`tracker_use_cuda`, `tracker_road_step_gpu`, `tracker_road_step_gpu_gram`). 기본은 CPU입니다.
+- **기록·재생 도구**: 실차 기록 전용 실행(`record_vehicle.sh`)과 기록 점검(`check_recording.py`), 녹화 하나를 전체 파이프라인과 모든 화면으로 재생하는 `watch.sh`, CARLA 주행을 같은 파이프라인으로 돌리고 정답과 비교하는 `carla_check.sh`가 있습니다.
 - **시계 역행 대응**: bag을 처음부터 다시 재생하는 등 ROS 시계가 되돌아가면 `clock_guard`가 파이프라인을 내리고, `supervise_launch.sh`가 깨끗하게 다시 띄웁니다. 끊김 없는 복구가 아니라 지도는 새로 시작합니다.
 
 ## 저장소 구성
@@ -41,6 +45,7 @@ src/
   monoscale/                 core · tracker · odometry · pose · occupancy_grid_map
   lane_mapping/              lane_detection · lane_map
   mapping/                   map_assembly (통합 지도 + 그림)
+  parking/                   parking_assist (주차선 검출 · 주차 목표 pose)
   interfaces/                vision_lane_interfaces (메시지)
   sensors/                   monoscale_ublox (F9R IMU 드라이버)
   vision_mapping_bringup/    launch · config(보정·rig·기능별 YAML) · rviz
@@ -78,7 +83,7 @@ sudo apt update
 sudo apt install -y build-essential cmake pkg-config gcc-11 g++-11 \
   python3-colcon-common-extensions python3-rosdep python3-pytest \
   python3-numpy python3-opencv python3-yaml python3-matplotlib python3-psutil \
-  libopencv-dev libeigen3-dev libgomp1 zstd \
+  libopencv-dev libeigen3-dev libsqlite3-dev libgomp1 zstd \
   gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
   ros-humble-rosbag2-compression-zstd
 ```
@@ -95,6 +100,7 @@ rosdep install --from-paths src --ignore-src --rosdistro humble -r -y
 ```
 
 **4. CUDA (선택)**: NVIDIA 드라이버와 CUDA Toolkit 11.8을 설치합니다. 기본 경로는 `/usr/local/cuda-11.8`이고, 다른 경로면 `VISION_CUDA_ROOT`로 지정합니다.
+추적기의 GPU 광류·도로면 GPU 옵션은 CUDA 모듈(cudaoptflow 등)이 들어간 OpenCV가 따로 필요합니다. 그 OpenCV의 `lib/cmake/opencv4` 경로를 `MONOSCALE_TRACKER_OPENCV_DIR`로 주면 `build.sh cuda`가 추적기만 그 OpenCV로 빌드합니다. 없으면 추적기는 시스템 OpenCV(CPU)로 빌드됩니다.
 
 > Python 패키지는 apt 판을 씁니다. pip로 설치한 `opencv-python`·`numpy`와 섞으면 ROS의 cv_bridge와 충돌할 수 있습니다.
 
@@ -158,6 +164,20 @@ ros2 launch vision_mapping_bringup replay.launch.py \
 ros2 bag play <bag 경로> --clock
 ```
 
+**녹화 하나를 전체 파이프라인으로 보기** (재생 + 모든 노드 + RViz·영상 창, bag이 끝나면 닫힘)
+
+```bash
+bash tools/run/watch.sh <녹화 폴더 또는 bag 경로>     # 예: ~/vision_lane_measurements/<세션>
+bash tools/run/watch.sh <CARLA 주행 이름>            # /media/$USER/*/HERO/hero_bags/<이름>, 변환·0.35배속·정답 비교
+```
+
+**실차 기록만 하기** (처리 없이 카메라 MJPEG + IMU 저장, 끝나면 자동 점검)
+
+```bash
+bash tools/run/record_vehicle.sh --front /dev/v4l/by-id/<전방> --rear /dev/v4l/by-id/<후방> \
+  --imu /dev/serial/by-id/<F9R> --trial <이름>
+```
+
 **시계 역행 시 자동 재시작**
 
 ```bash
@@ -174,6 +194,8 @@ bash tools/run/supervise_launch.sh live.launch.py device:=... imu_device:=...
 | `launch_fusion` | 꺼짐 | 통합 지도(`map_assembly`) 켜기 |
 | `lane_mapping_owner` | `map` | `detection`이면 예전처럼 lane_detection이 누적까지 담당 |
 | `pose_imu_fill` | 켜짐 | raw odom 사이 IMU 채움 pose |
+| `launch_parking_assist` | 꺼짐 | 주차 목표 pose 켜기 (`parking_input`: `python_detector` 기본 / `detections`) |
+| `tracker_use_cuda`, `tracker_road_step_gpu` | 꺼짐 | 추적기 GPU 광류, 도로면 이동 GPU (CUDA OpenCV 필요) |
 | `launch_rviz`, `launch_viewer` | `false`, `true` | 시각화 |
 
 전체 인수는 `ros2 launch vision_mapping_bringup live.launch.py --show-args`로 확인합니다.
@@ -188,6 +210,7 @@ bash tools/run/supervise_launch.sh live.launch.py device:=... imu_device:=...
 | `/mapping/snapshot/lanes`, `/mapping/snapshot/occupancy` | 시각 약속이 붙은 지도 스냅샷 |
 | `/mapping/fused_map`, `/mapping/fused_map/image` | 같은 시각 T의 통합 지도와 그림 (`launch_fusion:=true`) |
 | `/pipeline/progress` | 노드별 진행 시각 |
+| `/parking/goal_pose`, `/parking/goal_valid` | 주차 목표 pose (map)와 유효 여부 (`launch_parking_assist:=true`) |
 
 ## 시험
 
@@ -198,7 +221,7 @@ PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m pytest -q tests --ignore=tests/tes
 PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 tests/test_launch_pipeline.py
 ```
 
-같은 bag도 스레드 타이밍 때문에 실행마다 결과가 조금씩 다르므로, 변경 전후 비교는 `tools/eval/repeat_compare.py`로 여러 번 재생해 평균과 표준편차로 봅니다. 사용법은 [docs/RUN_KO.md](docs/RUN_KO.md#반복-재생-비교)에 있습니다.
+같은 bag도 스레드 타이밍 때문에 실행마다 결과가 조금씩 다르므로, 변경 전후 비교는 `tools/eval/metrics/repeat_compare.py`로 여러 번 재생해 평균과 표준편차로 봅니다. 사용법은 [docs/RUN_KO.md](docs/RUN_KO.md#반복-재생-비교)에 있습니다.
 
 ## 문서
 

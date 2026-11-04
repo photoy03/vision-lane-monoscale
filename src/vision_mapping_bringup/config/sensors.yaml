@@ -5,6 +5,16 @@ launch_arguments:
   width: '2560'
   height: '1440'
   fps: '30'
+  # Image-input experiment (2026-10-22). raw (default): consumers take the decoded raw topics.
+  # compressed: tracker, occupancy and lanes take the JPEG topics and decode themselves (color).
+  # compressed_gray: as compressed, tracker and occupancy decode straight to gray (lanes color).
+  # gated: compressed_gray from the frame-gate topics (<topic>_gated), image queues depth 1.
+  image_input: raw
+  # Camera driver output (with launch_camera:=true). raw (default): MJPEG decoded to rgb8.
+  # jpeg: the camera's MJPEG passed on untouched on /measurement/<camera>/image_raw/compressed
+  # (with the full pipeline it needs image_input compressed, compressed_gray or gated; sensors.launch.py
+  # alone, the record-only path tools/run/record_vehicle.sh uses, does not).
+  camera_output: raw
   # Required when launch_f9r:=true. Prefer /dev/serial/by-id/... names.
   imu_device: ''
   imu_topic: /sensing/imu/imu_data

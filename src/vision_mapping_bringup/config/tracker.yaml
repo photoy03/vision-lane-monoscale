@@ -12,6 +12,17 @@ launch_arguments:
   tracker_motion_warp: ''
   tracker_opencv_threads: ''
   tracker_executor_threads: ''
+  # GPU optical flow (needs the tracker built against an OpenCV with cudaoptflow).
+  tracker_use_cuda: ''
+  # Road-step search on the GPU too (needs tracker_use_cuda).
+  tracker_road_step_gpu: ''
+  # v2 of it: the products' sums on the device too (needs tracker_road_step_gpu).
+  tracker_road_step_gpu_gram: ''
+  # Stage-2 road-step options (observer_eval_ROAD2/ROAD3). frame_guard drops truncated decodes,
+  # on by default in the tracker since 2026-10-24 (false rolls it back); bracket_escape widens
+  # the search bracket when its peak sits on the edge (option only, default off).
+  tracker_road_step_frame_guard: ''
+  tracker_road_step_bracket_escape: ''
   tracker_gyro_prediction_mode: ''
   tracker_gyro_time_offset_sec: ''
   tracker_gyro_history_sec: ''

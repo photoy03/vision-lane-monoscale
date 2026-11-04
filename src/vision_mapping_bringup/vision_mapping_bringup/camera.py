@@ -9,6 +9,10 @@ import yaml
 
 from vision_mapping_bringup.rig import read_calibration, rotation_base_from_camera, quaternion_xyzw
 
+# Camera names and optical frames, the one place every node gets them from (D-17).
+# Node-side defaults with the same strings are only for running a node without launch.
+FRONT_ID = 'front'
+REAR_ID = 'rear'
 FRONT_FRAME = 'front_fisheye_camera_optical_frame'
 REAR_FRAME = 'rear_fisheye_camera_optical_frame'
 
@@ -79,7 +83,7 @@ def load_rear(args, share, setup):
 def calibration_id(front):
     """Stable identity of the front calibration + mount, shared by lane producers and consumers."""
     contract = json.dumps({
-        'camera_id': 'front', 'frame': FRONT_FRAME,
+        'camera_id': FRONT_ID, 'frame': FRONT_FRAME,
         'distortion_model': 'equidistant', 'K': front.k.tolist(),
         'D': front.d.reshape(-1).tolist(), 'size': [int(front.size[0]), int(front.size[1])],
         'translation_base_from_camera': front.translation,

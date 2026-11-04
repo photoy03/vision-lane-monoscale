@@ -34,7 +34,12 @@ def tracker_overrides(args, width):
             overrides[parameter] = value
     for name, parameter in (
         ('tracker_motion_prediction', 'motion_prediction'),
-        ('tracker_motion_warp', 'motion_warp')):
+        ('tracker_motion_warp', 'motion_warp'),
+        ('tracker_use_cuda', 'use_cuda'),
+        ('tracker_road_step_gpu', 'road_step_gpu'),
+        ('tracker_road_step_gpu_gram', 'road_step_gpu_gram'),
+        ('tracker_road_step_frame_guard', 'road_step_frame_guard'),
+        ('tracker_road_step_bracket_escape', 'road_step_bracket_escape')):
         raw = args.arg(name).strip().lower()
         if raw:
             if raw not in ('true', 'false'):

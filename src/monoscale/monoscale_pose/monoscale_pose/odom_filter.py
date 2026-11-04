@@ -720,9 +720,9 @@ def interpolate_pose_covariance(previous, current, ratio, span, distance, kind):
     if (not math.isfinite(ratio) or
             not covariance_matrix_is_usable(previous) or
             not covariance_matrix_is_usable(current)):
-        result = [0.0] * 36
-        result[0] = -1.0
-        return result
+        # No negative sentinel: the zero matrix (message default) is returned
+        # and PoseProvenance.covariance_valid=false carries "unknown".
+        return [0.0] * 36
     ratio = min(max(ratio, 0.0), 1.0)
     sigma_xy, sigma_yaw = resampled_pose_sigmas(span, distance, kind)
     # A convex blend is PSD but can claim less uncertainty than an endpoint.
@@ -755,10 +755,3 @@ def pose_provenance_kind(resample_kind, is_resampled):
     if resample_kind in IMU_KINDS:
         return "imu_fill"
     return "unknown"
-
-
-def unknown_pose_covariance():
-    """ROS convention for an unknown pose covariance: element 0 = -1, the rest 0."""
-    covariance = [0.0] * 36
-    covariance[0] = -1.0
-    return covariance

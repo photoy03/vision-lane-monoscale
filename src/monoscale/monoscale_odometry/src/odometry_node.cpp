@@ -16,6 +16,7 @@
 // twice at once. A solve costs well under a millisecond here, so the lock is
 // cheaper than the alternative was to debug.
 
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -33,6 +34,8 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <sstream>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
@@ -256,6 +259,11 @@ public:
     }
     report_ = create_wall_timer(
       std::chrono::seconds(2), [this]() {report();});
+    // Machine-readable counters (docs/C2_CRITERIA_KO.md 7.2-2); behaviour unchanged.
+    status_ = create_publisher<std_msgs::msg::String>(configuration_.topics.odometry + "/status", 10);
+    // Which cameras solved each published raw pose (stamp-matched downstream, 7.2-6).
+    solve_info_ = create_publisher<std_msgs::msg::String>(configuration_.topics.odometry + "/solve_info", reliable);
+    status_timer_ = create_wall_timer(std::chrono::seconds(1), [this]() {publish_status();});
   }
 
   int executor_threads() const {return configuration_.topics.executor_threads;}
@@ -602,6 +610,14 @@ private:
         odometry.twist.twist.angular.z = update.twist.z();
         fill_covariance(odometry, update);
         odometry_->publish(odometry);
+        note_output_gap(update.stamp);
+        {
+          std_msgs::msg::String info;
+          info.data = "{\"stamp_ns\":" + std::to_string(
+            static_cast<int64_t>(stamp.sec) * 1000000000LL + stamp.nanosec) +
+            ",\"cameras\":\"" + update.solved_by + "\"}";
+          solve_info_->publish(info);
+        }
 
         geometry_msgs::msg::PoseStamped pose;
         pose.header = odometry.header;
@@ -670,6 +686,88 @@ private:
     cloud.data.resize(cloud.row_step);
     std::memcpy(cloud.data.data(), points.data(), cloud.row_step);
     points_->publish(cloud);
+  }
+
+  void note_output_gap(double stamp)
+  {
+    std::lock_guard<std::mutex> guard(status_lock_);
+    if (last_output_stamp_ > 0.0 && stamp > last_output_stamp_) {
+      const double gap = stamp - last_output_stamp_;
+      output_gap_max_ = std::max(output_gap_max_, gap);
+      if (gap > 3.0) {++output_gaps_over_3s_;}
+    }
+    last_output_stamp_ = std::max(last_output_stamp_, stamp);
+    ++outputs_;
+  }
+
+  static void json_map(std::ostringstream & out, const char * key, const std::map<std::string, int64_t> & values)
+  {
+    out << ",\"" << key << "\":{";
+    bool first = true;
+    for (const auto & [name, value] : values) {out << (first ? "" : ",") << "\"" << name << "\":" << value; first = false;}
+    out << "}";
+  }
+
+  void publish_status()
+  {
+    monoscale::Diagnostics d;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      d = estimator_->diagnostics();
+    }
+    std::ostringstream out;
+    out << std::setprecision(6) << "{\"pairs\":" << d.pairs_seen << ",\"solves\":" << d.frames_processed
+        << ",\"evicted\":" << d.frames_evicted << ",\"motion_failures\":" << d.motion_failures
+        << ",\"fail_no_solve\":" << d.fail_no_solve << ",\"fail_translation\":" << d.fail_translation
+        << ",\"fail_yaw\":" << d.fail_yaw << ",\"yaw_only\":" << d.yaw_only_updates
+        << ",\"coasted\":" << d.coasted << ",\"filter_rejections\":" << d.filter_rejections
+        << ",\"imu_yaw_misses\":" << d.imu_yaw_misses << ",\"imu_yaw_resyncs\":" << d.imu_yaw_resyncs;
+    json_map(out, "tolerance_drops", d.tolerance_drops);
+    json_map(out, "absorbed_unpaired", d.absorbed_unpaired);
+    json_map(out, "lone_frames", d.lone_frames);
+    json_map(out, "lone_solves", d.lone_solves);
+    out << ",\"lone_reseeds\":" << d.lone_reseeds;
+    json_map(out, "lone_by_reason", d.lone_by_reason);
+    json_map(out, "lone_late_peer", d.lone_late_peer);
+    json_map(out, "lone_candidate_evicted", d.lone_candidate_evicted);
+    out << ",\"ready_rejections\":" << d.ready_rejections;
+    out << ",\"lone_solves_before_first_pair\":" << d.lone_solves_before_first_pair;
+    json_map(out, "shadow_pairs", d.shadow_pairs);
+    json_map(out, "shadow_failures", d.shadow_failures);
+    const auto quantiles = [&out](const char * key, const std::map<std::string, std::vector<double>> & values) {
+      out << ",\"" << key << "\":{";
+      bool first = true;
+      for (const auto & [name, samples] : values) {
+        std::vector<double> sorted = samples;
+        std::sort(sorted.begin(), sorted.end());
+        const auto at = [&sorted](double q) {
+          return sorted.empty() ? -1.0 : sorted[static_cast<size_t>(q * static_cast<double>(sorted.size() - 1))];
+        };
+        out << (first ? "" : ",") << "\"" << name << "\":{\"n\":" << sorted.size()
+            << ",\"p50\":" << at(0.5) << ",\"p90\":" << at(0.9) << "}";
+        first = false;
+      }
+      out << "}";
+    };
+    quantiles("shadow_hop_diff_m", d.shadow_hop_diff_m);
+    quantiles("shadow_yaw_diff_rad", d.shadow_yaw_diff_rad);
+    out << ",\"max_frame_gap_sec\":{";
+    bool first = true;
+    for (const auto & [name, value] : d.max_frame_gap_sec) {out << (first ? "" : ",") << "\"" << name << "\":" << value; first = false;}
+    out << "},\"received\":{";
+    for (size_t i = 0; i < configuration_.estimator.cameras.size(); ++i) {
+      out << (i ? "," : "") << "\"" << configuration_.estimator.cameras[i].name << "\":" << received_[i];
+    }
+    out << "}";
+    {
+      std::lock_guard<std::mutex> guard(status_lock_);
+      out << ",\"outputs\":" << outputs_ << ",\"output_gaps_over_3s\":" << output_gaps_over_3s_
+          << ",\"output_gap_max_sec\":" << output_gap_max_;
+    }
+    out << "}";
+    std_msgs::msg::String msg;
+    msg.data = out.str();
+    status_->publish(msg);
   }
 
   void report()
@@ -746,6 +844,12 @@ private:
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> broadcaster_;
   rclcpp::TimerBase::SharedPtr report_;
+  rclcpp::TimerBase::SharedPtr status_timer_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr solve_info_;
+  std::mutex status_lock_;
+  double last_output_stamp_ = 0.0, output_gap_max_ = 0.0;
+  int64_t output_gaps_over_3s_ = 0, outputs_ = 0;
   // Fires once if the transform tree has not answered by then.
   rclcpp::TimerBase::SharedPtr settle_;
 

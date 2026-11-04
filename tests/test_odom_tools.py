@@ -43,7 +43,7 @@ def load(name, path):
 from workspace_paths import package_source
 
 policy = load('odom_policy', ROOT / 'src/vision_mapping_bringup/vision_mapping_bringup/odom_policy.py')
-summary = load('summary', ROOT / 'tools/eval/summarize_odom.py')
+summary = load('summary', ROOT / 'tools/eval/metrics/summarize_odom.py')
 
 
 class OdomTests(unittest.TestCase):
@@ -460,15 +460,17 @@ class OdomTests(unittest.TestCase):
     def test_unknown_or_non_psd_pose_covariance_stays_unknown(self):
         valid = [0.0] * 36
         valid[0] = valid[7] = valid[35] = 0.04
+        # No negative sentinel: unknown is the zero matrix; PoseProvenance
+        # covariance_valid=false carries the meaning.
         self.assertEqual(
-            interpolate_pose_covariance([0.0] * 36, valid, 0.5, 0.2, 0.0, "short")[0],
-            -1.0)
+            interpolate_pose_covariance([0.0] * 36, valid, 0.5, 0.2, 0.0, "short"),
+            [0.0] * 36)
 
         invalid = list(valid)
         invalid[1] = invalid[6] = 0.05
         self.assertFalse(covariance_matrix_is_usable(invalid))
         result = interpolate_pose_covariance(invalid, valid, 0.5, 0.2, 0.0, "short")
-        self.assertEqual(result[0], -1.0)
+        self.assertEqual(result, [0.0] * 36)
         self.assertFalse(covariance_matrix_is_usable(result))
 
         nonfinite = list(valid)

@@ -87,6 +87,23 @@ struct EstimatorSettings
 
   double sync_tolerance_sec = 0.02;
   int pair_queue_depth = 12;
+  // Lone-camera solve (docs/C2_CRITERIA_KO.md 7.2-3). Off: unchanged behaviour.
+  // On: a frame whose peer camera has a hole of more than lone_gap_sec around
+  // it (no peer frame within lone_gap_sec, and the peer has moved past it, or
+  // no peer frame has *arrived* for lone_silence_sec of IMU time) is solved by
+  // its own camera instead of waiting for or dropping it. Arrival silence, not
+  // capture time: tracker output can lag capture by seconds (3-8 s in the
+  // 2026-09 recordings), and a lagging camera is not a silent one. A camera
+  // that missed lone solves is re-seeded on its own when it comes back.
+  bool lone_camera_solve_enabled = false;
+  double lone_gap_sec = 1.0;
+  double lone_silence_sec = 2.0;
+  // Sparse peer (observer_eval_C2_5a_results 4): a head with no peer inside
+  // sync_tolerance_sec whose peer frames on *both* sides have already arrived
+  // and lie more than lone_sparse_sec apart goes alone instead of being
+  // dropped. Only on the tolerance-drop path, never while the peer queue is
+  // empty (that is a hole, which the gap/silence test above handles).
+  double lone_sparse_sec = 1.5;
 
   bool use_imu_yaw = true;
   // Take the heading by integrating the gyro's z rate instead of reading the
@@ -758,6 +775,9 @@ struct LabelledPoint
 struct Update
 {
   double stamp = 0.0;
+  // Cameras whose own solve produced this update ("front,rear", "rear", ...);
+  // empty for updates no camera solved (seed / hold).
+  std::string solved_by;
   Pose2 pose;
   // Body-frame vx, vy and yaw rate.
   Eigen::Vector3d twist = Eigen::Vector3d::Zero();
@@ -875,6 +895,50 @@ struct Diagnostics
   int64_t pairs_seen = 0;
   int64_t frames_processed = 0;
   int64_t frames_evicted = 0;
+  // Per camera (docs/C2_CRITERIA_KO.md 7.2-2): queue heads dropped for want of a
+  // peer inside sync_tolerance_sec, frames consumed ahead of a pair's pick
+  // without being compared, and the widest gap between consecutive frames.
+  std::map<std::string, int64_t> tolerance_drops;
+  std::map<std::string, int64_t> absorbed_unpaired;
+  std::map<std::string, double> max_frame_gap_sec;
+  std::map<std::string, double> last_frame_stamp;
+  // Lone-camera solve: frames consumed alone, lone solves processed, cameras
+  // re-seeded on their own when they came back.
+  std::map<std::string, int64_t> lone_frames;
+  std::map<std::string, int64_t> lone_solves;
+  int64_t lone_reseeds = 0;
+  double first_lone_stamp = 0.0;  // capture time of the first frame taken alone
+  // Lone frames by the test that let them go: "gap" (hole/silence) or "sparse"
+  // on the drop path, "gap@absorb"/"sparse@absorb" just before a pair would
+  // have absorbed them.
+  std::map<std::string, int64_t> lone_by_reason;
+  // Each lone frame (capture stamp, camera, reason), the first 4000: offline
+  // checks place them against output gaps and peer frame gaps.
+  struct LoneEvent {
+    double stamp;
+    std::string camera, reason;
+  };
+  std::vector<LoneEvent> lone_events;
+  // Misfires: a peer frame that arrived *after* a lone decision inside the
+  // interval that decision took to be empty (gap path: within lone_gap_sec of
+  // the frame; sparse path: between the two bracketing peer frames). Keyed by
+  // the camera that went alone.
+  std::map<std::string, int64_t> lone_late_peer;
+  // Lone solves made before the first pair was ever processed: the first output
+  // would then come from one camera alone (observer_eval_C2_5a_absorb 2.3).
+  int64_t lone_solves_before_first_pair = 0;
+  // Heads that could still have gone alone but were evicted at the retention
+  // limit (kept apart from frames_evicted).
+  std::map<std::string, int64_t> lone_candidate_evicted;
+  // Pairs / lone frames that were consumed but not solved because
+  // ready_to_solve() said the ground had not moved enough yet.
+  int64_t ready_rejections = 0;
+  // Shadow (7.2-5): in pairs where both cameras solved, each camera's own hop
+  // against the fused hop, and how often one camera failed while another solved.
+  std::map<std::string, std::vector<double>> shadow_hop_diff_m;
+  std::map<std::string, std::vector<double>> shadow_yaw_diff_rad;
+  std::map<std::string, int64_t> shadow_pairs;
+  std::map<std::string, int64_t> shadow_failures;
   int64_t motion_failures = 0;
   int64_t fail_no_solve = 0;
   int64_t fail_translation = 0;
@@ -1098,7 +1162,25 @@ private:
 
   void try_process_pairs();
   bool ready_to_solve() const;
-  void process_pair();
+  // participants: cameras whose latest frame belongs to this update (all when null).
+  void process_pair(const std::vector<bool> * participants = nullptr);
+  // Lone-camera solve: whether `camera`'s head frame has a peer hole around it.
+  bool lone_frame(size_t camera) const;
+  // Sparse-peer test (tolerance-drop path only); on success fills the
+  // bracketing peer stamps the decision assumes nothing lies between.
+  bool sparse_frame(size_t camera, double * lower, double * upper) const;
+  // Whether `camera`'s head may still go alone later (retention test).
+  bool lone_candidate(size_t camera) const;
+  // Trim `camera`'s queue to pair_queue_depth, keeping lone candidates.
+  void evict(size_t camera);
+  struct LoneCheck {
+    size_t lone_camera, peer;
+    double lower, upper;  // open interval assumed empty of peer frames
+  };
+  std::vector<LoneCheck> lone_checks_;
+  bool paired_once_ = false;
+  // Consume `camera`'s head alone; false when it has to wait for the IMU.
+  bool process_lone(size_t camera, const char * reason = "gap", double lower = 0.0, double upper = 0.0);
 
   // The acceleration base_link would have felt, given what the IMU felt.
   ImuSample shift_imu_to_base(const ImuSample & measured);

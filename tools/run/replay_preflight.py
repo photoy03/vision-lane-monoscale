@@ -22,8 +22,14 @@ TRACKER_OVERRIDES = {
     "tracker_imu_yaw_history_sec": "imu_yaw_history_sec",
     "tracker_opencv_threads": "opencv_threads",
     "tracker_executor_threads": "executor_threads",
+    "tracker_use_cuda": "use_cuda",
+    "tracker_road_step_gpu": "road_step_gpu",
+    "tracker_road_step_gpu_gram": "road_step_gpu_gram",
+    "tracker_road_step_frame_guard": "road_step_frame_guard",
+    "tracker_road_step_bracket_escape": "road_step_bracket_escape",
 }
-BOOL_OVERRIDES = {"tracker_motion_prediction", "tracker_motion_warp"}
+BOOL_OVERRIDES = {"tracker_motion_prediction", "tracker_motion_warp", "tracker_use_cuda", "tracker_road_step_gpu", "tracker_road_step_gpu_gram",
+                  "tracker_road_step_frame_guard", "tracker_road_step_bracket_escape"}
 TEXT_OVERRIDES = {"tracker_input_reliability", "tracker_gyro_prediction_mode"}
 FLOAT_OVERRIDES = {
     "tracker_gyro_time_offset_sec", "tracker_gyro_history_sec",

@@ -9,3 +9,7 @@ launch_arguments:
   output_dir: ''
   # Time-matched map set + its image (map_assembly). Empty = off.
   launch_fusion: ''
+  # Test hook: provenance topic map_assembler reads (empty = <pose topic>/provenance).
+  fusion_provenance_topic: ''
+  # Test hook: observation topic lane_map reads in map mode (empty = /parking/cpp/lane_observations).
+  lane_map_observation_topic: ''

@@ -115,6 +115,12 @@ Configuration declare_and_read(rclcpp::Node & node)
   // frame; offline it makes a measurement irreproducible. So the depth is
   // settable and every eviction is counted.
   settings.pair_queue_depth = declare_int("pair_queue_depth", 12);
+  // Lone-camera solve (docs/C2_CRITERIA_KO.md 7.2-3). Off by default until the
+  // CARLA benchmark shows no ATE regression with it on.
+  settings.lone_camera_solve_enabled = declare_bool("lone_camera_solve_enabled", false);
+  settings.lone_gap_sec = declare_double("lone_gap_sec", 1.0);
+  settings.lone_silence_sec = declare_double("lone_silence_sec", 2.0);
+  settings.lone_sparse_sec = declare_double("lone_sparse_sec", 1.5);
   topics.publish_tf = declare_bool("publish_tf", true);
   // Identity, and published only so the tree is whole. There is no absolute
   // localisation in this stack -- the anchor map binds drift, it does not

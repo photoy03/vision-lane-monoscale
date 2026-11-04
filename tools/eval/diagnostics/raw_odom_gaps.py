@@ -22,7 +22,7 @@ and labels it:
                      stood still (yaw rate and acceleration spread at the standing level)
 Labels are not exclusive; the first that applies in the order above is the primary one.
 
-  python3 tools/eval/raw_odom_gaps.py RUN [RUN ...] [--report out.md]
+  python3 tools/eval/diagnostics/raw_odom_gaps.py RUN [RUN ...] [--report out.md]
 """
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fusion_policy_replay import ns, read  # noqa: E402
+from lone_gap_table import near_threshold  # noqa: E402
 
 
 def bag_series(bag: Path):
@@ -121,6 +122,7 @@ def main():
     ap.add_argument("--report", type=Path)
     args = ap.parse_args()
     out_rows = []
+    run_rows = []  # per run: gap count and intervals near the threshold (E-1)
     bag_cache = {}
     for run in args.runs:
         manifest = json.loads((run / "manifest.json").read_text())
@@ -145,6 +147,9 @@ def main():
                 calm_flow, calm = sum(window) / len(window), flows[i][0]
         still_yaw, still_acc = motion(imu, calm, calm + 5_000_000_000) if calm else (float("nan"),) * 2
         gaps = [(a, b) for a, b in zip(raw, raw[1:]) if (b - a) * 1e-9 > args.min_gap_sec]
+        near_below, near_above = near_threshold(raw, threshold_sec=args.min_gap_sec)
+        run_rows.append({"run": run.name, "gaps": len(gaps), "near_threshold_2p5_3p5": [near_below, near_above]})
+        print(json.dumps(run_rows[-1]), flush=True)
         in_gap = lambda t: any(a < t < b for a, b in gaps)  # noqa: E731
         span_all = (raw[-1] - raw[0]) * 1e-9 - sum((b - a) for a, b in gaps) * 1e-9
         outside_rate = {c: sum(raw[0] < t < raw[-1] and not in_gap(t) for t in frames[c]) / max(span_all, 1e-9)
@@ -228,6 +233,9 @@ def main():
         first = collections.Counter(r["labels"][0] for r in out_rows)
         every = collections.Counter(label for r in out_rows for label in r["labels"])
         lines += ["", f"primary label: {dict(first)}", f"all labels (primary + secondary): {dict(every)}"]
+        lines += ["", "| run | gaps | 2.5-3.5 s intervals (<= threshold / > threshold) |", "|---|---|---|"]
+        lines += [f"| {r['run']} | {r['gaps']} | {r['near_threshold_2p5_3p5'][0]} / {r['near_threshold_2p5_3p5'][1]} |"
+                  for r in run_rows]
         args.report.write_text("\n".join(lines) + "\n")
 
 

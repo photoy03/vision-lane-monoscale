@@ -1,0 +1,19 @@
+# Parking assistance (src/parking/parking_assist): the map-frame parking goal pose from the
+# lane detector's confirmed per-frame segments and the odometry. Off unless launch_parking_assist:=true.
+launch_arguments:
+  launch_parking_assist: ''
+  # Where the goal node's parking lines come from:
+  #   python_detector (default): the owner's parking_space_detector.py, unchanged, on the
+  #     front camera image -> /parking/lines -> goal node (input_mode markers). This is the
+  #     combination the owner tested. It runs its own BEV and line detection next to the
+  #     C++ lane detector (Python, extra CPU).
+  #   detections: the C++ lane detector's confirmed per-frame segments
+  #     (/parking/cpp/marking_segments) with the odometry interpolated at each frame.
+  parking_input: ''
+  # Slot size the goal search expects (empty = package default 2.60 x 4.37 m, the CARLA
+  # lots; a Korean standard bay is 2.5 x 5.0 m).
+  parking_slot_width_m: ''
+  parking_slot_depth_m: ''
+# Vehicle overrides of parking_assist/config/parking_assist.yaml go here.
+parking_goal_pose_node:
+  ros__parameters: {}

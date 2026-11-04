@@ -61,6 +61,9 @@ target_link_libraries(monoscale_occupancy_core ${OpenCV_LIBS}
   $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>)
 if(CMAKE_CUDA_COMPILER AND EXISTS ${MONOSCALE_SWEEP_KERNELS})
   set_target_properties(monoscale_occupancy_core PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+  # E-9: every host thread launches on its own default stream, so two camera
+  # workers do not serialise on (or synchronise) each other's work.
+  target_compile_options(monoscale_occupancy_core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--default-stream per-thread>)
   find_package(CUDAToolkit REQUIRED)
   target_link_libraries(monoscale_occupancy_core CUDA::cudart)
 endif()
@@ -80,7 +83,32 @@ target_link_libraries(sweep_node monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP
 ament_target_dependencies(sweep_node
   rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
 
-install(TARGETS monoscale_occupancy_core sweep_offline sweep_node
+# E-9 job harness: recorded keyframe jobs through the node's own workers (a tool, not a
+# test: the jobs come from a recorded run, VISION_SWEEP_JOB_DUMP).
+add_executable(sweep_jobs_golden test/sweep_jobs_golden.cpp)
+target_include_directories(sweep_jobs_golden PRIVATE include)
+target_link_libraries(sweep_jobs_golden monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART})
+ament_target_dependencies(sweep_jobs_golden
+  rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
+
+# E-9 JobBuilder golden: a recorded input event sequence through the node's callbacks or a
+# standalone JobBuilder (observer_eval_E9j 2). Reads the measurement bags read-only.
+find_package(SQLite3 REQUIRED)
+add_executable(job_builder_golden test/job_builder_golden.cpp)
+target_include_directories(job_builder_golden PRIVATE include)
+target_link_libraries(job_builder_golden monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART} SQLite::SQLite3)
+ament_target_dependencies(job_builder_golden
+  rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
+
+# E-9 deterministic occupancy replay (observer_eval_E9j): the node's code serially over a
+# recorded input event sequence, with a fixed carve rule. Driven by tools/run/occ_offline.py.
+add_executable(occ_offline test/occ_offline.cpp)
+target_include_directories(occ_offline PRIVATE include)
+target_link_libraries(occ_offline monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART} SQLite::SQLite3)
+ament_target_dependencies(occ_offline
+  rclcpp sensor_msgs nav_msgs geometry_msgs cv_bridge monoscale_pose vision_lane_interfaces)
+
+install(TARGETS monoscale_occupancy_core sweep_offline sweep_node sweep_jobs_golden job_builder_golden occ_offline
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
@@ -98,6 +126,13 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pose_interpolation test/test_pose_interpolation.cpp)
   target_include_directories(test_pose_interpolation PRIVATE include)
   target_link_libraries(test_pose_interpolation monoscale_occupancy_core ${OpenCV_LIBS} ${SWEEP_CUDART})
+  ament_add_gtest(test_camera_liveness test/test_camera_liveness.cpp)
+  target_include_directories(test_camera_liveness PRIVATE include)
+  ament_target_dependencies(test_camera_liveness vision_lane_interfaces)
+  ament_add_gtest(test_image_quality test/test_image_quality.cpp)
+  target_include_directories(test_image_quality PRIVATE ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(test_image_quality ${OpenCV_LIBS})
+  ament_target_dependencies(test_image_quality vision_lane_interfaces)
 endif()
 
 ament_package()

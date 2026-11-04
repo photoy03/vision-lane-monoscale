@@ -10,8 +10,8 @@ uint64 clock_generation                 # time line of T; both layers carry the 
 # whose latest snapshot is used although it is not exact at T.
 bool complete
 string[] stale_layers
-LaneMapSnapshot lanes
-OccupancySnapshot occupancy
+LaneMapSnapshotV1 lanes
+OccupancySnapshotV1 occupancy
 # Vehicle pose at T: a measured pose or a blend of the two measured poses
 # around T (never across a gap longer than the limit, never extrapolated).
 # The blend uses the later pose, i.e. pose information after T.

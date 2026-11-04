@@ -31,6 +31,45 @@ Visualization Manager:
         Value: /parking/cpp/global_marking_markers
         Reliability Policy: Reliable
         Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Image
+      Name: Fused map (time-matched)
+      Enabled: true
+      Topic:
+        Value: /mapping/fused_map/image
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+    - Class: rviz_default_plugins/Pose
+      Name: Parking goal pose
+      Enabled: true
+      Topic:
+        Value: /parking/goal_pose
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+      Shape: Arrow
+      Color: 255; 40; 220
+      Shaft Length: 1.2
+      Head Length: 0.4
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Parking slot lines
+      Enabled: true
+      Topic:
+        Value: /parking/slot_lines
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Parking lines (detector)
+      Enabled: true
+      Topic:
+        Value: /parking/lines
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+    - Class: rviz_default_plugins/Marker
+      Name: Current vehicle
+      Enabled: true
+      Topic:
+        Value: /parking/current_vehicle
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: true

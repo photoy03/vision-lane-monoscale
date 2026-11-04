@@ -31,6 +31,10 @@ namespace monoscale_occupancy
 #ifdef MONOSCALE_OCCUPANCY_HAS_CUDA
 // Runtime device check used by the online node's startup diagnostics.
 bool cuda_available();
+struct SweepSettings;
+// Process-wide CUDA setup done once before worker threads start (E-9); a no-op
+// without CUDA or after the first call.
+void cuda_configure(const SweepSettings & settings);
 #endif
 
 // OpenCV fisheye camera with a fixed mount.  The original benchmark cameras
@@ -95,6 +99,20 @@ struct SweepDiagnostics
   int free_road_pixels = 0;
   int believed_pixels = 0;
   int clear_pixels = 0;
+};
+
+// Wall time of the stages of the last keyframe (E-7 measurement; nothing reads it
+// back into the computation). match includes the kernel's device->host transfers;
+// volume_copy is the host-side copy of the aggregated volume that subplane needs.
+struct KeyframeTiming
+{
+  bool cuda = false;
+  double prep_ms = 0.0;
+  double match_ms = 0.0;
+  double volume_copy_ms = 0.0;
+  double verdict_ms = 0.0;
+  double subplane_ms = 0.0;
+  double integrate_ms = 0.0;
 };
 
 struct SweepSettings
@@ -298,6 +316,22 @@ struct Published
   int free_before_slab = 0;
   int free_after_slab = 0;
   int free_after_erode = 0;
+  int neutralised_cells = 0;  // cells whose free belief neutralise_slab reset (all cameras)
+};
+
+// One keyframe's sweep, everything before the grid is touched (E-9 (c2)): compute it on
+// any thread, then integrate_keyframe() into the camera's grid in the order the
+// keyframes were made.
+struct KeyframeResult
+{
+  bool valid = false;  // false: fewer than two sources, nothing to integrate
+  Pose5 reference_pose;
+  std::vector<double> heights;
+  int road = 0;
+  cv::Mat best;
+  cv::Mat best_cost;
+  cv::Mat second_cost;
+  Verdict verdict;
 };
 
 class Sweep
@@ -313,8 +347,17 @@ public:
     const std::vector<Pose5> & source_poses,
     CameraGrid & grid) const;
 
+  // keyframe() in two halves: compute_keyframe reads only the images and poses;
+  // integrate_keyframe writes the grid. keyframe() is exactly the two in a row.
+  KeyframeResult compute_keyframe(
+    const cv::Mat & reference_gray, const Pose5 & reference_pose,
+    const std::vector<cv::Mat> & source_grays,
+    const std::vector<Pose5> & source_poses) const;
+  void integrate_keyframe(const KeyframeResult & result, CameraGrid & grid) const;
+
   const SweepSettings & settings() const {return settings_;}
   const SweepDiagnostics & diagnostics() const {return diagnostics_;}
+  const KeyframeTiming & timing() const {return timing_;}
 
 private:
   // Where each reference pixel is found in `source`, for the world-horizontal
@@ -361,6 +404,7 @@ private:
   // frame size seen.
   mutable cv::Mat ray_base_;  // CV_64FC3
   mutable SweepDiagnostics diagnostics_;
+  mutable KeyframeTiming timing_;
   void ensure_rays(int width, int height) const;
 };
 
@@ -375,7 +419,18 @@ private:
 // before it started. `sweep_offline` passes the legacy fixed extent, because
 // it writes a bare .npy with no origin in it and the scoring reference reads
 // that file as 600 x 600 at (-30, -30).
+// commit_neutralise: write neutralise_slab back into the grids (upstream behaviour, so the
+// stored grids depend on when publish ran). false leaves the grids untouched (E-9
+// diagnostic; observer_eval_E9c 3).
 Published publish(
+  const SweepSettings & settings, std::vector<CameraGrid *> grids,
+  const GridWindow & request = GridWindow(), bool commit_neutralise = true);
+
+// The write-back half of publish() alone: neutralise_slab applied to the grids, exactly as a
+// publish with commit_neutralise writes it (same window rule), without drawing the map.
+// Returns the cells reset. E-9 (c1): the node calls it after every keyframe
+// (carve_on_keyframe) so the stored grids no longer depend on when publish ran.
+int carve(
   const SweepSettings & settings, std::vector<CameraGrid *> grids,
   const GridWindow & request = GridWindow());
 

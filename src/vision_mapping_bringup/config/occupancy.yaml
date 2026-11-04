@@ -14,9 +14,29 @@ launch_arguments:
   occupancy_free_to_occupied: ''
   occupancy_occlusion_aware: ''
   occupancy_max_pending_keyframes: ''
+  # On by default (observer_eval_C2_6_liveness_default): a camera that stops
+  # delivering no longer freezes the occupancy layer for good. With lone camera
+  # solve off the layer still stops while the pose is down.
+  occupancy_camera_liveness: 'true'
+  occupancy_camera_dead_sec: ''
+  # E-9: one sweep worker per camera (empty = package default: parallel, ordered by (c2)).
+  occupancy_parallel_cameras: ''
+  # E-9 diagnostics only (empty = package default): map publish rate and whether a publish
+  # writes neutralise_slab back into the stored grids (upstream: true).
+  occupancy_publish_rate_hz: ''
+  occupancy_publish_commit_neutralise: ''
+  # E-9 (c1): carve once after every keyframe (empty = package default true since E9k; false = upstream).
+  # To restore upstream behaviour turn this AND occupancy_parallel_cameras off together; serial with
+  # keyframe carves on can drop jobs (2 per run measured, observer_eval_E9n).
+  occupancy_carve_on_keyframe: ''
   occupancy_max_odom_gap_sec: ''
   occupancy_max_odom_translation_m: ''
   occupancy_max_odom_yaw_deg: ''
   occupancy_image_quality_gate_mode: ''
   occupancy_image_quality_min_sharpness: ''
+  # Shared sharpness measure (D-17). Empty keeps the occupancy scale (processing
+  # image, ksize 1); 640 and 3 measure on the lane scale. Stage 2 is on hold until a bag
+  # with real motion blur exists (observer_eval_D17_stage2): leave both empty.
+  occupancy_image_quality_sample_width: ''
+  occupancy_image_quality_laplacian_ksize: ''
   occupancy_filter_lanes: 'false'

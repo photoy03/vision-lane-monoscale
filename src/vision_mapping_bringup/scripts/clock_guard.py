@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.clock import Clock, ClockType, JumpThreshold
@@ -69,7 +70,9 @@ def main():
         rclpy.spin(node)
     except SystemExit as stop:
         code = int(stop.code or 0)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # ExternalShutdownException: the context was shut down from outside
+        # (launch stopping everything); a normal stop, not an error.
         pass
     node.destroy_node()
     if rclpy.ok():

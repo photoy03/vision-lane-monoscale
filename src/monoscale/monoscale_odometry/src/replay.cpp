@@ -498,7 +498,11 @@ int main(int argc, char ** argv)
       until_seconds = std::stod(next());
     } else if (argument == "--truth-offset") {
       truth_offset_m = std::stod(next());
-    } else if (bag.empty()) {
+    } else if (argument.rfind("--", 0) == 0 || !bag.empty()) {
+      // Unknown flags and a second bag used to be dropped silently (upstream 2544bf5, D-19).
+      std::cerr << "monoscale_replay: unrecognised argument `" << argument << "`\n";
+      return 2;
+    } else {
       bag = argument;
     }
   }
@@ -1463,6 +1467,22 @@ int main(int argc, char ** argv)
     diagnostics.map_aligned_frames, diagnostics.frames_evicted,
     diagnostics.anchors_adopted, diagnostics.link_gap_m, diagnostics.link_range_m,
     diagnostics.link_gap_per_m);
+  {
+    std::string lone;
+    for (const auto & [name, n] : diagnostics.lone_frames) {lone += " frames_" + name + "=" + std::to_string(n);}
+    for (const auto & [name, n] : diagnostics.lone_solves) {lone += " solves_" + name + "=" + std::to_string(n);}
+    for (const auto & [name, n] : diagnostics.tolerance_drops) {lone += " tol_drop_" + name + "=" + std::to_string(n);}
+    for (const auto & [name, n] : diagnostics.lone_by_reason) {lone += " by_" + name + "=" + std::to_string(n);}
+    for (const auto & [name, n] : diagnostics.lone_late_peer) {lone += " late_peer_" + name + "=" + std::to_string(n);}
+    for (const auto & [name, n] : diagnostics.lone_candidate_evicted) {lone += " cand_evicted_" + name + "=" + std::to_string(n);}
+    lone += " ready_rejections=" + std::to_string(diagnostics.ready_rejections);
+    lone += " before_first_pair=" + std::to_string(diagnostics.lone_solves_before_first_pair);
+    for (const auto & e : diagnostics.lone_events) {
+      std::printf("lone_event %.6f %s %s\n", e.stamp, e.camera.c_str(), e.reason.c_str());
+    }
+    std::printf("lone:%s reseeds=%ld first=%.3f\n", lone.c_str(), static_cast<long>(diagnostics.lone_reseeds),
+      diagnostics.first_lone_stamp);
+  }
   if (diagnostics.camera_travel.size() >= 2) {
     const double a = diagnostics.camera_travel[0];
     const double b = diagnostics.camera_travel[1];

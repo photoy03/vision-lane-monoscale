@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace monoscale
@@ -59,16 +60,22 @@ double percentile_90(const Points2 & from, const Points2 & to)
 
 FusionModel fusion_model_from_name(const std::string & name)
 {
+  // Unknown names used to fall through to Displacement, and msckf/msckf6 have
+  // no filter behind them (they ran Velocity): both are refused now (upstream
+  // 2544bf5, D-19).
   if (name == "velocity") {
     return FusionModel::Velocity;
   }
-  if (name == "msckf") {
-    return FusionModel::Msckf;
+  if (name == "displacement") {
+    return FusionModel::Displacement;
   }
-  if (name == "msckf6") {
-    return FusionModel::Msckf6;
+  if (name == "msckf" || name == "msckf6") {
+    throw std::invalid_argument(
+            "fusion_model `" + name + "` is declared but not implemented; "
+            "use `velocity` or `displacement`");
   }
-  return FusionModel::Displacement;
+  throw std::invalid_argument(
+          "unknown fusion_model `" + name + "`; use `velocity` or `displacement`");
 }
 
 struct Estimator::Frame
@@ -136,6 +143,15 @@ struct Estimator::Camera
   // Pixel travel accumulated over the single-frame hops since the last solve,
   // where the near ground is still in view.
   double hop_disparity = 0.0;
+  // Lone-camera solve: another camera solved without this one, so this one's
+  // solve frame is stale and is re-seeded, alone, when it is next paired.
+  bool needs_reseed = false;
+  // The IMU clock when this camera's newest frame arrived (lone-camera silence test).
+  double last_arrival_clock = -1.0;
+  // Capture stamps of the frames that arrived over the last kArrivedWindowSec,
+  // whether still queued, consumed or evicted: the lone tests ask what the
+  // camera *delivered*, and a frame evicted at the queue depth was delivered.
+  std::deque<double> arrived;
 
   // Which column of the shared anchor map this camera writes into.
   int source = 0;
@@ -887,11 +903,44 @@ void Estimator::ingest_tracks(size_t index, const TrackFrame & incoming)
   frame.parallax = incoming.parallax;
   frame.disparity = percentile_90(incoming.previous_pixels, incoming.pixels);
 
-  camera.queue.push_back(std::move(frame));
-  while (static_cast<int>(camera.queue.size()) > settings_.pair_queue_depth) {
-    camera.queue.pop_front();
-    ++diagnostics_.frames_evicted;
+  {
+    const std::string & name = camera.settings.name;
+    auto last = diagnostics_.last_frame_stamp.find(name);
+    if (last != diagnostics_.last_frame_stamp.end() && frame.stamp > last->second) {
+      double & widest = diagnostics_.max_frame_gap_sec[name];
+      widest = std::max(widest, frame.stamp - last->second);
+    }
+    diagnostics_.last_frame_stamp[name] = frame.stamp;
   }
+  camera.last_arrival_clock = imu_yaw_samples_.empty() ? -1.0 : imu_yaw_samples_.back().first;
+  {
+    constexpr double kArrivedWindowSec = 15.0;
+    const double newest = camera.arrived.empty() ? frame.stamp : std::max(camera.arrived.back(), frame.stamp);
+    // Kept sorted; frames arrive in order per camera, so this is an append.
+    camera.arrived.insert(std::upper_bound(camera.arrived.begin(), camera.arrived.end(), frame.stamp), frame.stamp);
+    while (!camera.arrived.empty() && camera.arrived.front() < newest - kArrivedWindowSec) {
+      camera.arrived.pop_front();
+    }
+  }
+  // Misfire check: did this frame land where an earlier lone decision assumed
+  // this camera had nothing? Frames arrive in order per camera, so a check is
+  // settled once a frame at or past its upper end has arrived.
+  for (auto it = lone_checks_.begin(); it != lone_checks_.end();) {
+    if (it->peer != index) {
+      ++it;
+      continue;
+    }
+    if (frame.stamp > it->lower && frame.stamp < it->upper) {
+      ++diagnostics_.lone_late_peer[cameras_[it->lone_camera]->settings.name];
+      it = lone_checks_.erase(it);
+    } else if (frame.stamp >= it->upper) {
+      it = lone_checks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  camera.queue.push_back(std::move(frame));
+  evict(index);
 
   // Drain here as well as on the IMU. Waiting for the next inertial sample
   // costs whatever arrives after the last one -- two pairs at the end of a
@@ -1125,10 +1174,35 @@ void Estimator::try_process_pairs()
     return;
   }
   while (true) {
-    for (const auto & camera : cameras_) {
-      if (camera->queue.empty()) {
-        return;
+    // A head kept as a lone candidate that has since lost the chance goes the
+    // way it would have gone without lone solving: evicted, uncompared.
+    if (settings_.lone_camera_solve_enabled) {
+      for (size_t i = 0; i < count; ++i) {
+        evict(i);
       }
+    }
+    bool empty = false;
+    for (const auto & camera : cameras_) {
+      empty = empty || camera->queue.empty();
+    }
+    if (empty) {
+      // A silent camera blocks every pair. With lone solving on, a frame whose
+      // peer has a hole around it goes alone; otherwise wait, as before.
+      bool consumed = false;
+      if (settings_.lone_camera_solve_enabled && count > 1) {
+        for (size_t i = 0; i < count && !consumed; ++i) {
+          if (!cameras_[i]->queue.empty() && lone_frame(i)) {
+            if (!process_lone(i)) {
+              return;
+            }
+            consumed = true;
+          }
+        }
+      }
+      if (consumed) {
+        continue;
+      }
+      return;
     }
 
     // One frame per camera, picked so their stamps sit closest together. Every
@@ -1176,9 +1250,61 @@ void Estimator::try_process_pairs()
           oldest = i;
         }
       }
+      if (settings_.lone_camera_solve_enabled && lone_frame(oldest)) {
+        if (!process_lone(oldest)) {
+          return;
+        }
+        continue;
+      }
+      double lower = 0.0, upper = 0.0;
+      if (settings_.lone_camera_solve_enabled && sparse_frame(oldest, &lower, &upper)) {
+        if (!process_lone(oldest, "sparse", lower, upper)) {
+          return;
+        }
+        continue;
+      }
       cameras_[oldest]->hop_disparity += cameras_[oldest]->queue.front().disparity;
       cameras_[oldest]->queue.pop_front();
+      ++diagnostics_.tolerance_drops[cameras_[oldest]->settings.name];
       continue;
+    }
+
+    // A pair is chosen; the frames ahead of its picks are about to be absorbed
+    // uncompared. One whose peer has a hole or is sparse around it would have
+    // gone alone had it reached the drop path above, but the peer frame that
+    // proves it arrived together with this pair (observer_eval_C2_5a_fardrop).
+    // The oldest such head goes alone first, the same tests in the same order;
+    // the pair is picked again on the next turn.
+    if (settings_.lone_camera_solve_enabled) {
+      std::optional<size_t> alone;
+      const char * reason = "gap@absorb";
+      double lower = 0.0, upper = 0.0;
+      for (size_t i = 0; i < count; ++i) {
+        if (best_picks[i] == 0) {
+          continue;
+        }
+        if (alone.has_value() &&
+          cameras_[*alone]->queue.front().stamp <= cameras_[i]->queue.front().stamp)
+        {
+          continue;
+        }
+        double lo = 0.0, hi = 0.0;
+        if (lone_frame(i)) {
+          alone = i;
+          reason = "gap@absorb";
+        } else if (sparse_frame(i, &lo, &hi)) {
+          alone = i;
+          reason = "sparse@absorb";
+          lower = lo;
+          upper = hi;
+        }
+      }
+      if (alone.has_value()) {
+        if (!process_lone(*alone, reason, lower, upper)) {
+          return;
+        }
+        continue;
+      }
     }
 
     const double stamp =
@@ -1195,6 +1321,7 @@ void Estimator::try_process_pairs()
     // themselves compared.
     for (size_t i = 0; i < count; ++i) {
       Camera & camera = *cameras_[i];
+      diagnostics_.absorbed_unpaired[camera.settings.name] += static_cast<int64_t>(best_picks[i]);
       for (size_t n = 0; n <= best_picks[i]; ++n) {
         camera.latest = camera.queue.front();
         camera.hop_disparity += camera.queue.front().disparity;
@@ -1209,8 +1336,10 @@ void Estimator::try_process_pairs()
     }
 
     ++diagnostics_.pairs_seen;
+    paired_once_ = true;
     ++frames_since_solve_;
     if (settings_.adaptive_solve_interval && !ready_to_solve()) {
+      ++diagnostics_.ready_rejections;
       continue;
     }
     if (!settings_.adaptive_solve_interval &&
@@ -1220,6 +1349,190 @@ void Estimator::try_process_pairs()
     }
     process_pair();
   }
+}
+
+bool Estimator::lone_frame(size_t index) const
+{
+  const double stamp = cameras_[index]->queue.front().stamp;
+  const double gap = settings_.lone_gap_sec;
+  // The IMU runs continuously and is the only clock the estimator has.
+  const double clock = imu_yaw_samples_.empty() ? stamp : imu_yaw_samples_.back().first;
+  for (size_t other = 0; other < cameras_.size(); ++other) {
+    if (other == index) {
+      continue;
+    }
+    const Camera & peer = *cameras_[other];
+    // Everything the peer delivered counts, evicted frames included.
+    const auto near = std::lower_bound(peer.arrived.begin(), peer.arrived.end(), stamp - gap);
+    if (near != peer.arrived.end() && *near <= stamp + gap) {
+      return false;
+    }
+    const double newest = peer.arrived.empty() ? -1.0 : peer.arrived.back();
+    // Frames arrive in order per camera: once the peer is past the hole no
+    // partner can come. A peer that stopped delivering (nothing arrived for
+    // lone_silence_sec of IMU time) only lets frames after its last one go.
+    const bool silent = peer.last_arrival_clock >= 0.0 &&
+      clock - peer.last_arrival_clock > settings_.lone_silence_sec && stamp > newest + gap;
+    if (!(newest > stamp + gap || silent)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void Estimator::evict(size_t index)
+{
+  // A lone-camera decision needs a frame held until the peer has either moved
+  // past it or gone silent. Only a head that may still go alone (lone_candidate)
+  // is kept past the depth, up to 4x and max(lone_gap, lone_sparse) +
+  // lone_silence + 0.5 s; anything else is evicted exactly as before.
+  Camera & camera = *cameras_[index];
+  const double retention = std::max(settings_.lone_gap_sec, settings_.lone_sparse_sec) +
+    settings_.lone_silence_sec + 0.5;
+  while (static_cast<int>(camera.queue.size()) > settings_.pair_queue_depth) {
+    const bool candidate = settings_.lone_camera_solve_enabled && lone_candidate(index);
+    if (candidate && static_cast<int>(camera.queue.size()) <= 4 * settings_.pair_queue_depth &&
+      camera.queue.back().stamp - camera.queue.front().stamp < retention)
+    {
+      break;
+    }
+    if (candidate) {
+      ++diagnostics_.lone_candidate_evicted[camera.settings.name];
+    }
+    camera.queue.pop_front();
+    ++diagnostics_.frames_evicted;
+  }
+}
+
+namespace
+{
+// The peer's delivered frames around `stamp`: the last at or before it and
+// the first after it, when they have arrived.
+void bracket(const std::deque<double> & arrived, double stamp, std::optional<double> * p0, std::optional<double> * p1)
+{
+  const auto after = std::upper_bound(arrived.begin(), arrived.end(), stamp);
+  if (after != arrived.end()) {
+    *p1 = *after;
+  }
+  if (after != arrived.begin()) {
+    *p0 = *std::prev(after);
+  }
+}
+}  // namespace
+
+bool Estimator::sparse_frame(size_t index, double * lower, double * upper) const
+{
+  const double stamp = cameras_[index]->queue.front().stamp;
+  double lo = -std::numeric_limits<double>::infinity();
+  double hi = std::numeric_limits<double>::infinity();
+  for (size_t other = 0; other < cameras_.size(); ++other) {
+    if (other == index) {
+      continue;
+    }
+    // p0: the peer's last frame before this one, p1: its first after. Both
+    // must have arrived; a missing p1 is a hole, not sparseness.
+    std::optional<double> p0, p1;
+    bracket(cameras_[other]->arrived, stamp, &p0, &p1);
+    if (!p0.has_value() || !p1.has_value() || *p1 - *p0 <= settings_.lone_sparse_sec ||
+      stamp - *p0 <= settings_.sync_tolerance_sec || *p1 - stamp <= settings_.sync_tolerance_sec)
+    {
+      return false;
+    }
+    lo = std::max(lo, *p0);
+    hi = std::min(hi, *p1);
+  }
+  *lower = lo;
+  *upper = hi;
+  return std::isfinite(lo) && std::isfinite(hi);
+}
+
+bool Estimator::lone_candidate(size_t index) const
+{
+  // No peer frame delivered within sync tolerance of the head, and the peer
+  // has not yet shown a frame after it that closes a bracket of lone_sparse_sec
+  // or less with no hole of lone_gap_sec (then the head can only be dropped,
+  // as before).
+  const double head = cameras_[index]->queue.front().stamp;
+  for (size_t other = 0; other < cameras_.size(); ++other) {
+    if (other == index) {
+      continue;
+    }
+    std::optional<double> p0, p1;
+    bracket(cameras_[other]->arrived, head, &p0, &p1);
+    if ((p0.has_value() && head - *p0 <= settings_.sync_tolerance_sec) ||
+      (p1.has_value() && *p1 - head <= settings_.sync_tolerance_sec))
+    {
+      return false;
+    }
+    if (p1.has_value()) {
+      const bool sparse = !p0.has_value() || *p1 - *p0 > settings_.lone_sparse_sec;
+      const bool gap = *p1 - head > settings_.lone_gap_sec &&
+        (!p0.has_value() || head - *p0 > settings_.lone_gap_sec);
+      if (!sparse && !gap) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool Estimator::process_lone(size_t index, const char * reason, double lower, double upper)
+{
+  Camera & camera = *cameras_[index];
+  if (imu_still_arriving(camera.queue.front().stamp)) {
+    return false;
+  }
+  {
+    // Remember what this decision assumed so a later peer frame can prove it wrong.
+    const double stamp = camera.queue.front().stamp;
+    const bool sparse = std::string(reason).rfind("sparse", 0) == 0;
+    for (size_t other = 0; other < cameras_.size(); ++other) {
+      if (other == index) {
+        continue;
+      }
+      if (lone_checks_.size() >= 256) {
+        lone_checks_.erase(lone_checks_.begin());
+      }
+      lone_checks_.push_back(sparse ?
+        LoneCheck{index, other, lower, upper} :
+        LoneCheck{index, other, stamp - settings_.lone_gap_sec - 1e-9, stamp + settings_.lone_gap_sec + 1e-9});
+    }
+    ++diagnostics_.lone_by_reason[reason];
+    if (diagnostics_.lone_events.size() < 4000) {
+      diagnostics_.lone_events.push_back({stamp, camera.settings.name, reason});
+    }
+  }
+  camera.latest = camera.queue.front();
+  camera.hop_disparity += camera.queue.front().disparity;
+  camera.queue.pop_front();
+  camera.track_pixels = camera.latest->pixels;
+  camera.track_ids = camera.latest->ids;
+  camera.track_clarity = camera.latest->clarity;
+  camera.track_parallax = camera.latest->parallax;
+  ++diagnostics_.lone_frames[camera.settings.name];
+  if (diagnostics_.first_lone_stamp == 0.0) {
+    diagnostics_.first_lone_stamp = camera.latest->stamp;
+  }
+  ++frames_since_solve_;
+  // The cameras left out now hold a solve frame older than what this one solves
+  // across; each is re-seeded on its own when it is next paired.
+  for (size_t other = 0; other < cameras_.size(); ++other) {
+    if (other != index && cameras_[other]->solve_frame.has_value()) {
+      cameras_[other]->needs_reseed = true;
+    }
+  }
+  if (settings_.adaptive_solve_interval && !ready_to_solve()) {
+    ++diagnostics_.ready_rejections;
+    return true;
+  }
+  std::vector<bool> participants(cameras_.size(), false);
+  participants[index] = true;
+  ++diagnostics_.lone_solves[camera.settings.name];
+  if (!paired_once_) {
+    ++diagnostics_.lone_solves_before_first_pair;
+  }
+  process_pair(&participants);
+  return true;
 }
 
 bool Estimator::ready_to_solve() const
@@ -2282,24 +2595,69 @@ std::optional<Estimator::Solved> Estimator::solve_camera(
 }
 
 
-void Estimator::process_pair()
+void Estimator::process_pair(const std::vector<bool> * participants)
 {
   const size_t count = cameras_.size();
+  // Which cameras solve this update. Everyone, unless lone solving is on: then
+  // only the participants, minus a camera coming back from a hole, which is
+  // re-seeded alone here (its solve frame predates what the others solved).
+  std::vector<bool> solving(count, true);
+  if (settings_.lone_camera_solve_enabled) {
+    for (size_t i = 0; i < count; ++i) {
+      Camera & camera = *cameras_[i];
+      if (participants != nullptr && !(*participants)[i]) {
+        solving[i] = false;
+      } else if (camera.needs_reseed && camera.solve_frame.has_value()) {
+        remember_solve_pixels(camera);
+        camera.needs_reseed = false;
+        ++diagnostics_.lone_reseeds;
+        solving[i] = false;
+      }
+    }
+    if (std::none_of(solving.begin(), solving.end(), [](bool b) {return b;})) {
+      // Everyone here was re-seeded: nothing to solve across, hold.
+      double stamp = 0.0;
+      size_t used = 0;
+      for (size_t i = 0; i < count; ++i) {
+        if (participants == nullptr || (*participants)[i]) {
+          stamp += cameras_[i]->latest->stamp;
+          ++used;
+        }
+      }
+      frames_since_solve_ = 0;
+      Update update;
+      update.stamp = stamp / static_cast<double>(std::max<size_t>(used, 1));
+      update.pose = pose_;
+      update.pose_valid = !settings_.suppress_pose_until_map_ready || map_ready_;
+      pending_updates_.push_back(std::move(update));
+      return;
+    }
+  }
+  size_t solving_count = 0;
+  for (size_t i = 0; i < count; ++i) {
+    solving_count += solving[i] ? 1 : 0;
+  }
   // The frames are aligned to within the sync tolerance, so their mean is the
   // time the set describes.
   double current_stamp = 0.0;
   bool seeded = true;
-  for (const auto & camera : cameras_) {
+  for (size_t i = 0; i < count; ++i) {
+    if (!solving[i]) {
+      continue;
+    }
+    const auto & camera = cameras_[i];
     current_stamp += camera->latest->stamp;
     if (!camera->solve_frame.has_value()) {
       seeded = false;
     }
   }
-  current_stamp /= static_cast<double>(count);
+  current_stamp /= static_cast<double>(solving_count);
 
   if (!seeded) {
-    for (auto & camera : cameras_) {
-      remember_solve_pixels(*camera);
+    for (size_t i = 0; i < count; ++i) {
+      if (solving[i]) {
+        remember_solve_pixels(*cameras_[i]);
+      }
     }
     Update update;
     update.stamp = current_stamp;
@@ -2312,10 +2670,12 @@ void Estimator::process_pair()
   // The interval a solve spans, not the gap to the frame before it: tracking
   // runs every frame while the solve stands further back.
   double previous_stamp = 0.0;
-  for (const auto & camera : cameras_) {
-    previous_stamp += camera->solve_frame->stamp;
+  for (size_t i = 0; i < count; ++i) {
+    if (solving[i]) {
+      previous_stamp += cameras_[i]->solve_frame->stamp;
+    }
   }
-  previous_stamp /= static_cast<double>(count);
+  previous_stamp /= static_cast<double>(solving_count);
   const double dt = current_stamp - previous_stamp;
 
   std::optional<double> yaw_delta;
@@ -2339,8 +2699,11 @@ void Estimator::process_pair()
         !previous_yaw.has_value() && !imu_yaw_samples_.empty() &&
         previous_stamp + settings_.imu_max_age_sec < imu_yaw_samples_.front().first;
       if (reference_expired) {
-        for (auto & camera : cameras_) {
-          remember_solve_pixels(*camera);
+        // Only the cameras solving now: one kept solving alone has a fresh reference.
+        for (size_t i = 0; i < count; ++i) {
+          if (solving[i]) {
+            remember_solve_pixels(*cameras_[i]);
+          }
         }
         frames_since_solve_ = 0;
         ++diagnostics_.imu_yaw_resyncs;
@@ -2387,6 +2750,9 @@ void Estimator::process_pair()
   std::vector<std::optional<Solved>> solved(count);
   if (imu_available) {
     for (size_t i = 0; i < count; ++i) {
+      if (!solving[i]) {
+        continue;
+      }
       // Each camera sees a slightly different time interval. Use its own IMU
       // yaw across the held and current frames for the visual ground solve.
       // The mean-interval yaw above still updates the shared body heading.
@@ -2600,6 +2966,37 @@ void Estimator::process_pair()
       motion->x = combined->x;
       motion->y = combined->y;
       motion->inliers = combined->count;
+    }
+  }
+
+  // Shadow (docs/C2_CRITERIA_KO.md 7.2-5): what each camera alone said
+  // against what the pair settled on, and lone failures. Read only.
+  if (motion.has_value() && motions.size() >= 2) {
+    for (size_t i = 0; i < count; ++i) {
+      if (!solving[i]) {
+        continue;
+      }
+      const std::string & name = cameras_[i]->settings.name;
+      ++diagnostics_.shadow_pairs[name];
+      if (!solved[i].has_value() || !solved[i]->motion.has_value()) {
+        ++diagnostics_.shadow_failures[name];
+        continue;
+      }
+      auto & hops = diagnostics_.shadow_hop_diff_m[name];
+      auto & yaws = diagnostics_.shadow_yaw_diff_rad[name];
+      if (hops.size() < 20000) {
+        hops.push_back(std::hypot(solved[i]->motion->x - motion->x, solved[i]->motion->y - motion->y));
+        yaws.push_back(std::abs(std::remainder(solved[i]->motion->yaw - motion->yaw, 2.0 * M_PI)));
+      }
+    }
+  } else if (motion.has_value() && motions.size() == 1 && solving_count >= 2) {
+    for (size_t i = 0; i < count; ++i) {
+      if (solving[i] && (!solved[i].has_value() || !solved[i]->motion.has_value())) {
+        ++diagnostics_.shadow_failures[cameras_[i]->settings.name];
+      }
+      if (solving[i]) {
+        ++diagnostics_.shadow_pairs[cameras_[i]->settings.name];
+      }
     }
   }
 
@@ -3445,6 +3842,11 @@ void Estimator::process_pair()
 
   Update update;
   update.stamp = current_stamp;
+  for (size_t i = 0; i < count; ++i) {
+    if (solved[i].has_value() && solved[i]->motion.has_value()) {
+      update.solved_by += (update.solved_by.empty() ? "" : ",") + cameras_[i]->settings.name;
+    }
+  }
   update.previous_stamp = previous_stamp;
   update.hops_valid = last_hops_valid_;
   update.fused_hop = last_fused_hop_;

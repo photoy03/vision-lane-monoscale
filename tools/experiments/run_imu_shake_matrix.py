@@ -173,7 +173,7 @@ def main() -> int:
                     result = subprocess.run(command, cwd=repo, check=False)
                     if result.returncode:
                         raise ValueError(f"trial {name} failed with exit {result.returncode}; matrix stopped")
-                    evaluator = [sys.executable, str(repo / "tools/eval/evaluate_recovery_trial.py"), str(folder)]
+                    evaluator = [sys.executable, str(repo / "tools/eval/metrics/evaluate_recovery_trial.py"), str(folder)]
                     result = subprocess.run(evaluator, cwd=repo, check=False)
                     if result.returncode:
                         raise ValueError(f"trial {name} evaluation failed: {result.returncode}")

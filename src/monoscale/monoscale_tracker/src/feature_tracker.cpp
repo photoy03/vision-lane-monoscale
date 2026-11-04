@@ -34,6 +34,7 @@
 // a silent geometry error out of a configuration mismatch.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -45,6 +46,7 @@
 #include <mutex>
 #include <memory>
 #include <string>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -54,6 +56,7 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
@@ -63,12 +66,28 @@
 #include <rosbag2_cpp/writer.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <monoscale_tracker/gyro_rotation.hpp>
+#include "vision_lane_interfaces/compressed_input.hpp"
 
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/cudaoptflow.hpp>
 #include <opencv2/cudawarping.hpp>
 #include <opencv2/cudaimgproc.hpp>
+#include <opencv2/cudaarithm.hpp>
+#endif
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+namespace monoscale_tracker_gpu
+{
+// src/road_warp.cu: K lattices -> K float region patches of `previous` (device).
+void warp_patches(
+  const cv::cuda::GpuMat & previous, const std::vector<cv::Mat> & lattices,
+  const cv::Size & region, bool cubic, std::vector<cv::Mat> & patches);
+// v2: K candidates' and the target's sums and cross sums, all computed on the device.
+void gram_patches(
+  const cv::cuda::GpuMat & previous, const cv::cuda::GpuMat & current, const cv::Rect & roi,
+  int cols, int rows, bool cubic, const double lens[5], const std::vector<double> & inverses,
+  std::vector<double> & sums, std::vector<double> & cross);
+}  // namespace monoscale_tracker_gpu
 #endif
 
 namespace
@@ -574,6 +593,19 @@ struct RoadSolve
   double sample_inflation = 1.0;
 };
 
+// road_step_bracket_escape: what the search is given and what it did.
+struct RoadEscape
+{
+  std::deque<double> recent;  // in: the last fine-pass scores
+  int reason = 0;             // out: 0 none, 1 bracket edge, 2 score drop
+  int extensions = 0;
+  bool adopted = false;
+  double old_found = 0.0;
+  double old_score = 0.0;
+  double new_found = 0.0;
+  double new_score = 0.0;
+};
+
 struct TrackState
 {
   cv::Mat previous_gray;
@@ -652,6 +684,8 @@ struct TrackState
   // there have been two answers to compare, which is what tells the search to
   // keep its fixed width.
   double road_predict_error = -1.0;
+  // The last fine-pass scores, for road_step_bracket_escape's score condition.
+  std::deque<double> road_recent_scores;
   // How many frames in a row the mirrored bracket has scored higher. The sign
   // only changes when this reaches the threshold; a single frame is noise.
   int road_reverse_votes = 0;
@@ -1063,6 +1097,41 @@ public:
         "use_cuda asked for, but this OpenCV has no cudaoptflow; staying on the CPU");
 #endif
     }
+    // The photometric road-step search on the GPU (2026-10-23, option): the candidate
+    // warp's resize and remap and the five ZNCC sums run there; the lattice stays on the
+    // CPU. Only with the GPU flow active, and only for the path the vehicle runs (lattice
+    // warp, no visibility mask, one tile); anything else stays on the CPU. Not
+    // bit-identical to the CPU path (GPU interpolation).
+    road_step_gpu_ = declare_parameter<bool>("road_step_gpu", false);
+    // v2 on top of road_step_gpu: the products' sums computed on the device too, so a
+    // search pass or a fit iteration costs one round trip of a few dozen numbers.
+    road_step_gpu_gram_ = declare_parameter<bool>("road_step_gpu_gram", false);
+    if (road_step_gpu_ && !cuda_active_) {
+      RCLCPP_WARN(get_logger(), "road_step_gpu needs use_cuda with a CUDA OpenCV; staying on the CPU");
+      road_step_gpu_ = false;
+    }
+    road_step_gpu_gram_ = road_step_gpu_gram_ && road_step_gpu_;
+    // Stage 2 (observer_eval_ROAD2): both off by default, so the default path is unchanged.
+    //
+    // A frame whose decode was cut short arrives with its bottom rows filled with grey
+    // 128 (the decoder's fill for missing MCUs; the recorder re-encodes it, so the JPEG
+    // still ends in EOI and only the pixels show it). Measured on 0924-0928: 14 such
+    // frames, all on the front camera of 0926 and 0928, and nothing else matches. One of
+    // them, the first frame of 0928, put the road step at 0.70 m and the bracket held it
+    // there for 6 s (7 m of motion while standing). With the guard the frame is dropped
+    // as if it never arrived: the next one is measured over the longer hop.
+    // Default true since 2026-10-24 (observer_eval_ROAD3): bit-identical on bags without
+    // such frames (0924, 0925), 0928's 7 m startup phantom gone. Roll back with
+    // road_step_frame_guard:=false (launch: tracker_road_step_frame_guard:=false).
+    road_step_frame_guard_ = declare_parameter<bool>("road_step_frame_guard", true);
+    // When the search's best candidate sits on the bracket's edge, or its score falls
+    // well below the recent ones, the true peak may be outside the bracket: scan up to
+    // three more bracket widths on that side and take the result only if it scores
+    // better by road_step_escape_margin. Never toward zero past 5% of the bracket
+    // centre, so the zero-mode rule stands; a bracket already at that floor is not an
+    // edge. An adopted answer resets the bracket instead of being smoothed into it.
+    road_step_bracket_escape_ = declare_parameter<bool>("road_step_bracket_escape", false);
+    road_step_escape_margin_ = declare_parameter<double>("road_step_escape_margin", 0.01);
     // Fraction of the image, measured from the top, to leave out of feature
     // detection. The estimator keeps only what projects onto the ground
     // between ground_min_distance_m and ground_max_distance_m, so anything
@@ -1205,6 +1274,16 @@ public:
 
     camera_names_ = cameras;
     image_topics_ = topics;
+    // Image-input experiment (2026-10-22): receive each camera's JPEG and decode it here
+    // instead of the raw frame a republisher decoded. Empty (the default) = raw topics.
+    const auto compressed_topics = declare_parameter<std::vector<std::string>>(
+      "compressed_image_topics", std::vector<std::string>{});
+    compressed_decode_ = declare_parameter<std::string>("compressed_decode", "color");
+    if (!compressed_topics.empty() &&
+      (compressed_topics.size() != cameras.size() || !compressed_input::valid_mode(compressed_decode_)))
+    {
+      throw std::runtime_error("compressed_image_topics must match cameras; compressed_decode color|gray");
+    }
     for (size_t index = 0; index < cameras.size(); ++index) {
       const std::string & name = cameras[index];
       states_[name].target = max_features_;
@@ -1226,6 +1305,20 @@ public:
         create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive));
       rclcpp::SubscriptionOptions options;
       options.callback_group = groups_.back();
+      if (!compressed_topics.empty()) {
+        decode_stats_[name];
+        compressed_subscriptions_.push_back(
+          create_subscription<sensor_msgs::msg::CompressedImage>(
+            compressed_topics[index], input_qos,
+            [this, name](sensor_msgs::msg::CompressedImage::ConstSharedPtr message) {
+              onCompressed(name, *message);
+            },
+            options));
+        RCLCPP_INFO(
+          get_logger(), "tracking %s on %s (compressed, decode %s)", name.c_str(),
+          compressed_topics[index].c_str(), compressed_decode_.c_str());
+        continue;
+      }
       subscriptions_.push_back(
         create_subscription<sensor_msgs::msg::Image>(
           topics[index], input_qos,
@@ -1442,6 +1535,31 @@ public:
   }
 
 private:
+  // The JPEG decoded as the raw republisher would (color) or straight to gray, wrapped in
+  // the Image the raw path takes. Per camera: its own callback group, so its own stats.
+  void onCompressed(const std::string & name, const sensor_msgs::msg::CompressedImage & message)
+  {
+    auto & stats = decode_stats_.at(name);  // inserted for every camera in the constructor
+    const auto start = std::chrono::steady_clock::now();
+    const cv::Mat decoded = compressed_input::decode(message.data, compressed_decode_);
+    if (decoded.empty()) {
+      ++stats.failures;
+      return;
+    }
+    sensor_msgs::msg::Image image;
+    image.header = message.header;
+    image.height = static_cast<uint32_t>(decoded.rows);
+    image.width = static_cast<uint32_t>(decoded.cols);
+    image.encoding = decoded.channels() == 1 ? "mono8" : "bgr8";
+    image.step = static_cast<uint32_t>(decoded.cols * decoded.elemSize());
+    const auto * begin = decoded.ptr<uint8_t>(0);
+    image.data.assign(begin, begin + static_cast<size_t>(image.step) * image.height);
+    stats.add(compressed_input::ms_since(start));
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000, "compressed_decode %s: %s",
+      name.c_str(), stats.summary().c_str());
+    onImage(name, image);
+  }
+
   void onImage(const std::string & name, const sensor_msgs::msg::Image & message)
   {
     const bool diagnostics_enabled = static_cast<bool>(diagnostics_csv_);
@@ -1484,6 +1602,20 @@ private:
         0, 0, cv::INTER_AREA);
     }
     stage.scale = lap();
+    if (road_step_frame_guard_ && truncated_decode(gray)) {
+      const long count = ++frames_rejected_broken_;
+      RCLCPP_WARN(get_logger(), "frames_rejected_broken=%ld: %s frame at %.3f has a truncated decode",
+        count, name.c_str(), rclcpp::Time(message.header.stamp).seconds());
+      return;
+    }
+    // Evaluation only, off unless the variable is set: perturb the frame by a small
+    // gain, sensor noise and a sub-pixel shift, drawn per frame from the frame's stamp
+    // and a seed, so a rerun with another seed asks how far the answers move under
+    // changes no camera could tell apart. MONOSCALE_INPUT_PERTURB="seed=1,gain=0.02,
+    // noise=1.0,shift=0.25" (relative gain, grey levels, pixels; each a +- bound or sigma).
+    if (const char * perturb = std::getenv("MONOSCALE_INPUT_PERTURB")) {
+      perturb_frame(perturb, name, message.header.stamp, gray);
+    }
 
     TrackState & state = states_[name];
     std::vector<cv::Mat> pyramid;
@@ -1666,16 +1798,44 @@ private:
     // Built with `homography(s)` and not its inverse: `road_patch` maps a
     // current pixel to its source in the previous frame with H^-1, so the
     // frame that makes that exact is the current one sampled through H.
+    //
+    // Optional, for a known-answer test on recorded scenes (see
+    // tools/eval/diagnostics/road_selfcheck.py): MONOSCALE_SYNTHETIC_JITTER varies the
+    // step smoothly by up to that fraction, MONOSCALE_SYNTHETIC_PITCH / _ROLL add a
+    // tilt (rad) and _TILT_JITTER a per-frame +- on both, _GAIN and _NOISE change the
+    // synthetic frame's brightness (+- fraction) and add sensor noise (grey sigma), and
+    // MONOSCALE_SYNTHETIC_LOG writes the truth next to what the fit returned.
+    SyntheticTruth synthetic_truth;
     if (const char * synthetic = std::getenv("MONOSCALE_SYNTHETIC_STEP")) {
       const auto found = models_.find(name);
       if (found != models_.end() && found->second.ready && !gray.empty()) {
-        const double truth = std::atof(synthetic);
-        const char * spin = std::getenv("MONOSCALE_SYNTHETIC_TURN");
-        const double truth_turn = spin != nullptr ? std::atof(spin) : 0.0;
-        const char * sideways = std::getenv("MONOSCALE_SYNTHETIC_SLIDE");
-        const double truth_slide = sideways != nullptr ? std::atof(sideways) : 0.0;
-        const cv::Matx33d forward =
-          found->second.homography(truth, truth_turn, 0.0, 0.0, arc_hop_, truth_slide);
+        const auto number = [](const char * key, double fallback) {
+            const char * value = std::getenv(key);
+            return value != nullptr ? std::atof(value) : fallback;
+          };
+        cv::RNG draw(frame_seed(name, message.header.stamp, 0x5e7u));
+        // A real step changes smoothly, and the search brackets the last answer, so the
+        // variation is a slow sine over the stamp (period _PERIOD s, default 8) plus an
+        // optional independent per-frame part (_RANDOM, +- fraction).
+        const double jitter = number("MONOSCALE_SYNTHETIC_JITTER", 0.0);
+        const double period = std::max(number("MONOSCALE_SYNTHETIC_PERIOD", 8.0), 1e-3);
+        const double phase = 2.0 * CV_PI * std::fmod(
+          static_cast<double>(message.header.stamp.sec % 100000) +
+          message.header.stamp.nanosec * 1e-9, period) / period;
+        // Per nominal frame interval, so a hop over a dropped frame is longer the way a
+        // real one would be (`reach` is that hop's length in intervals).
+        const double truth = std::atof(synthetic) * reach * (1.0 + jitter * std::sin(phase) +
+          number("MONOSCALE_SYNTHETIC_RANDOM", 0.0) * draw.uniform(-1.0, 1.0));
+        const double truth_turn = number("MONOSCALE_SYNTHETIC_TURN", 0.0);
+        const double truth_slide = number("MONOSCALE_SYNTHETIC_SLIDE", 0.0);
+        const double tilt_jitter = number("MONOSCALE_SYNTHETIC_TILT_JITTER", 0.0);
+        const double truth_pitch =
+          number("MONOSCALE_SYNTHETIC_PITCH", 0.0) + tilt_jitter * draw.uniform(-1.0, 1.0);
+        const double truth_roll =
+          number("MONOSCALE_SYNTHETIC_ROLL", 0.0) + tilt_jitter * draw.uniform(-1.0, 1.0);
+        synthetic_truth = {true, truth, truth_turn, truth_pitch, truth_roll};
+        const cv::Matx33d forward = found->second.homography(
+          truth, truth_turn, truth_pitch, truth_roll, arc_hop_, truth_slide);
         cv::Mat mx(gray.rows, gray.cols, CV_32F);
         cv::Mat my(gray.rows, gray.cols, CV_32F);
         for (int y = 0; y < gray.rows; ++y) {
@@ -1691,6 +1851,18 @@ private:
           }
         }
         cv::remap(gray, state.previous_gray, mx, my, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+        const double gain = 1.0 + number("MONOSCALE_SYNTHETIC_GAIN", 0.0) * draw.uniform(-1.0, 1.0);
+        const double noise = number("MONOSCALE_SYNTHETIC_NOISE", 0.0);
+        if (gain != 1.0 || noise > 0.0) {
+          cv::Mat grey;
+          state.previous_gray.convertTo(grey, CV_32F, gain);
+          if (noise > 0.0) {
+            cv::Mat sensor(grey.size(), CV_32F);
+            draw.fill(sensor, cv::RNG::NORMAL, 0.0, noise);
+            grey += sensor;
+          }
+          grey.convertTo(state.previous_gray, CV_8U);
+        }
         turn = truth_turn;
         turn_known = true;
       }
@@ -1703,10 +1875,24 @@ private:
         const bool held = std::isfinite(state.road_bracket);
         double peak = 0.0;
         double spread = 0.0;
+        RoadEscape escape;
+        if (road_step_bracket_escape_) {
+          escape.recent = state.road_recent_scores;
+        }
         const double found = measure_step_photometric(
           model->second, state.previous_gray, gray, turn, reach,
           held ? state.road_bracket : 0.0, held, band_for(name),
-          state.road_predict_error, &state.road_reverse_votes, &peak, &spread);
+          state.road_predict_error, &state.road_reverse_votes, &peak, &spread,
+          road_step_bracket_escape_ ? &escape : nullptr);
+        if (road_step_bracket_escape_ && std::isfinite(found)) {
+          state.road_recent_scores.push_back(peak);
+          if (state.road_recent_scores.size() > 20) {
+            state.road_recent_scores.pop_front();
+          }
+          if (escape.reason != 0) {
+            log_escape(name, stamp, reach, escape);
+          }
+        }
         state.road_score = peak;
         state.road_spread = spread;
         if (road_step_calibrate_ && std::isfinite(found)) {
@@ -1789,6 +1975,29 @@ private:
         } else {
           state.parallax.clear();
         }
+        if (synthetic_truth.on) {
+          if (const char * path = std::getenv("MONOSCALE_SYNTHETIC_LOG")) {
+            const double span = std::max(reach, 1e-3);
+            std::lock_guard<std::mutex> guard(road_step_lock_);
+            if (synthetic_file_ == nullptr) {
+              synthetic_file_ = std::fopen(path, "w");
+              if (synthetic_file_ != nullptr) {
+                std::fprintf(
+                  synthetic_file_,
+                  "stamp,camera,truth_step,truth_turn,truth_pitch,truth_roll,search_step,"
+                  "answer_step,esm_ok,esm_pitch,esm_roll,score,reach\n");
+              }
+            }
+            if (synthetic_file_ != nullptr) {
+              std::fprintf(
+                synthetic_file_, "%.6f,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%.6f,%.6f,%.5f,%.4f\n",
+                stamp, name.c_str(), synthetic_truth.step, synthetic_truth.turn,
+                synthetic_truth.pitch, synthetic_truth.roll, found * span, answer * span,
+                state.road_esm.ok ? 1 : 0, state.road_esm.pitch, state.road_esm.roll, peak, reach);
+              std::fflush(synthetic_file_);
+            }
+          }
+        }
         if (std::isfinite(answer)) {
           // Two values, deliberately. The smoothed one brackets the next
           // frame's search, because a bracket wants the best guess available.
@@ -1819,7 +2028,7 @@ private:
             }
           }
           state.road_step = answer;
-          state.road_bracket = std::isfinite(state.road_bracket)
+          state.road_bracket = std::isfinite(state.road_bracket) && !escape.adopted
             ? state.road_bracket + 0.7 * (answer - state.road_bracket) : answer;
         }
       }
@@ -2118,7 +2327,7 @@ private:
       << milliseconds(stage.detect) << ',' << milliseconds(stage.publish) << ','
       << total_ms << ',' << held << ',' << followed << ',' << stats.raw << ','
       << stats.lost << ',' << stats.noisy << ',' << stats.drifted << ','
-      << road_step_m << ',' << road_score << '\n';
+      << std::setprecision(6) << road_step_m << ',' << std::setprecision(4) << road_score << '\n';
     if (sequence % 128 == 0) {
       diagnostics_csv_.flush();
     }
@@ -3064,6 +3273,188 @@ private:
     return cv::Matx33d(c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c);
   }
 
+  // The source position of every lattice point for one candidate: build_warp_roi without
+  // the stretch (CV_32FC2, the same lattice cv::resize would read).
+  void road_lattice(
+    const GroundModel & model, const double * candidate, int width, int height,
+    const cv::Rect & roi, int stride, cv::Mat & out) const
+  {
+    const cv::Matx33d inverse =
+      model.homography(candidate[0], candidate[1], candidate[2], candidate[3], arc_hop_).inv();
+    const int cols = std::max(roi.width / std::max(stride, 1), 2);
+    const int rows = std::max(roi.height / std::max(stride, 1), 2);
+    out.create(rows, cols, CV_32FC2);
+    const cv::Mat & lattice = warp_lattice(model, roi, width, height, cols, rows);
+    for (int r = 0; r < rows; ++r) {
+      const cv::Vec3d * ray = lattice.ptr<cv::Vec3d>(r);
+      cv::Vec2f * dst = out.ptr<cv::Vec2f>(r);
+      for (int c = 0; c < cols; ++c) {
+        const cv::Point2f p = model.pixel(inverse * ray[c], width, height);
+        dst[c] = cv::Vec2f(p.x, p.y);
+      }
+    }
+  }
+
+  // The previous frame on the device for one search or fit (road_step_gpu). Per thread:
+  // the two cameras run on their own executor threads.
+  struct RoadGpu
+  {
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+    cv::cuda::GpuMat previous;
+    cv::cuda::GpuMat current;  // only with road_step_gpu_gram
+#endif
+    int width = 0;
+    int height = 0;
+  };
+
+  // Uploads `previous` and returns the handle, or nullptr when the GPU path does not
+  // apply (option off, no kernel built, not an 8-bit frame).
+  RoadGpu * road_gpu_for(const cv::Mat & previous, const cv::Mat & current = cv::Mat()) const
+  {
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+    if (!road_step_gpu_ || previous.type() != CV_8UC1) {return nullptr;}
+    thread_local RoadGpu gpu;
+    gpu.previous.upload(previous);
+    if (road_step_gpu_gram_ && !current.empty()) {gpu.current.upload(current);}
+    gpu.width = previous.cols;
+    gpu.height = previous.rows;
+    return &gpu;
+#else
+    (void)previous;
+    (void)current;
+    return nullptr;
+#endif
+  }
+
+  // v2 results: sums and cross sums of K candidates (indices 0..K-1) and the target (K).
+  struct RoadGram
+  {
+    int m = 0;
+    double n = 0.0;
+    std::vector<double> s;
+    std::vector<double> c;
+    double centred(int i, int j) const
+    {
+      return c[static_cast<size_t>(i) * m + j] - s[static_cast<size_t>(i)] * s[static_cast<size_t>(j)] / n;
+    }
+    // normalise()'s rule: a norm above 1e-9 and at least 32 pixels.
+    bool usable(int i) const {return n >= 32.0 && centred(i, i) > 1e-18;}
+    // The dot product of the two normalised (zero mean, unit norm) patches.
+    double rho(int i, int j) const
+    {
+      const double v = centred(i, i) * centred(j, j);
+      return v > 0.0 ? centred(i, j) / std::sqrt(v) : 0.0;
+    }
+  };
+
+  // The candidates (step, yaw, pitch, roll; optionally each its own model) against
+  // current(roi), one device round trip. Needs gpu->current.
+  RoadGram road_gram(
+    const GroundModel & model, RoadGpu & gpu, const cv::Rect & roi, int stride,
+    const std::vector<std::array<double, 4>> & candidates,
+    const std::vector<const GroundModel *> & models = {}) const
+  {
+    RoadGram g;
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+    std::vector<double> inverses;
+    inverses.reserve(candidates.size() * 9);
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      const GroundModel & use = models.empty() ? model : *models[i];
+      const cv::Matx33d inverse = use.homography(
+        candidates[i][0], candidates[i][1], candidates[i][2], candidates[i][3], arc_hop_).inv();
+      for (int r = 0; r < 3; ++r) {for (int c = 0; c < 3; ++c) {inverses.push_back(inverse(r, c));}}
+    }
+    double lens[5];
+    model.scaled(gpu.width, gpu.height, lens[0], lens[1], lens[2], lens[3]);
+    lens[4] = model.equidistant ? 1.0 : 0.0;
+    const int cols = std::max(roi.width / std::max(stride, 1), 2);
+    const int rows = std::max(roi.height / std::max(stride, 1), 2);
+    monoscale_tracker_gpu::gram_patches(
+      gpu.previous, gpu.current, roi, cols, rows, road_step_cubic_map_, lens, inverses, g.s, g.c);
+    g.m = static_cast<int>(candidates.size()) + 1;
+    g.n = static_cast<double>(roi.width) * roi.height;
+    patch_warps_ += static_cast<long>(candidates.size());
+#else
+    (void)model; (void)gpu; (void)roi; (void)stride; (void)candidates; (void)models;
+#endif
+    return g;
+  }
+
+  // K candidates' warped regions (float) in one kernel call.
+  void road_warps_gpu(
+    const GroundModel & model, RoadGpu & gpu, const cv::Rect & roi, int stride,
+    const std::vector<std::array<double, 4>> & candidates, std::vector<cv::Mat> & out) const
+  {
+#ifdef MONOSCALE_TRACKER_ROAD_WARP_CUDA
+    thread_local std::vector<cv::Mat> lattices;
+    thread_local compressed_input::DecodeStats lattice_ms, kernel_ms;
+    auto t0 = std::chrono::steady_clock::now();
+    lattices.resize(candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      road_lattice(model, candidates[i].data(), gpu.width, gpu.height, roi, stride, lattices[i]);
+    }
+    lattice_ms.add(compressed_input::ms_since(t0));
+    t0 = std::chrono::steady_clock::now();
+    monoscale_tracker_gpu::warp_patches(gpu.previous, lattices, roi.size(), road_step_cubic_map_, out);
+    kernel_ms.add(compressed_input::ms_since(t0));
+    // MONOSCALE_ROAD_GPU_CHECK=1: the CPU warp of the first candidate beside the GPU's
+    // (diagnostic only; the previous frame is downloaded each time).
+    if (std::getenv("MONOSCALE_ROAD_GPU_CHECK") != nullptr && !candidates.empty()) {
+      cv::Mat host_previous;
+      gpu.previous.download(host_previous);
+      cv::Mat map_x, map_y, cpu;
+      build_warp_roi(model, candidates[0][0], candidates[0][1], gpu.width, gpu.height, roi,
+        map_x, map_y, candidates[0][2], candidates[0][3], stride);
+      cv::remap(host_previous, cpu, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+      cv::Mat cpu_f;
+      cpu.convertTo(cpu_f, CV_32F);
+      cv::Mat diff = cv::abs(cpu_f - out[0]);
+      double worst = 0.0;
+      cv::Point where;
+      cv::minMaxLoc(diff, nullptr, &worst, nullptr, &where);
+      // Where the lattice positions disagree, if they do.
+      cv::Mat lat = lattices[0];
+      static int printed = 0;
+      if (printed++ < 40) {
+        RCLCPP_INFO(get_logger(), "road_gpu_check stride=%d roi=%dx%d lattice=%dx%d mean|d|=%.4f max|d|=%.2f at (%d,%d) cpu=%.1f gpu=%.2f mapx=%.3f mapy=%.3f",
+          stride, roi.width, roi.height, lat.cols, lat.rows, cv::mean(diff)[0], worst, where.x, where.y,
+          cpu_f.at<float>(where), out[0].at<float>(where), map_x.at<float>(where), map_y.at<float>(where));
+      }
+    }
+    if (kernel_ms.ms.size() % 2000 == 0) {
+      RCLCPP_INFO(get_logger(), "road_gpu roi=%dx%d lattice_ms[%s] kernel+copy_ms[%s]", roi.width, roi.height,
+        lattice_ms.summary().c_str(), kernel_ms.summary().c_str());
+    }
+    patch_warps_ += static_cast<long>(candidates.size());
+#else
+    (void)model; (void)gpu; (void)roi; (void)stride; (void)candidates; (void)out;
+#endif
+  }
+
+  // Whole-region ZNCC of each warped candidate against `current(roi)` (one tile, no mask).
+  static void zncc_of(const cv::Mat & target8, const std::vector<cv::Mat> & warped, std::vector<double> & scores)
+  {
+    double sa = 0.0, saa = 0.0;
+    for (int y = 0; y < target8.rows; ++y) {
+      const uchar * a = target8.ptr<uchar>(y);
+      for (int x = 0; x < target8.cols; ++x) {sa += a[x]; saa += static_cast<double>(a[x]) * a[x];}
+    }
+    const double n = static_cast<double>(target8.total());
+    scores.assign(warped.size(), -2.0);
+    for (size_t k = 0; k < warped.size(); ++k) {
+      double sb = 0.0, sbb = 0.0, sab = 0.0;
+      for (int y = 0; y < target8.rows; ++y) {
+        const uchar * a = target8.ptr<uchar>(y);
+        const float * b = warped[k].ptr<float>(y);
+        for (int x = 0; x < target8.cols; ++x) {
+          const double vb = b[x];
+          sb += vb; sbb += vb * vb; sab += a[x] * vb;
+        }
+      }
+      scores[k] = zncc_from_sums(n, sa, sb, saa, sbb, sab);
+    }
+  }
+
   void road_scores(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double hop, double turn, const cv::Rect & roi, std::vector<double> & out,
@@ -3315,12 +3706,33 @@ private:
     return count;
   }
 
+  // Timed (road-step GPU experiment): the search's own wall time per call, logged as a
+  // running summary per thread every 200 calls.
   double measure_step_photometric(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double turn, double reach, double centre, bool have_centre,
     const std::array<double, 4> & band, double predicted_error = -1.0,
     int * votes = nullptr, double * peak_score = nullptr,
-    double * spread = nullptr) const
+    double * spread = nullptr, RoadEscape * escape = nullptr) const
+  {
+    thread_local compressed_input::DecodeStats search_stats;
+    const auto start = std::chrono::steady_clock::now();
+    const double found = measure_step_photometric_impl(
+      model, previous, current, turn, reach, centre, have_centre, band, predicted_error,
+      votes, peak_score, spread, escape);
+    search_stats.add(compressed_input::ms_since(start));
+    if (search_stats.ms.size() % 200 == 0) {
+      RCLCPP_INFO(get_logger(), "road_search_ms(%s): %s",
+        road_step_gpu_ ? "gpu" : "cpu", search_stats.summary().c_str());
+    }
+    return found;
+  }
+
+  double measure_step_photometric_impl(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double turn, double reach, double centre, bool have_centre,
+    const std::array<double, 4> & band, double predicted_error,
+    int * votes, double * peak_score, double * spread, RoadEscape * escape) const
   {
     cv::Rect roi = cv::Rect(
       cv::Point(cvRound(band[0] * current.cols), cvRound(band[1] * current.rows)),
@@ -3336,6 +3748,33 @@ private:
         current.cols, current.rows, mask);
     }
     const double span = std::max(reach, 1e-3);
+    // GPU search (road_step_gpu): the full-size pair, the path it implements (lattice
+    // warp, one tile, no fused geometry). The coarse pass on a reduced copy stays on the CPU.
+    RoadGpu * gpu = (!road_step_fused_ && std::max(road_step_tiles_, 1) == 1) ?
+      road_gpu_for(previous, current) : nullptr;
+    const auto gpu_scores = [&](const std::vector<double> & hops, std::vector<double> & out) {
+        std::vector<std::array<double, 4>> candidates;
+        for (double h : hops) {candidates.push_back({h, turn, 0.0, 0.0});}
+        if (road_step_gpu_gram_) {
+          // v2: zncc_from_sums of each candidate against the target, from the device sums.
+          // At most 11 candidates per call (the kernel's 12 slots include the target), so
+          // a larger road_step_samples goes in chunks.
+          out.assign(candidates.size(), -2.0);
+          for (size_t from = 0; from < candidates.size(); from += 11) {
+            const size_t to = std::min(candidates.size(), from + 11);
+            const std::vector<std::array<double, 4>> chunk(
+              candidates.begin() + static_cast<std::ptrdiff_t>(from),
+              candidates.begin() + static_cast<std::ptrdiff_t>(to));
+            const RoadGram g = road_gram(model, *gpu, roi, road_step_stride_, chunk);
+            const int t = g.m - 1;
+            for (int i = 0; i < t; ++i) {out[from + static_cast<size_t>(i)] = g.rho(i, t);}
+          }
+          return;
+        }
+        thread_local std::vector<cv::Mat> warped;
+        road_warps_gpu(model, *gpu, roi, road_step_stride_, candidates, warped);
+        zncc_of(current(roi), warped, out);
+      };
     // Each candidate is warped once; the whole-region score and the per-tile
     // scores both come out of that one warp, so keeping the tiles here costs
     // nothing and saves the separate spread sweep it used to need -- a third of
@@ -3351,6 +3790,27 @@ private:
         bool keep_tiles, double & best_score) {
         double best = low;
         best_score = -2.0;
+        if (gpu != nullptr && &from == &previous && over == roi) {
+          // All of this pass's candidates in one kernel call.
+          std::vector<double> hops;
+          for (int i = 0; i < samples; ++i) {
+            hops.push_back((low + (high - low) * i / std::max(samples - 1, 1)) * span);
+          }
+          std::vector<double> whole_scores;
+          gpu_scores(hops, whole_scores);
+          for (int i = 0; i < samples; ++i) {
+            const double s = low + (high - low) * i / std::max(samples - 1, 1);
+            if (whole_scores[static_cast<size_t>(i)] > best_score) {
+              best_score = whole_scores[static_cast<size_t>(i)];
+              best = s;
+            }
+            if (keep_tiles && tiles == 1 && whole_scores[static_cast<size_t>(i)] > tile_value[0]) {
+              tile_value[0] = whole_scores[static_cast<size_t>(i)];
+              tile_best[0] = s;
+            }
+          }
+          return best;
+        }
         for (int i = 0; i < samples; ++i) {
           const double s = low + (high - low) * i / std::max(samples - 1, 1);
           double whole = -2.0;
@@ -3445,6 +3905,85 @@ private:
     double found = scan(
       previous, current, roi, coarse - spacing, coarse + spacing,
       road_step_samples_, true, fine_peak);
+    if (escape != nullptr && have_centre && magnitude > 0.0) {
+      // Which edge, if any. The side toward zero counts only while it can still move
+      // toward zero: at the 5 % floor it is where a step near zero belongs.
+      const double floor_magnitude = 0.05 * magnitude;
+      const bool at_low = coarse <= low + 1e-12;
+      const bool at_high = coarse >= high - 1e-12;
+      const bool low_is_near = std::abs(low) < std::abs(high);
+      const auto movable = [&](bool near_side) {
+          return !near_side || std::max(magnitude - reachable, 0.0) > floor_magnitude + 1e-12;
+        };
+      int side = 0;  // -1: extend below `low`, +1: above `high`
+      if (at_low && movable(low_is_near)) {side = -1;}
+      if (at_high && movable(!low_is_near)) {side = +1;}
+      const auto & recent = escape->recent;
+      if (side == 0 && recent.size() >= 5) {
+        std::vector<double> sorted(recent.begin(), recent.end());
+        std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+        const double median = sorted[sorted.size() / 2];
+        std::vector<double> deviation;
+        for (double v : recent) {deviation.push_back(std::abs(v - median));}
+        std::nth_element(deviation.begin(), deviation.begin() + deviation.size() / 2, deviation.end());
+        const double spread_sd = 1.4826 * deviation[deviation.size() / 2];
+        if (fine_peak < median - std::max(0.1, 2.5 * spread_sd)) {
+          // No edge to go by: toward the end of the bracket that scored higher.
+          double low_score = -2.0;
+          double high_score = -2.0;
+          scan(previous, current, roi, low, low, 1, false, low_score);
+          scan(previous, current, roi, high, high, 1, false, high_score);
+          const bool up = high_score >= low_score;
+          if (movable(up ? !low_is_near : low_is_near)) {
+            side = up ? +1 : -1;
+          }
+          escape->reason = 2;
+        }
+      }
+      if (side != 0) {
+        if (escape->reason == 0) {escape->reason = 1;}
+        escape->old_found = found;
+        escape->old_score = fine_peak;
+        const double width = high - low;
+        // Signed limit toward zero on the near side.
+        const double near_limit = toward * floor_magnitude;
+        double edge = side > 0 ? high : low;
+        double best_s = found;
+        double best_score = fine_peak;
+        double ext_spacing = spacing;
+        for (int k = 0; k < 3; ++k) {
+          double a = side > 0 ? edge : edge - width;
+          double b = side > 0 ? edge + width : edge;
+          // Clamp the zero-ward end.
+          if (toward > 0.0) {a = std::max(a, std::min(near_limit, b));}
+          if (toward < 0.0) {b = std::min(b, std::max(near_limit, a));}
+          if (!(b > a)) {break;}
+          double ext_score = -2.0;
+          const double ext = scan(previous, current, roi, a, b, road_step_samples_, false, ext_score);
+          ++escape->extensions;
+          ext_spacing = (b - a) / std::max(road_step_samples_ - 1, 1);
+          double ext_fine_score = -2.0;
+          const double ext_fine = scan(
+            previous, current, roi, ext - ext_spacing, ext + ext_spacing, road_step_samples_, false,
+            ext_fine_score);
+          if (ext_fine_score > best_score) {
+            best_score = ext_fine_score;
+            best_s = ext_fine;
+          }
+          // Keep going only while the best of this window is on its outer edge.
+          const bool outer = side > 0 ? ext >= b - 1e-12 : ext <= a + 1e-12;
+          if (!outer) {break;}
+          edge = side > 0 ? b : a;
+        }
+        escape->new_found = best_s;
+        escape->new_score = best_score;
+        if (best_score >= fine_peak + road_step_escape_margin_) {
+          escape->adopted = true;
+          found = best_s;
+          fine_peak = best_score;
+        }
+      }
+    }
     // The sign is not decided here. Three attempts were made to read it off the
     // photometric score -- take the mirrored bracket when it scores higher,
     // when it scores higher three frames running, and only when the bracket
@@ -3470,8 +4009,17 @@ private:
       *spread = (*range.second - *range.first) / std::max(std::abs(found), 1e-6);
     }
     const double fine = 2.0 * spacing / std::max(road_step_samples_ - 1, 1);
-    const double left = road_score(model, previous, current, (found - fine) * span, turn, roi);
-    const double right = road_score(model, previous, current, (found + fine) * span, turn, roi);
+    double left = 0.0;
+    double right = 0.0;
+    if (gpu != nullptr) {
+      std::vector<double> both;
+      gpu_scores({(found - fine) * span, (found + fine) * span}, both);
+      left = both[0];
+      right = both[1];
+    } else {
+      left = road_score(model, previous, current, (found - fine) * span, turn, roi);
+      right = road_score(model, previous, current, (found + fine) * span, turn, roi);
+    }
     if (peak_score != nullptr) {
       *peak_score = fine_peak;
     }
@@ -3637,6 +4185,28 @@ private:
     return normalise(warped, out, mask);
   }
 
+  // road_patch for several candidates: one GPU kernel call when `gpu` is given, else the
+  // CPU warp per candidate. Returns false if any patch failed (as road_patch would).
+  bool road_patches(
+    const GroundModel & model, const cv::Mat & previous, RoadGpu * gpu, const cv::Rect & roi,
+    const std::vector<std::array<double, 4>> & candidates, std::vector<cv::Mat> & out,
+    const cv::Mat & mask = cv::Mat()) const
+  {
+    out.resize(candidates.size());
+    if (gpu == nullptr) {
+      for (size_t i = 0; i < candidates.size(); ++i) {
+        if (!road_patch(model, previous, roi, candidates[i].data(), out[i], mask)) {return false;}
+      }
+      return true;
+    }
+    thread_local std::vector<cv::Mat> warped;
+    road_warps_gpu(model, *gpu, roi, road_step_fit_stride_, candidates, warped);
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      if (!normalise(warped[i], out[i], mask)) {return false;}
+    }
+    return true;
+  }
+
   // What the plane fit could not explain, on a coarse grid.
   //
   // Warp the previous frame forward by the motion the fit settled on, then ask
@@ -3734,7 +4304,130 @@ private:
   // Seeded from the search's own answer and the gyro's turn, and it keeps them
   // if it cannot beat them: the caller falls back to the one-dimensional
   // answer, which is the measurement this stack already trusts.
+  // The fit's iterations on the v2 path (road_step_gpu_gram): the same Levenberg-Marquardt
+  // steps as the image loop in solve_step_esm_impl, with every dot product taken from the
+  // device's sums. With u the normalised patches and t the target:
+  //   cost        = |u - t|^2 = 2 - 2 rho(u, t)
+  //   column k    = (u_k+ - u_k-) / (2 probe_k)
+  //   normal(i,j) = column_i . column_j,  gradient_i = -column_i . (u_at - t)
+  // One round trip per Jacobian (its 2 x freedom probes plus the iterate) and one per trial.
+  // Returns false where the image loop would have returned early. Rebuilds the Jacobian
+  // every iteration (road_step_esm_rebuild <= 1, the deployed value).
+  bool esm_gram_loop(
+    const GroundModel & model, RoadGpu & gpu, const cv::Rect & roi, int freedom,
+    const double probe[4], double step_limit, double angle_limit, double px_per_m,
+    double focal, double turn, double seed_step, double at[4], double & cost,
+    double & seeded, int & taken, cv::Matx44d & held_normal, double jacobian_at[4]) const
+  {
+    const int stride = road_step_fit_stride_;
+    {
+      const RoadGram g = road_gram(model, gpu, roi, stride, {{at[0], at[1], at[2], at[3]}});
+      if (!g.usable(0) || !g.usable(1)) {return false;}
+      cost = 2.0 - 2.0 * g.rho(0, 1);
+    }
+    seeded = cost;
+    double lambda = 1e-3;
+    taken = 0;
+    for (int iteration = 0; iteration < 10; ++iteration) {
+      std::vector<std::array<double, 4>> batch;
+      for (int k = 0; k < freedom; ++k) {
+        std::array<double, 4> up = {at[0], at[1], at[2], at[3]};
+        std::array<double, 4> down = up;
+        up[static_cast<size_t>(k)] += probe[k];
+        down[static_cast<size_t>(k)] -= probe[k];
+        batch.push_back(up);
+        batch.push_back(down);
+      }
+      batch.push_back({at[0], at[1], at[2], at[3]});
+      const RoadGram g = road_gram(model, gpu, roi, stride, batch);
+      const int a = 2 * freedom;   // the iterate
+      const int t = a + 1;         // the target
+      bool built = true;
+      for (int i = 0; i <= t; ++i) {built = built && g.usable(i);}
+      if (!built) {break;}
+      // rho(i, i) = 1 for a normalised patch.
+      const auto dot = [&](int i, int j) {return i == j ? 1.0 : g.rho(i, j);};
+      cv::Matx44d normal = cv::Matx44d::zeros();
+      cv::Vec4d gradient(0.0, 0.0, 0.0, 0.0);
+      for (int i = 0; i < freedom; ++i) {
+        const int ui = 2 * i;
+        const int di = 2 * i + 1;
+        gradient[i] = -((dot(ui, a) - dot(ui, t)) - (dot(di, a) - dot(di, t))) / (2.0 * probe[i]);
+        for (int j = i; j < freedom; ++j) {
+          const int uj = 2 * j;
+          const int dj = 2 * j + 1;
+          normal(i, j) = (dot(ui, uj) - dot(ui, dj) - dot(di, uj) + dot(di, dj)) /
+            (4.0 * probe[i] * probe[j]);
+          normal(j, i) = normal(i, j);
+        }
+      }
+      held_normal = normal;
+      std::copy(at, at + 4, jacobian_at);
+      for (int i = freedom; i < 4; ++i) {
+        normal(i, i) = 1.0;
+      }
+      cv::Vec4d delta(0.0, 0.0, 0.0, 0.0);
+      bool accepted = false;
+      for (int attempt = 0; attempt < 6 && !accepted; ++attempt) {
+        cv::Matx44d damped = normal;
+        for (int i = 0; i < 4; ++i) {
+          damped(i, i) += lambda * std::max(normal(i, i), 1e-12);
+        }
+        cv::Vec4d proposal;
+        if (cv::solve(damped, gradient, proposal, cv::DECOMP_CHOLESKY)) {
+          const double trial[4] = {
+            at[0] + proposal[0], at[1] + proposal[1],
+            at[2] + proposal[2], at[3] + proposal[3]};
+          const bool inside =
+            std::abs(trial[0] - seed_step) <= step_limit &&
+            std::abs(trial[1] - turn) <= angle_limit &&
+            std::abs(trial[2]) <= angle_limit && std::abs(trial[3]) <= angle_limit;
+          if (inside) {
+            const RoadGram q = road_gram(model, gpu, roi, stride, {{trial[0], trial[1], trial[2], trial[3]}});
+            if (q.usable(0) && q.usable(1)) {
+              const double trial_cost = 2.0 - 2.0 * q.rho(0, 1);
+              if (trial_cost < cost) {
+                std::copy(trial, trial + 4, at);
+                cost = trial_cost;
+                delta = proposal;
+                accepted = true;
+                ++taken;
+              }
+            }
+          }
+        }
+        if (!accepted) {
+          lambda = std::min(lambda * 10.0, 1e6);
+        }
+      }
+      if (!accepted) {
+        break;
+      }
+      lambda = std::max(lambda * 0.3, 1e-9);
+      const double moved = std::abs(delta[0]) * px_per_m +
+        (std::abs(delta[1]) + std::abs(delta[2]) + std::abs(delta[3])) * focal;
+      if (moved < 0.01) {
+        break;
+      }
+    }
+    return true;
+  }
+
   RoadSolve solve_step_esm(
+    const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
+    double turn, double seed_step, const std::array<double, 4> & band) const
+  {
+    thread_local compressed_input::DecodeStats esm_ms;
+    const auto start = std::chrono::steady_clock::now();
+    RoadSolve solved = solve_step_esm_impl(model, previous, current, turn, seed_step, band);
+    esm_ms.add(compressed_input::ms_since(start));
+    if (esm_ms.ms.size() % 200 == 0) {
+      RCLCPP_INFO(get_logger(), "esm_ms(%s): %s", road_step_gpu_ ? "gpu" : "cpu", esm_ms.summary().c_str());
+    }
+    return solved;
+  }
+
+  RoadSolve solve_step_esm_impl(
     const GroundModel & model, const cv::Mat & previous, const cv::Mat & current,
     double turn, double seed_step, const std::array<double, 4> & band) const
   {
@@ -3755,6 +4448,10 @@ private:
     if (!normalise(current(roi), target, mask)) {
       return out;
     }
+    // road_step_gpu: every warp of the fit through the batched kernel (v1), or the whole
+    // iteration on the device's sums (v2, road_step_gpu_gram).
+    RoadGpu * gpu = road_gpu_for(previous, current);
+    std::vector<cv::Mat> batch;
     // The geometry that turns a parameter into pixels, taken exactly as the
     // band sweep takes it.
     const double lens = std::abs(model.translation_base_from_camera[2]);
@@ -3849,18 +4546,61 @@ private:
     const double angle_limit = 0.05;
 
     double at[4] = {seed_step, turn, 0.0, 0.0};
-    cv::Mat patch;
-    if (!road_patch(model, previous, roi, at, patch, mask)) {
-      return out;
-    }
-    cv::Mat residual = patch - target;
-    double cost = residual.dot(residual);
-    const double seeded = cost;
-    double lambda = 1e-3;
+    cv::Mat residual;
+    double cost = 0.0;
+    double seeded = 0.0;
     int taken = 0;
     cv::Mat column[4];
     cv::Matx44d held_normal;
     double jacobian_at[4] = {0.0, 0.0, 0.0, 0.0};
+    const bool gram = road_step_gpu_gram_ && gpu != nullptr && mask.empty() &&
+      road_step_esm_rebuild_ <= 1 && !road_step_esm_analytic_ && !esm_compare_;
+    if (gram) {
+      thread_local compressed_input::DecodeStats loop_ms, images_ms;
+      auto loop_start = std::chrono::steady_clock::now();
+      if (!esm_gram_loop(model, *gpu, roi, freedom, probe, step_limit, angle_limit, px_per_m,
+          focal, turn, seed_step, at, cost, seeded, taken, held_normal, jacobian_at))
+      {
+        return out;
+      }
+      loop_ms.add(compressed_input::ms_since(loop_start));
+      loop_start = std::chrono::steady_clock::now();
+      struct Report {compressed_input::DecodeStats & a; compressed_input::DecodeStats & b;
+        std::chrono::steady_clock::time_point t; const FeatureTracker * self;
+        ~Report() {b.add(compressed_input::ms_since(t));
+          if (b.ms.size() % 400 == 0) {RCLCPP_INFO(self->get_logger(), "esm_gram loop_ms[%s] images_ms[%s]",
+            a.summary().c_str(), b.summary().c_str());}}} report{loop_ms, images_ms, loop_start, this};
+      // The images the rest of this routine reads (residual autocorrelation, tilt
+      // projection): the last Jacobian's columns and the answer's residual, one batch.
+      if (taken > 0) {
+        std::vector<std::array<double, 4>> images;
+        for (int k = 0; k < freedom; ++k) {
+          std::array<double, 4> up = {jacobian_at[0], jacobian_at[1], jacobian_at[2], jacobian_at[3]};
+          std::array<double, 4> down = up;
+          up[static_cast<size_t>(k)] += probe[k];
+          down[static_cast<size_t>(k)] -= probe[k];
+          images.push_back(up);
+          images.push_back(down);
+        }
+        images.push_back({at[0], at[1], at[2], at[3]});
+        if (!road_patches(model, previous, gpu, roi, images, batch, mask)) {
+          return out;
+        }
+        for (int k = 0; k < freedom; ++k) {
+          column[k] = (batch[static_cast<size_t>(2 * k)] - batch[static_cast<size_t>(2 * k + 1)]) /
+            (2.0 * probe[k]);
+        }
+        residual = batch[static_cast<size_t>(2 * freedom)] - target;
+      }
+    } else {
+    if (!road_patches(model, previous, gpu, roi, {{at[0], at[1], at[2], at[3]}}, batch, mask)) {
+      return out;
+    }
+    cv::Mat patch = batch[0].clone();  // batch is reused by later warps
+    residual = patch - target;
+    cost = residual.dot(residual);
+    seeded = cost;
+    double lambda = 1e-3;
     bool have_jacobian = false;
     for (int iteration = 0; iteration < 10; ++iteration) {
       // How often the Jacobian is rebuilt.
@@ -3916,17 +4656,22 @@ private:
           built = false;  // fall through to the numeric loop
         }
       }
-      for (int k = 0; k < freedom && built && rebuild && !road_step_esm_analytic_; ++k) {
-        double up[4] = {at[0], at[1], at[2], at[3]};
-        double down[4] = {at[0], at[1], at[2], at[3]};
-        up[k] += probe[k];
-        down[k] -= probe[k];
-        cv::Mat ahead;
-        cv::Mat behind;
-        built = road_patch(model, previous, roi, up, ahead, mask) &&
-          road_patch(model, previous, roi, down, behind, mask);
-        if (built) {
-          column[k] = (ahead - behind) / (2.0 * probe[k]);
+      if (built && rebuild && !road_step_esm_analytic_) {
+        // All 2 x freedom probes of the numeric Jacobian in one batch (one kernel call
+        // with road_step_gpu; the CPU warps one by one otherwise).
+        std::vector<std::array<double, 4>> probes;
+        for (int k = 0; k < freedom; ++k) {
+          std::array<double, 4> up = {at[0], at[1], at[2], at[3]};
+          std::array<double, 4> down = up;
+          up[static_cast<size_t>(k)] += probe[k];
+          down[static_cast<size_t>(k)] -= probe[k];
+          probes.push_back(up);
+          probes.push_back(down);
+        }
+        built = road_patches(model, previous, gpu, roi, probes, batch, mask);
+        for (int k = 0; k < freedom && built; ++k) {
+          column[k] = (batch[static_cast<size_t>(2 * k)] - batch[static_cast<size_t>(2 * k + 1)]) /
+            (2.0 * probe[k]);
         }
       }
       if (!built) {
@@ -3974,9 +4719,10 @@ private:
             std::abs(trial[0] - seed_step) <= step_limit &&
             std::abs(trial[1] - turn) <= angle_limit &&
             std::abs(trial[2]) <= angle_limit && std::abs(trial[3]) <= angle_limit;
-          cv::Mat moved_patch;
-          if (inside && road_patch(model, previous, roi, trial, moved_patch, mask)) {
-            cv::Mat next = moved_patch - target;
+          if (inside && road_patches(model, previous, gpu, roi,
+              {{trial[0], trial[1], trial[2], trial[3]}}, batch, mask))
+          {
+            cv::Mat next = batch[0] - target;
             const double trial_cost = next.dot(next);
             if (trial_cost < cost) {
               std::copy(trial, trial + 4, at);
@@ -4005,6 +4751,7 @@ private:
         break;
       }
     }
+    }  // image loop (CPU warps, or v1 GPU warps)
     if (taken == 0 || !(cost < seeded)) {
       return out;
     }
@@ -5048,6 +5795,121 @@ private:
   std::string road_step_dump_;
   std::mutex road_step_lock_;
   std::FILE * road_step_file_ = nullptr;
+  std::FILE * synthetic_file_ = nullptr;
+
+  struct SyntheticTruth
+  {
+    bool on = false;
+    double step = 0.0;
+    double turn = 0.0;
+    double pitch = 0.0;
+    double roll = 0.0;
+  };
+
+  // A seed fixed by the camera, the frame's stamp and a salt: the same frame gets the
+  // same draw in every run, whatever arrived before it.
+  static uint64_t frame_seed(
+    const std::string & name, const builtin_interfaces::msg::Time & stamp, uint64_t salt)
+  {
+    uint64_t h = 1469598103934665603ull ^ salt;
+    const auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+      };
+    for (const char c : name) {
+      mix(static_cast<unsigned char>(c));
+    }
+    mix(static_cast<uint64_t>(stamp.sec));
+    mix(static_cast<uint64_t>(stamp.nanosec));
+    return h != 0 ? h : 1;
+  }
+
+  // Every bracket escape (road_step_bracket_escape), to MONOSCALE_ROAD_ESCAPE_LOG when
+  // set, and a running count in the log. Steps in metres over the hop.
+  void log_escape(const std::string & name, double stamp, double reach, const RoadEscape & e)
+  {
+    const long triggered = ++escapes_triggered_;
+    const long adopted = e.adopted ? ++escapes_adopted_ : escapes_adopted_.load();
+    if (triggered % 50 == 1) {
+      RCLCPP_INFO(get_logger(), "road_escape triggered=%ld adopted=%ld", triggered, adopted);
+    }
+    const char * path = std::getenv("MONOSCALE_ROAD_ESCAPE_LOG");
+    if (path == nullptr) {
+      return;
+    }
+    const double span = std::max(reach, 1e-3);
+    std::lock_guard<std::mutex> guard(road_step_lock_);
+    if (escape_file_ == nullptr) {
+      escape_file_ = std::fopen(path, "w");
+      if (escape_file_ != nullptr) {
+        std::fprintf(escape_file_,
+          "stamp,camera,reason,extensions,adopted,old_step,old_score,new_step,new_score,reach\n");
+      }
+    }
+    if (escape_file_ != nullptr) {
+      std::fprintf(escape_file_, "%.6f,%s,%d,%d,%d,%.6f,%.5f,%.6f,%.5f,%.4f\n",
+        stamp, name.c_str(), e.reason, e.extensions, e.adopted ? 1 : 0, e.old_found * span,
+        e.old_score, e.new_found * span, e.new_score, reach);
+      std::fflush(escape_file_);
+    }
+  }
+
+  // Eight or more rows at the bottom that are flat grey 128: what a JPEG decoder leaves
+  // where the data ran out.
+  static bool truncated_decode(const cv::Mat & gray)
+  {
+    int flat = 0;
+    for (int y = gray.rows - 1; y >= 0 && flat < 8; --y) {
+      cv::Scalar mean;
+      cv::Scalar deviation;
+      cv::meanStdDev(gray.row(y), mean, deviation);
+      if (deviation[0] >= 0.5 || std::abs(mean[0] - 128.0) > 1.5) {
+        break;
+      }
+      ++flat;
+    }
+    return flat >= 8;
+  }
+
+  static void perturb_frame(
+    const char * spec, const std::string & name,
+    const builtin_interfaces::msg::Time & stamp, cv::Mat & gray)
+  {
+    double seed = 1.0, gain = 0.0, noise = 0.0, shift = 0.0;
+    std::stringstream items(spec);
+    std::string item;
+    while (std::getline(items, item, ',')) {
+      const auto eq = item.find('=');
+      if (eq == std::string::npos) {
+        continue;
+      }
+      const std::string key = item.substr(0, eq);
+      const double value = std::atof(item.c_str() + eq + 1);
+      if (key == "seed") {seed = value;}
+      if (key == "gain") {gain = value;}
+      if (key == "noise") {noise = value;}
+      if (key == "shift") {shift = value;}
+    }
+    cv::RNG draw(frame_seed(name, stamp, static_cast<uint64_t>(seed)));
+    const double g = 1.0 + gain * draw.uniform(-1.0, 1.0);
+    const double dx = shift * draw.uniform(-1.0, 1.0);
+    const double dy = shift * draw.uniform(-1.0, 1.0);
+    cv::Mat grey;
+    gray.convertTo(grey, CV_32F, g);
+    if (dx != 0.0 || dy != 0.0) {
+      const cv::Matx23d move(1.0, 0.0, dx, 0.0, 1.0, dy);
+      cv::warpAffine(grey, grey, move, grey.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    }
+    if (noise > 0.0) {
+      cv::Mat sensor(grey.size(), CV_32F);
+      draw.fill(sensor, cv::RNG::NORMAL, 0.0, noise);
+      grey += sensor;
+    }
+    // Into a new buffer: `gray` may still view the message's own pixels.
+    cv::Mat out;
+    grey.convertTo(out, CV_8U);
+    gray = out;
+  }
   std::FILE * esm_sigma_file_ = nullptr;
   std::unordered_map<std::string, GroundModel> models_;
   // The step the reference camera last measured, shared with the others. The
@@ -5082,6 +5944,15 @@ private:
   // Whether the GPU path is actually in use, which needs the parameter, an
   // OpenCV that has cudaoptflow, and a device to run on.
   bool cuda_active_ = false;
+  bool road_step_gpu_ = false;
+  bool road_step_gpu_gram_ = false;
+  bool road_step_frame_guard_ = true;
+  bool road_step_bracket_escape_ = false;
+  double road_step_escape_margin_ = 0.01;
+  std::atomic<long> frames_rejected_broken_{0};
+  std::atomic<long> escapes_triggered_{0};
+  std::atomic<long> escapes_adopted_{0};
+  std::FILE * escape_file_ = nullptr;
 #ifdef MONOSCALE_TRACKER_HAS_CUDA
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> forward_flow_;
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> backward_flow_;
@@ -5145,6 +6016,9 @@ private:
   std::map<std::string, rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr>
   publishers_;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> subscriptions_;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr> compressed_subscriptions_;
+  std::string compressed_decode_ = "color";
+  std::map<std::string, compressed_input::DecodeStats> decode_stats_;
 };
 
 int main(int argc, char ** argv)

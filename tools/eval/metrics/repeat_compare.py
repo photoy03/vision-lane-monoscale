@@ -2,9 +2,9 @@
 """Run a replay N times and/or compare groups of replay runs by mean/std per metric.
 
 Examples (source /opt/ros/humble and this workspace's install/setup.bash first):
-  python3 tools/eval/repeat_compare.py --bag <session>/bag --repeats 3 \
+  python3 tools/eval/metrics/repeat_compare.py --bag <session>/bag --repeats 3 \
       --run-prefix base --output-root <runs> --report <runs>/base.md
-  python3 tools/eval/repeat_compare.py --group before=<runs>/base_1,<runs>/base_2 \
+  python3 tools/eval/metrics/repeat_compare.py --group before=<runs>/base_1,<runs>/base_2 \
       --group after=<runs>/new_1,<runs>/new_2 --report <runs>/before_after.md
 
 Bags are only read. Run-to-run spread is reported so differences can be judged
@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 
-TOOLS = Path(__file__).resolve().parents[1]
+TOOLS = Path(__file__).resolve().parents[2]
 REFERENCE_ODOM = "/localization/kinematic_state"
 
 
@@ -54,7 +54,12 @@ def angle_deg(a: float, b: float) -> float:
 # it must read, or the comparison would silently lose its subject.
 SNAPSHOT_FORMAT = 2
 # FusedMap before pose provenance (snapshot_format 2) still reads through this layout.
-LEGACY_TYPES = {"/mapping/fused_map": "vision_lane_interfaces/msg/FusedMapV2"}
+# Older layouts per topic, newest first (msg/*V*.msg).
+LEGACY_TYPES = {"/mapping/fused_map": ["vision_lane_interfaces/msg/FusedMapV3",
+                                       "vision_lane_interfaces/msg/FusedMapV2"],
+                "/mapping/snapshot/lanes": ["vision_lane_interfaces/msg/LaneMapSnapshotV1"],
+                "/mapping/snapshot/occupancy": ["vision_lane_interfaces/msg/OccupancySnapshotV1"],
+                "/localization/kinematic_state/provenance": ["vision_lane_interfaces/msg/PoseProvenanceV1"]}
 UNREADABLE = "__unreadable_topics__"
 
 SNAPSHOT_TOPICS = ("/mapping/snapshot/lanes", "/mapping/snapshot/occupancy", "/mapping/fused_map")
@@ -195,11 +200,109 @@ def fused_metrics(fused: list, lanes: list, occupancy: list) -> dict[str, float]
     lags = sorted(arrival - _ns(msg.header.stamp) * 1e-9 for arrival, msg in fused)
     m["fused_lag_p50_ms"] = 1000.0 * lags[len(lags) // 2]
     m["fused_lag_p90_ms"] = 1000.0 * lags[int(0.9 * (len(lags) - 1))]
-    skew = sorted(abs(_ns(msg.lanes.meta.content_max) - _ns(msg.occupancy.meta.content_max)) * 1e-6
-                  for _, msg in fused)
-    m["fused_layer_content_skew_p50_ms"] = skew[len(skew) // 2]
-    m["fused_layer_content_skew_p90_ms"] = skew[int(0.9 * (len(skew) - 1))]
+    # A layer that is complete but still empty (content_max 0, e.g. lanes during
+    # warm-up) has no content time to compare; count those separately.
+    both = [msg for _, msg in fused if _ns(msg.lanes.meta.content_max) > 0 and _ns(msg.occupancy.meta.content_max) > 0]
+    m["fused_lane_layer_empty_ratio"] = sum(_ns(msg.lanes.meta.content_max) == 0 for _, msg in fused) / len(fused)
+    m["fused_occupancy_layer_empty_ratio"] = sum(_ns(msg.occupancy.meta.content_max) == 0 for _, msg in fused) / len(fused)
+    if both:
+        skew = sorted(abs(_ns(msg.lanes.meta.content_max) - _ns(msg.occupancy.meta.content_max)) * 1e-6
+                      for msg in both)
+        m["fused_layer_content_skew_p50_ms"] = skew[len(skew) // 2]
+        m["fused_layer_content_skew_p90_ms"] = skew[int(0.9 * (len(skew) - 1))]
     return m
+
+
+def lane_completion_metrics(progress: list, lane_status: list, sync_status: list) -> dict[str, float]:
+    """C-1 lane completion (docs/C1_CRITERIA_KO.md 6.3 (b)).
+
+    lane_complete_beyond_detection: for each lane_map progress (published at t,
+    W_map), the first lane_detection progress published at or after t gives
+    W_det; count W_map > W_det (no value tolerance; lane_detection W is monotonic,
+    so a later value is never lower). Plus the completion counters of the last
+    lane_map status and the frame counters of the last lane_detection sync status.
+    """
+    m: dict[str, float] = {}
+    det = sorted((_ns(p.header.stamp), _ns(p.watermark)) for _, p in progress
+                 if p.node == "lane_detection" and p.watermark_valid)
+    lane = [(_ns(p.header.stamp), _ns(p.watermark)) for _, p in progress
+            if "lane_map" in p.node and p.watermark_valid]
+    if det and lane:
+        import bisect
+        stamps = [t for t, _ in det]
+        beyond = compared = 0
+        for t, w in lane:
+            i = bisect.bisect_left(stamps, t)
+            if i < len(det):
+                compared += 1
+                beyond += w > det[i][1]
+        m["lane_complete_beyond_detection"] = beyond
+        m["lane_complete_compared"] = compared
+    if lane_status:
+        try:
+            status = json.loads(lane_status[-1][1].data)
+        except ValueError:
+            status = {}
+        applied = status.get("lane_apply_delay")
+        if applied:
+            m["lane_apply_delay_n"] = applied["n"]
+            m["lane_apply_delay_p50_ms"] = applied["p50_ms"]
+            m["lane_apply_delay_p90_ms"] = applied["p90_ms"]
+        found = status.get("completion")
+        if found:
+            c = found
+            m["lane_frames_observed"] = c["frames_observed"]
+            m["lane_frames_discarded"] = c["frames_discarded_total"]
+            for reason, count in c["frames_discarded"].items():
+                m[f"lane_frames_discarded_{reason}"] = count
+            m["lane_transport_gap"] = c["transport_gap"]
+            m["lane_legacy_messages"] = c["legacy_messages"]
+            m["lane_late_rejected_sequence_behind"] = c["late_rejected"]["sequence_behind"]
+            m["lane_late_rejected_stamp_behind_watermark"] = c["late_rejected"]["stamp_behind_watermark"]
+            m["lane_late_changes"] = c["late_changes"]
+            m["lane_tracker_gap_resets"] = c["tracker_gap_resets"]
+            m["lane_mapper_nonmonotonic_drop"] = c["mapper_nonmonotonic_drop"]
+    if sync_status:
+        s = json.loads(sync_status[-1][1].data)
+        for key in ("images_received", "frames_published", "frame_sequence", "header_rejected",
+                    "out_of_order_rejected", "quality_rejected_total", "quality_rejected_in_warmup"):
+            if key in s:
+                m[f"detection_{key}"] = s[key]
+        for reason, count in s.get("frames_discarded", {}).items():
+            m[f"detection_frames_discarded_{reason}"] = count
+    return m
+
+
+def pose_covariance_rules(poses: list, provenance: list, raw: list | None = None) -> dict[str, float]:
+    """Join each pose with the provenance of the same stamp and check the covariance rule.
+
+    raw: upstream value, flag = usable; interpolated/fill: usable matrix and flag
+    true, or the zero matrix and flag false. Negative values never appear.
+    """
+    by_stamp = {_ns(msg.header.stamp): msg for _, msg in provenance}
+    # A raw pose passes the upstream covariance through unchanged (observer_eval_A_stage R2).
+    raw_cov = {_ns(msg.header.stamp): list(msg.pose.covariance) for _, msg in (raw or [])}
+    raw_mismatch = raw_checked = 0
+    unpaired = violations = 0
+    for _, pose in poses:
+        p = by_stamp.get(_ns(pose.header.stamp))
+        if p is None:
+            unpaired += 1
+            continue
+        cov = list(pose.pose.covariance)
+        if any(value < 0.0 for value in cov[0:36:7]):
+            violations += 1
+        elif p.kind != 1 and not p.covariance_valid and any(value != 0.0 for value in cov):
+            violations += 1
+        elif p.covariance_valid and not all(cov[i] > 0.0 for i in (0, 7, 35)):
+            violations += 1
+        if p.kind == 1 and raw_cov:
+            upstream = raw_cov.get(_ns(pose.header.stamp))
+            if upstream is not None:
+                raw_checked += 1
+                raw_mismatch += upstream != cov
+    return {"pose_provenance_unpaired": unpaired, "pose_covariance_rule_violations": violations,
+            "pose_raw_covariance_checked": raw_checked, "pose_raw_covariance_not_preserved": raw_mismatch}
 
 
 def read_bag(path: Path, topics: list[str]) -> dict[str, list] | None:
@@ -249,15 +352,18 @@ def _read_bag(reader, path: Path, topics: list[str]) -> dict[str, list]:
         try:
             msg = deserialize_message(data, classes[topic])
         except Exception:  # recorded with an older message layout (Humble bags keep no definitions)
-            legacy = LEGACY_TYPES.get(topic)
-            if legacy:
+            found = False
+            for legacy in LEGACY_TYPES.get(topic, []):
                 try:
-                    classes[topic] = get_message(legacy)
-                    msg = deserialize_message(data, classes[topic])
-                    out[topic].append((stamp_of(msg, topic, receive_ns), msg))
-                    continue
+                    msg = deserialize_message(data, get_message(legacy))
                 except Exception:
-                    pass
+                    continue
+                classes[topic] = get_message(legacy)
+                out[topic].append((stamp_of(msg, topic, receive_ns), msg))
+                found = True
+                break
+            if found:
+                continue
             unreadable.add(topic)
             out[topic] = []
             print(f"note: {path}: {topic} has an older message layout; skipped", file=sys.stderr)
@@ -375,7 +481,9 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
         topics = ["/localization/monoscale_raw", "/localization/kinematic_state",
                   "/parking/cpp/marking_segments", "/parking/cpp/global_marking_segments_fused",
                   "/perception/occupancy_grid_map", "/parking/cpp/map_fusion/status",
-                  "/pipeline/progress", "/localization/kinematic_state/provenance", *SNAPSHOT_TOPICS]
+                  "/pipeline/progress", "/localization/kinematic_state/provenance",
+                  "/mapping/fused_map/status", "/parking/cpp/status", "/localization/monoscale_raw/status",
+                  *SNAPSHOT_TOPICS]
         data = read_bag(outputs, topics)
         if data is not None:
             skipped = data.pop(UNREADABLE, [])
@@ -407,15 +515,28 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                 m["fused_segments_final"] = len(fused[-1][1].segments)
             # Lane-map latency: how old (capture time) each input was when
             # lane_map_fusion received it, from its status JSON.
-            delays = []
+            # lane_map_input_delay_*: every 5 Hz status sample (reference only: during
+            # pose gaps the last value repeats, so the p90 is bimodal across runs).
+            # lane_map_input_delay_changed_*: only samples whose value changed, i.e.
+            # moments a new input was applied (observer_eval_C1_results_KO.md 3.1).
+            delays, changed, previous = [], [], None
             for _, msg in data["/parking/cpp/map_fusion/status"]:
                 found = re.search(r'"last_input_delay_ms":([-\d.eE+]+)', msg.data)
                 if found and float(found.group(1)) > 0.0:
-                    delays.append(float(found.group(1)))
+                    value = float(found.group(1))
+                    delays.append(value)
+                    if value != previous:
+                        changed.append(value)
+                    previous = value
             if delays:
                 delays.sort()
                 m["lane_map_input_delay_p50_ms"] = delays[len(delays) // 2]
                 m["lane_map_input_delay_p90_ms"] = delays[int(0.9 * (len(delays) - 1))]
+            if changed:
+                changed.sort()
+                m["lane_map_input_delay_changed_n"] = len(changed)
+                m["lane_map_input_delay_changed_p50_ms"] = changed[len(changed) // 2]
+                m["lane_map_input_delay_changed_p90_ms"] = changed[int(0.9 * (len(changed) - 1))]
             # Per-stage watermark lag (node clock - watermark) and monotonicity
             # from /pipeline/progress (absent in runs recorded before it existed).
             by_node = {}
@@ -432,12 +553,40 @@ def run_metrics(run: Path, reference_cache: dict[str, list]) -> dict[str, float]
                 if lags:
                     m[f"watermark_{node}_lag_p50_ms"] = lags[len(lags) // 2]
                     m[f"watermark_{node}_lag_p90_ms"] = lags[int(0.9 * (len(lags) - 1))]
+            odo = data["/localization/monoscale_raw/status"]
+            if odo:  # odometry counters (docs/C2_CRITERIA_KO.md 7.2-2), last status of the run
+                def flatten(prefix, value):
+                    if isinstance(value, dict):
+                        for name, inner in value.items():
+                            flatten(f"{prefix}_{name}", inner)
+                    elif isinstance(value, (int, float)):
+                        m[prefix] = value
+                for key, value in json.loads(odo[-1][1].data).items():
+                    flatten(f"odo_{key}", value)
+            m.update(lane_completion_metrics(data["/pipeline/progress"], data["/parking/cpp/map_fusion/status"],
+                                             data["/parking/cpp/status"]))
             m.update(snapshot_metrics(data["/mapping/snapshot/lanes"], data["/mapping/snapshot/occupancy"]))
             provenance = data["/localization/kinematic_state/provenance"]
             if provenance:
                 for code, name in {0: "unknown", 1: "raw", 2: "interpolated", 3: "imu_fill", 4: "held"}.items():
                     m[f"pose_provenance_{name}"] = sum(msg.kind == code for _, msg in provenance)
                 m["pose_provenance_covariance_valid"] = sum(msg.covariance_valid for _, msg in provenance)
+                if hasattr(provenance[0][1], "raw_cameras"):  # C-2: which cameras solved the raw pose
+                    for _, msg in provenance:
+                        key = "pose_raw_cameras_" + (msg.raw_cameras or "none").replace(",", "+").replace("/", "_")
+                        m[key] = m.get(key, 0) + 1
+                m.update(pose_covariance_rules(data["/localization/kinematic_state"], provenance,
+                                               data["/localization/monoscale_raw"]))
+            status = data["/mapping/fused_map/status"]
+            if status:
+                # Late-provenance wait (map_assembler): counters from its last status.
+                for name in ("provenance_wait_started", "provenance_attached_late", "provenance_expired_lower",
+                             "provenance_expired_upper", "provenance_expired_both", "provenance_superseded",
+                             "provenance_released_for_poseless", "provenance_dropped_while_holding",
+                             "provenance_reset_discarded", "provenance_missing"):
+                    found = re.search(rf'"{name}":(\d+)', status[-1][1].data)
+                    if found:
+                        m["fused_" + name] = int(found.group(1))
             m.update(fused_metrics(data["/mapping/fused_map"], data["/mapping/snapshot/lanes"],
                                    data["/mapping/snapshot/occupancy"]))
             grids = data["/perception/occupancy_grid_map"]

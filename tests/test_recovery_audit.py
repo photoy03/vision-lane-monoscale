@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/eval"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/eval/metrics"))
 from audit_recovery_runs import _read_events, _read_keyframes, _read_last_status
 
 

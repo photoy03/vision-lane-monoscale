@@ -21,10 +21,22 @@ def nodes(ctx):
     if not (ctx.launch_occupancy and ctx.launch_lane_fusion):
         raise ValueError('launch_fusion needs launch_occupancy:=true and launch_lane_fusion:=true')
     common = {'use_sim_time': ctx.sim_time}
+    provenance_topic = ctx.args.arg('fusion_provenance_topic').strip()
     return [
         ctx.make_node(package='map_assembly', executable='map_assembler_node', name='map_assembler',
                       output='screen', parameters=[node_parameters('runtime.yaml', 'map_assembler'),
-                                                   {**common, 'pose_topic': ctx.topics.odom}]),
+                                                   {**common, 'pose_topic': ctx.topics.odom,
+                                                    'provenance_topic': provenance_topic}]),
         ctx.make_node(package='map_assembly', executable='map_visualizer_node', name='map_visualizer',
                       output='screen', parameters=[node_parameters('runtime.yaml', 'map_visualizer'), common]),
-    ]
+    ] + viewer(ctx)
+
+
+def viewer(ctx):
+    """The fused-map image (and, before the first map, the readiness card)
+    opens with the other viewers; closing it does not stop mapping."""
+    if not ctx.args.flag('launch_viewer'):
+        return []
+    return [ctx.make_node(package='rqt_image_view', executable='rqt_image_view',
+                          name='fused_map_viewer', output='screen',
+                          arguments=['/mapping/fused_map/image'])]

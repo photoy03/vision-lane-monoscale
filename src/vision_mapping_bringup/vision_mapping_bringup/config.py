@@ -10,7 +10,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch.substitutions import LaunchConfiguration
 
 CONFIG_GROUPS = ('sensors', 'tracker', 'odometry', 'pose', 'occupancy', 'lane_detection', 'lane_map',
-                 'map', 'runtime')
+                 'map', 'runtime', 'parking')
 # Package default files per node, applied in this order before bringup overrides.
 PACKAGE_DEFAULTS = {
     'feature_tracker': (('monoscale_odometry', 'config/vision_fisheye.param.yaml'),
@@ -24,6 +24,7 @@ PACKAGE_DEFAULTS = {
         ('monoscale_occupancy_grid_map', 'config/occupancy.param.yaml'),),
     'map_assembler': (('map_assembly', 'config/map_assembly.yaml'),),
     'map_visualizer': (('map_assembly', 'config/map_assembly.yaml'),),
+    'parking_goal_pose_node': (('parking_assist', 'config/parking_assist.yaml'),),
 }
 
 

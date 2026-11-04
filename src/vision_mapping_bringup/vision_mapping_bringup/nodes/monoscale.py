@@ -1,5 +1,6 @@
 """Visual odometry, the pose authority and the occupancy grid (launch group: monoscale)."""
-from vision_mapping_bringup.camera import FRONT_FRAME, REAR_FRAME, monoscale_front, occupancy_camera
+from vision_mapping_bringup.camera import (FRONT_FRAME, FRONT_ID, REAR_FRAME, REAR_ID, monoscale_front,
+                                          occupancy_camera)
 from vision_mapping_bringup.config import node_parameters
 from vision_mapping_bringup.odom_policy import odom_policy
 
@@ -17,13 +18,15 @@ def tracker(ctx):
                 'use_sim_time': ctx.sim_time, 'cameras': ctx.camera_names,
                 'image_topics': ctx.image_topics, 'info_topics': ctx.info_topics,
                 **ctx.rear_parameters,
+                **({'compressed_image_topics': ctx.compressed_topics, 'compressed_decode': ctx.compressed_decode}
+                   if ctx.compressed_topics else {}),
                 'diagnostics_csv_path': str(run / 'tracker_frames.csv') if ctx.stage_diagnostics else '',
                 'gyro_diagnostics_csv_path': str(run / 'gyro_prediction.csv') if ctx.stage_diagnostics else '',
                 **monoscale_front(ctx.setup.front),
                 # Upstream's default is the rear camera.  For this single
                 # camera launch, use front; otherwise road-step estimation
                 # never receives a frame from its selected camera.
-                'motion_reference': 'rear' if ctx.rear_enabled else 'front',
+                'motion_reference': REAR_ID if ctx.rear_enabled else FRONT_ID,
                 'use_cuda': False,
                 'executor_threads': 1, 'opencv_threads': 2,
                 **ctx.tracker_overrides,
@@ -46,7 +49,15 @@ def odometry(ctx):
                 'publish_tf': False, 'publish_map_to_odom': False,
                 'executor_threads': ctx.odom_executor_threads,
                 'mapping_min_period_sec': 0.2,
+                **lone_camera(ctx),
             }])
+
+
+def lone_camera(ctx):
+    value = ctx.args.arg('odom_lone_camera_solve').strip().lower()
+    if value not in ('', 'true', 'false'):
+        raise ValueError('odom_lone_camera_solve must be true, false or empty')
+    return {'lone_camera_solve_enabled': value == 'true'} if value else {}
 
 
 def stabilizer(ctx):
@@ -81,15 +92,20 @@ def occupancy(ctx):
     # Camera lists/lenses come from the rig below, not the package's sample mounts.
     defaults = {key: value for key, value in
                 node_parameters('occupancy.yaml', 'monoscale_occupancy_grid_map').items()
-                if key not in ('cameras', 'image_topics', 'info_topics', 'front', 'rear')}
+                if key not in ('cameras', 'image_topics', 'info_topics', FRONT_ID, REAR_ID)}
     parameters = {
         **defaults,
         'use_sim_time': ctx.sim_time,
         'cameras': ctx.camera_names,
         'image_topics': ctx.image_topics,
         'info_topics': ctx.info_topics,
+        **({'compressed_image_topics': ctx.compressed_topics, 'compressed_decode': ctx.compressed_decode}
+           if ctx.compressed_topics else {}),
+        **({'image_queue_depth': ctx.image_queue_depth} if ctx.image_queue_depth else {}),
         'odometry_topic': ctx.topics.odom,
         'occupancy_topic': args.arg('occupancy_topic'),
+        # E-7: per-keyframe stage times, only with stage diagnostics.
+        'keyframe_timing_csv_path': str(ctx.run / 'occupancy_keyframes.csv') if ctx.stage_diagnostics else '',
         'map_frame': world['frame'], 'base_frame': 'base_link',
         'rolling_radius_m': float(world['rolling_radius_m']),
         **args.given((
@@ -104,20 +120,28 @@ def occupancy(ctx):
             ('occupancy_free_to_occupied', 'free_to_occupied', float),
             ('occupancy_occlusion_aware', 'occlusion_aware', float),
             ('occupancy_max_pending_keyframes', 'max_pending_keyframes', int),
+            ('occupancy_camera_liveness', 'camera_liveness_enabled', bool),
+            ('occupancy_camera_dead_sec', 'camera_dead_sec', float),
+            ('occupancy_parallel_cameras', 'parallel_cameras', bool),
+            ('occupancy_publish_rate_hz', 'publish_rate_hz', float),
+            ('occupancy_publish_commit_neutralise', 'publish_commit_neutralise', bool),
+            ('occupancy_carve_on_keyframe', 'carve_on_keyframe', bool),
             ('occupancy_max_odom_gap_sec', 'max_odom_interpolation_gap_sec', float),
             ('occupancy_max_odom_translation_m', 'max_odom_interpolation_translation_m', float),
             ('occupancy_max_odom_yaw_deg', 'max_odom_interpolation_yaw_deg', float),
             ('occupancy_image_quality_gate_mode', 'image_quality_gate_mode', str),
-            ('occupancy_image_quality_min_sharpness', 'image_quality_min_sharpness', float))),
+            ('occupancy_image_quality_min_sharpness', 'image_quality_min_sharpness', float),
+            ('occupancy_image_quality_sample_width', 'image_quality_sample_width', int),
+            ('occupancy_image_quality_laplacian_ksize', 'image_quality_laplacian_ksize', int))),
         'extent_mode': args.arg('map_extent_mode'),
         **{name: float(world[key]) for name, key in (
             ('map_x_min_m', 'x_min_m'), ('map_x_max_m', 'x_max_m'),
             ('map_y_min_m', 'y_min_m'), ('map_y_max_m', 'y_max_m'),
             ('map_resolution_m', 'occupancy_resolution_m'))},
-        **occupancy_camera('front', ctx.setup.front, FRONT_FRAME),
+        **occupancy_camera(FRONT_ID, ctx.setup.front, FRONT_FRAME),
     }
     if ctx.rear_enabled:
-        parameters.update(occupancy_camera('rear', ctx.setup.rear, REAR_FRAME))
+        parameters.update(occupancy_camera(REAR_ID, ctx.setup.rear, REAR_FRAME))
     return ctx.make_node(
         package='monoscale_occupancy_grid_map', executable='sweep_node',
         name='monoscale_occupancy_grid_map', output='screen',

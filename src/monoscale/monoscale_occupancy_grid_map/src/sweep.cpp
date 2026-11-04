@@ -1,6 +1,7 @@
 #include "monoscale_occupancy_grid_map/sweep.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -21,7 +22,7 @@ bool cuda_match(
   const Pose5 & reference_pose, const std::vector<Pose5> & source_poses,
   const std::vector<double> & heights, int road,
   cv::Mat & best, cv::Mat & best_cost, cv::Mat & road_cost, cv::Mat & second_cost,
-  std::vector<cv::Mat> & volume, bool want_volume);
+  std::vector<cv::Mat> & volume, bool want_volume, double * volume_copy_ms);
 #else
 bool cuda_match(
   const Lens &, const SweepSettings &,
@@ -29,7 +30,7 @@ bool cuda_match(
   const Pose5 &, const std::vector<Pose5> &,
   const std::vector<double> &, int,
   cv::Mat &, cv::Mat &, cv::Mat &, cv::Mat &,
-  std::vector<cv::Mat> &, bool)
+  std::vector<cv::Mat> &, bool, double *)
 {
   return false;
 }
@@ -409,9 +410,34 @@ void Sweep::keyframe(
   const std::vector<Pose5> & source_poses,
   CameraGrid & grid) const
 {
+  integrate_keyframe(compute_keyframe(reference_gray, reference_pose, source_grays, source_poses), grid);
+}
+
+void Sweep::integrate_keyframe(const KeyframeResult & result, CameraGrid & grid) const
+{
+  if (!result.valid) {return;}
+  const auto stage = std::chrono::steady_clock::now();
+  integrate(result.reference_pose, result.heights, result.road, result.best, result.best_cost,
+    result.second_cost, result.verdict, grid);
+  timing_.integrate_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - stage).count();
+}
+
+KeyframeResult Sweep::compute_keyframe(
+  const cv::Mat & reference_gray, const Pose5 & reference_pose,
+  const std::vector<cv::Mat> & source_grays,
+  const std::vector<Pose5> & source_poses) const
+{
+  KeyframeResult result;
   if (source_grays.size() < 2) {
-    return;
+    return result;
   }
+  using Clock = std::chrono::steady_clock;
+  const auto ms_since = [](Clock::time_point start) {
+      return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    };
+  timing_ = KeyframeTiming{};
+  auto stage = Clock::now();
   const_cast<Sweep *>(this)->width_ = reference_gray.cols;
   const_cast<Sweep *>(this)->height_ = reference_gray.rows;
   ensure_rays(width_, height_);
@@ -465,10 +491,13 @@ void Sweep::keyframe(
   // the same one plane_sweep.py runs, so this is not a re-implementation but a
   // shared arithmetic. It also returns the aggregated volume, which subplane
   // needs. The CPU path below is the parity reference and the fallback.
+  timing_.prep_ms = ms_since(stage);
+  stage = Clock::now();
   const bool did_cuda = settings_.use_cuda && cuda_match(
     lens_, settings_, reference32, source32, reference_pose, source_poses,
     heights, road, best, best_cost, road_cost, second_cost, volume,
-    settings_.subplane);
+    settings_.subplane, &timing_.volume_copy_ms);
+  timing_.cuda = did_cuda;
 
   if (!did_cuda) {
     // ZNCC cost volume, summed over sources, x100 * count -- the same scaling
@@ -538,11 +567,15 @@ void Sweep::keyframe(
     second_cost.create(height_, width_, CV_32F);
     reduce_volume(volume, road, best, best_cost, road_cost, second_cost);
   }
+  timing_.match_ms = ms_since(stage) - timing_.volume_copy_ms;
+  stage = Clock::now();
 
   Verdict verdict;
   build_verdict(
     reference32, best, best_cost, road_cost, second_cost, heights, road,
     reference_pose, source_poses, dot_normal, normal, verdict);
+  timing_.verdict_ms = ms_since(stage);
+  stage = Clock::now();
 
   // Sub-plane refinement of the surface height, from the aggregated cost
   // curve: a parabola through the winning rung and its two neighbours. The
@@ -572,8 +605,16 @@ void Sweep::keyframe(
     }
   }
 
-  integrate(reference_pose, heights, road, best, best_cost, second_cost,
-    verdict, grid);
+  timing_.subplane_ms = ms_since(stage);
+  result.valid = true;
+  result.reference_pose = reference_pose;
+  result.heights = std::move(heights);
+  result.road = road;
+  result.best = best;
+  result.best_cost = best_cost;
+  result.second_cost = second_cost;
+  result.verdict = std::move(verdict);
+  return result;
 }
 
 void Sweep::aggregate(

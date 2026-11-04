@@ -10,6 +10,9 @@
 // elsewhere, and none of which proves the assembly.
 
 #include <cmath>
+#include <deque>
+#include <functional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -159,6 +162,12 @@ struct Drive
   // How many cameras to feed. The estimator fuses a list rather than a pair,
   // so one is a supported rig and not a degenerate case.
   size_t cameras = 2;
+  // Which cameras deliver this step (all when empty): a camera hole.
+  std::vector<bool> active;
+  // When a captured frame reaches the estimator (immediately when unset):
+  // release(camera, captured, now). Models tracker output that lags capture.
+  std::function<bool(size_t, double, double)> release;
+  std::vector<std::deque<TrackFrame>> held{2};
 
   explicit Drive(const EstimatorSettings & settings)
   : estimator(settings), world(road_points()), cameras(settings.cameras.size()) {}
@@ -184,6 +193,9 @@ struct Drive
     stamp += dt;
 
     for (size_t index = 0; index < cameras; ++index) {
+      if (!active.empty() && !active[index]) {
+        continue;
+      }
       const CameraSettings camera = index == 0 ? front_camera() : rear_camera();
       const Eigen::Matrix3d k = track_intrinsics(camera);
       TrackFrame frame;
@@ -223,7 +235,17 @@ struct Drive
         frame.previous_pixels(n, 0) = pixels[static_cast<size_t>(n)].x() - 4.0;
         frame.previous_pixels(n, 1) = pixels[static_cast<size_t>(n)].y();
       }
-      estimator.ingest_tracks(index, frame);
+      if (!release) {
+        estimator.ingest_tracks(index, frame);
+      } else {
+        held[index].push_back(std::move(frame));
+      }
+    }
+    for (size_t index = 0; release && index < held.size(); ++index) {
+      while (!held[index].empty() && release(index, held[index].front().stamp, stamp)) {
+        estimator.ingest_tracks(index, held[index].front());
+        held[index].pop_front();
+      }
     }
   }
 };
@@ -688,3 +710,306 @@ TEST(EstimatorDrive, TheCovarianceItPublishesGrowsAndIsNotAFilterArtefact)
   EXPECT_TRUE(last->twist_covariance.allFinite());
   EXPECT_GT(last->twist_covariance(0, 0), 0.0);
 }
+
+// Lone-camera solve (docs/C2_CRITERIA_KO.md 7.2-3, 7.4-1).
+namespace
+{
+struct HoleResult
+{
+  std::vector<monoscale::Update> updates;
+  Pose2 pose;
+  double travelled = 0.0;
+  double hole_start = 0.0;
+  double hole_end = 0.0;
+  monoscale::Diagnostics diagnostics;
+};
+
+// Both cameras, then only the rear for `hole_steps`, then both again, at a
+// parking speed: the first lone hop spans lone_gap_sec, and the per-hop cap
+// (max_translation_per_frame_m, 1 m) only lets it through below 1 m/s.
+HoleResult drive_through_front_hole(bool lone, int hole_steps, double speed = 0.5)
+{
+  EstimatorSettings settings = deployment_settings();
+  settings.lone_camera_solve_enabled = lone;
+  Drive drive(settings);
+  HoleResult out;
+  const double dt = 1.0 / 30.0;
+  for (int i = 0; i < 60; ++i) {
+    drive.step(speed, 0.0, dt);
+  }
+  out.hole_start = drive.stamp;
+  drive.active = {false, true};
+  for (int i = 0; i < hole_steps; ++i) {
+    drive.step(speed, 0.0, dt);
+  }
+  out.hole_end = drive.stamp;
+  drive.active.clear();
+  for (int i = 0; i < 90; ++i) {
+    drive.step(speed, 0.0, dt);
+  }
+  out.updates = drive.estimator.take_updates();
+  out.pose = drive.estimator.pose();
+  out.travelled = drive.travelled;
+  out.diagnostics = drive.estimator.diagnostics();
+  return out;
+}
+
+size_t solved_inside(const HoleResult & r, double margin)
+{
+  size_t n = 0;
+  for (const auto & u : r.updates) {
+    if (u.stamp > r.hole_start + margin && u.stamp < r.hole_end && u.pose_valid && !u.solved_by.empty()) {
+      ++n;
+    }
+  }
+  return n;
+}
+}  // namespace
+
+TEST(LoneCameraSolve, OffWaitsThroughAHoleAsBefore)
+{
+  const auto r = drive_through_front_hole(false, 90);
+  EXPECT_EQ(solved_inside(r, 0.0), 0u);
+  EXPECT_TRUE(r.diagnostics.lone_solves.empty());
+}
+
+TEST(LoneCameraSolve, OnTheRearAloneFillsAFrontHole)
+{
+  const auto r = drive_through_front_hole(true, 90);  // 3 s without the front
+  EXPECT_GT(solved_inside(r, 1.0), 3u);
+  ASSERT_TRUE(r.diagnostics.lone_solves.count("rear"));
+  EXPECT_GT(r.diagnostics.lone_solves.at("rear"), 3);
+  EXPECT_EQ(r.diagnostics.lone_solves.count("front"), 0u);
+  // Lone updates are the rear's own: stamp and solver.
+  for (const auto & u : r.updates) {
+    if (u.stamp > r.hole_start + 1.0 && u.stamp < r.hole_end && !u.solved_by.empty()) {
+      EXPECT_EQ(u.solved_by, "rear");
+    }
+  }
+  // In this noiseless world one long two-camera hop across the hole (off) is
+  // exact; chaining single-camera hops (on) costs a few centimetres. What lone
+  // solving buys is output inside the hole, not a better total.
+  const auto off = drive_through_front_hole(false, 90);
+  EXPECT_LE(std::abs(r.pose.x - r.travelled), std::abs(off.pose.x - off.travelled) + 0.1);
+  EXPECT_NEAR(r.pose.x, r.travelled, 0.3);
+  EXPECT_NEAR(r.pose.y, 0.0, 0.3);
+  std::printf("front hole 3 s: lone on x=%.3f, off x=%.3f, truth %.3f\n", r.pose.x, off.pose.x, r.travelled);
+}
+
+TEST(LoneCameraSolve, TheReturningCameraIsReseededAloneAndTheOtherKeepsSolving)
+{
+  const auto r = drive_through_front_hole(true, 90);
+  EXPECT_GE(r.diagnostics.lone_reseeds, 1);
+  // The first solved update after the hole is not a pose hold: the rear solved
+  // across it while the front only re-seeded; then both solve again.
+  bool saw_rear_after = false;
+  bool saw_both_after = false;
+  for (const auto & u : r.updates) {
+    if (u.stamp <= r.hole_end || u.solved_by.empty()) {
+      continue;
+    }
+    if (!saw_both_after && u.solved_by == "rear") {
+      saw_rear_after = true;
+    }
+    if (u.solved_by == "front,rear") {
+      saw_both_after = true;
+    }
+  }
+  EXPECT_TRUE(saw_rear_after);
+  EXPECT_TRUE(saw_both_after);
+  EXPECT_EQ(r.diagnostics.imu_yaw_resyncs, 0);
+}
+
+TEST(LoneCameraSolve, AShortGapUnderLoneGapIsNotLone)
+{
+  // A front camera at a third of the rear's rate (a 0.1 s gap, well under
+  // lone_gap_sec) stays a pairing matter: no lone solve.
+  EstimatorSettings settings = deployment_settings();
+  settings.lone_camera_solve_enabled = true;
+  Drive drive(settings);
+  for (int i = 0; i < 240; ++i) {
+    drive.active = {i % 3 == 0, true};
+    drive.step(2.0, 0.0, 1.0 / 30.0);
+  }
+  EXPECT_TRUE(drive.estimator.diagnostics().lone_solves.empty());
+  EXPECT_GT(drive.estimator.diagnostics().frames_processed, 10);
+}
+
+TEST(LoneCameraSolve, AHoleLongerThanTheImuHistoryOnlyResyncsTheSilentCamera)
+{
+  // 35 s without the front (IMU history 30 s): the rear kept a fresh reference
+  // by solving alone, so nothing expires for it and the front is re-seeded alone.
+  const auto r = drive_through_front_hole(true, 35 * 30);
+  EXPECT_EQ(r.diagnostics.imu_yaw_resyncs, 0);
+  EXPECT_GE(r.diagnostics.lone_reseeds, 1);
+  EXPECT_NEAR(r.pose.x, r.travelled, 1.0);
+}
+
+namespace
+{
+EstimatorSettings lone_settings()
+{
+  EstimatorSettings settings = deployment_settings();
+  settings.lone_camera_solve_enabled = true;
+  return settings;
+}
+}  // namespace
+
+TEST(LoneCameraSolve, APeerThatArrivesLateIsNotTakenForAHole)
+{
+  // Frames reach the estimator seconds after capture (tracker lag; the front
+  // 0.2 s behind the rear), with no hole at all: arrival is continuous, so
+  // nothing goes alone however far behind the clock the frames are.
+  Drive drive(lone_settings());
+  drive.release = [](size_t camera, double captured, double now) {
+      return now >= captured + (camera == 0 ? 3.0 : 2.8);
+    };
+  for (int i = 0; i < 300; ++i) {
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  const auto & d = drive.estimator.diagnostics();
+  EXPECT_TRUE(d.lone_solves.empty());
+  EXPECT_TRUE(d.lone_frames.empty());
+  EXPECT_TRUE(d.lone_late_peer.empty());
+  EXPECT_GT(d.frames_processed, 10);
+}
+
+TEST(LoneCameraSolve, ASilentPeerLetsFramesGoAfterLoneSilence)
+{
+  // The front stops for good: it never moves past the rear's frames, so only
+  // arrival silence can release them -- after lone_silence_sec, and only rear
+  // frames more than lone_gap_sec past the front's last one (the ones before
+  // wait however long the silence lasts).
+  Drive drive(lone_settings());
+  for (int i = 0; i < 60; ++i) {
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  const double last_front = drive.stamp;
+  drive.active = {false, true};
+  for (int i = 0; i < 45; ++i) {  // 1.5 s: silent, but not for lone_silence_sec
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  EXPECT_TRUE(drive.estimator.diagnostics().lone_frames.empty());
+  for (int i = 0; i < 75; ++i) {  // to 4 s of silence
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  const auto & d = drive.estimator.diagnostics();
+  ASSERT_TRUE(d.lone_frames.count("rear"));
+  EXPECT_GT(d.lone_frames.at("rear"), 0);
+  EXPECT_GT(d.first_lone_stamp, last_front + 1.0);
+  EXPECT_EQ(d.lone_by_reason.count("sparse"), 0u);
+}
+
+TEST(LoneCameraSolve, AFrontEveryTwoSecondsIsSparseAndTheRearGoesAlone)
+{
+  // Front frames 2 s apart (each a peer for the rear within lone_gap_sec, so
+  // the hole test never fires): rear frames between them have no pair inside
+  // sync tolerance and are solved alone once the front frame after them is in.
+  // Off, the same drive yields nothing (two pairs, no motion).
+  Drive drive(lone_settings());
+  for (int i = 0; i < 360; ++i) {
+    drive.active = {i % 60 == 0, true};
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  const auto & d = drive.estimator.diagnostics();
+  ASSERT_TRUE(d.lone_by_reason.count("sparse"));
+  EXPECT_GT(d.lone_by_reason.at("sparse"), 100);
+  EXPECT_TRUE(d.lone_late_peer.empty());
+  // Travel between the first and last valid update against the truth over the
+  // same stamps (the rear frames after the last front frame are still waiting
+  // for the next one, as they should).
+  const auto updates = drive.estimator.take_updates();
+  const monoscale::Update * first = nullptr;
+  const monoscale::Update * last = nullptr;
+  for (const auto & u : updates) {
+    if (u.pose_valid) {
+      if (!first) {
+        first = &u;
+      }
+      last = &u;
+    }
+  }
+  ASSERT_TRUE(first && last);
+  EXPECT_GT(last->stamp - first->stamp, 8.0);
+  EXPECT_NEAR(last->pose.x - first->pose.x, 0.5 * (last->stamp - first->stamp), 0.15);
+}
+
+TEST(LoneCameraSolve, AFrontEveryOnePointTwoSecondsIsNotSparse)
+{
+  // Inside lone_sparse_sec (the recordings' normal widest gap is 1.33 s).
+  Drive drive(lone_settings());
+  for (int i = 0; i < 360; ++i) {
+    drive.active = {i % 36 == 0, true};
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  EXPECT_TRUE(drive.estimator.diagnostics().lone_frames.empty());
+}
+
+TEST(LoneCameraSolve, APeerArrivingInBurstsAfterSilenceIsCountedAsAMisfire)
+{
+  // The residual risk of the arrival test: a front that goes quiet past
+  // lone_silence_sec and then delivers its backlog at once. Rear frames released
+  // during the quiet are wrong, and lone_late_peer says so.
+  Drive drive(lone_settings());
+  drive.release = [](size_t camera, double, double now) {
+      // The front delivers only in a 0.2 s window every 3 s.
+      return camera == 1 || std::fmod(now, 3.0) < 0.2;
+    };
+  for (int i = 0; i < 450; ++i) {
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  const auto & d = drive.estimator.diagnostics();
+  ASSERT_TRUE(d.lone_late_peer.count("rear"));
+  EXPECT_GT(d.lone_late_peer.at("rear"), 0);
+}
+
+
+TEST(LoneCameraSolve, RearFramesAboutToBeAbsorbedIntoTheNextPairGoAloneFirst)
+{
+  // Front frames 2 s apart that reach the estimator 0.5 s late: by the time the
+  // next front frame arrives, the rear frame paired with it is already queued,
+  // so the rear frames before it would be absorbed into that pair without ever
+  // reaching the drop path. They go alone instead (observer_eval_C2_5a_fardrop).
+  Drive drive(lone_settings());
+  drive.release = [](size_t camera, double captured, double now) {
+      return camera == 1 || now >= captured + 0.5;
+    };
+  // Rear at 5 Hz as on the vehicle (a 30 Hz rear would fill the retention).
+  for (int i = 0; i < 360; ++i) {
+    drive.active = {i % 60 == 0, i % 6 == 0};
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  const auto & d = drive.estimator.diagnostics();
+  const int64_t absorbed_alone =
+    (d.lone_by_reason.count("sparse@absorb") ? d.lone_by_reason.at("sparse@absorb") : 0) +
+    (d.lone_by_reason.count("gap@absorb") ? d.lone_by_reason.at("gap@absorb") : 0);
+  EXPECT_GT(absorbed_alone, 20);
+  EXPECT_TRUE(d.lone_late_peer.empty());
+}
+
+TEST(LoneCameraSolve, NormallySpacedLatePeersAreAbsorbedAsBefore)
+{
+  // Front every 0.4 s, 0.5 s late: absorption is ordinary pairing, nothing alone.
+  Drive drive(lone_settings());
+  drive.release = [](size_t camera, double captured, double now) {
+      return camera == 1 || now >= captured + 0.5;
+    };
+  for (int i = 0; i < 300; ++i) {
+    drive.active = {i % 12 == 0, i % 6 == 0};
+    drive.step(0.5, 0.0, 1.0 / 30.0);
+  }
+  const auto & d = drive.estimator.diagnostics();
+  EXPECT_EQ(d.lone_by_reason.count("sparse@absorb"), 0u);
+  EXPECT_EQ(d.lone_by_reason.count("gap@absorb"), 0u);
+  EXPECT_TRUE(d.lone_frames.empty());
+}
+
+TEST(FusionModelName, OnlyImplementedModelsAreAccepted)
+{
+  EXPECT_EQ(monoscale::fusion_model_from_name("velocity"), monoscale::FusionModel::Velocity);
+  EXPECT_EQ(monoscale::fusion_model_from_name("displacement"), monoscale::FusionModel::Displacement);
+  EXPECT_THROW(monoscale::fusion_model_from_name("msckf"), std::invalid_argument);
+  EXPECT_THROW(monoscale::fusion_model_from_name("msckf6"), std::invalid_argument);
+  EXPECT_THROW(monoscale::fusion_model_from_name("velocty"), std::invalid_argument);
+}
+

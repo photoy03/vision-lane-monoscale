@@ -22,7 +22,7 @@ builtin_interfaces/Time pose_upper
 # pose_match: an exact pose has its sample's kind; an interpolated pose is never RAW
 # (at least INTERPOLATED, or the weaker endpoint). UNKNOWN when provenance is missing.
 uint8 pose_kind                          # PoseProvenance constants
-bool pose_covariance_valid               # false: variances unknown (both fields hold -1)
+bool pose_covariance_valid               # false: variances unknown (both fields hold -1, this message's own convention)
 float64 pose_position_variance
 float64 pose_yaw_variance
 builtin_interfaces/Time pose_raw_lower   # raw measurements behind the pose at T

@@ -21,6 +21,16 @@ case "$support_backend" in
     fi
     support_cmake_args+=("-DCMAKE_CUDA_COMPILER=$support_cuda_root/bin/nvcc"
       -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/gcc-11 -DMONOSCALE_CUDA_ARCHITECTURES=86)
+    # The tracker's CUDA OpenCV (GPU optical flow, road_step_gpu). --cmake-clean-cache below
+    # forgets it every build, so it is passed here: the environment variable if set (empty
+    # to build against the system OpenCV), else the workspace's usual install if present.
+    support_tracker_opencv=${MONOSCALE_TRACKER_OPENCV_DIR-$HOME/opt/opencv-4.5.4-cuda-of/lib/cmake/opencv4}
+    if [[ -n "$support_tracker_opencv" && -d "$support_tracker_opencv" ]]; then
+      support_cmake_args+=("-DMONOSCALE_TRACKER_OPENCV_DIR=$support_tracker_opencv")
+      echo "feature_tracker OpenCV: $support_tracker_opencv"
+    else
+      echo "feature_tracker OpenCV: system (no GPU optical flow)"
+    fi
     ;;
   cpu) support_cmake_args+=(-DCMAKE_CUDA_COMPILER=NOTFOUND) ;;
   *) echo 'Usage: bash tools/build/build.sh [cuda|cpu]' >&2; exit 2 ;;

@@ -1,5 +1,7 @@
 #include <cassert>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "map_assembly/assembler.hpp"
 
@@ -108,6 +110,146 @@ int main() {
     assert(buffer.find(11 * s)->raw_upper == 12 * s);
     buffer.clear();                                       // time-line reset
     assert(buffer.size() == 0 && !buffer.find(12 * s));
+  }
+  {  // Late provenance: the three arrival orders.
+    using map_assembly::PoseKind;
+    const int64_t wait = s / 2;
+    {  // provenance -> pose -> publish: out at once, nothing held
+      map_assembly::ProvenanceBuffer buffer;
+      map_assembly::ProvenanceGate<int> gate(wait);
+      buffer.add(10 * s, {PoseKind::kRaw, 10 * s, 10 * s});
+      assert(gate.offer(10 * s, true, 10 * s, 10 * s, 1, 100 * s, buffer));
+      assert(!gate.holding() && gate.counts().started == 0);
+    }
+    {  // pose -> provenance -> publish: same, the tick finds it present
+      map_assembly::ProvenanceBuffer buffer;
+      map_assembly::ProvenanceGate<int> gate(wait);
+      buffer.add(10 * s, {PoseKind::kImuFill, 9 * s, 11 * s});
+      buffer.add(11 * s, {PoseKind::kRaw, 11 * s, 11 * s});
+      assert(gate.offer(10 * s + s / 2, true, 10 * s, 11 * s, 1, 100 * s, buffer));
+    }
+    {  // pose -> publish -> provenance: held, released attached when it arrives
+      map_assembly::ProvenanceBuffer buffer;
+      map_assembly::ProvenanceGate<int> gate(wait);
+      buffer.add(10 * s, {PoseKind::kRaw, 10 * s, 10 * s});
+      assert(!gate.offer(10 * s + s / 2, true, 10 * s, 11 * s, 7, 100 * s, buffer));
+      assert(gate.holding() && gate.counts().started == 1);
+      assert(gate.floor(0) == 10 * s + s / 2 && gate.floor(20 * s) == 20 * s);
+      assert(!gate.poll(100 * s + s / 10, buffer));
+      buffer.add(11 * s, {PoseKind::kRaw, 11 * s, 11 * s});
+      const auto r = gate.poll(100 * s + s / 5, buffer);
+      assert(r && r->payload == 7 && !r->expired && gate.counts().attached_late == 1 && !gate.holding());
+    }
+    {  // no valid pose at T: nothing to wait for
+      map_assembly::ProvenanceBuffer buffer;
+      map_assembly::ProvenanceGate<int> gate(wait);
+      assert(gate.offer(10 * s, false, 0, 0, 1, 100 * s, buffer));
+    }
+  }
+  {  // Deadline: fixed at the first attempt, counted by the missing side, frozen with the ROS clock.
+    using map_assembly::PoseKind;
+    const int64_t wait = s / 2;
+    map_assembly::ProvenanceBuffer buffer;
+    map_assembly::ProvenanceGate<int> gate(wait);
+    assert(!gate.offer(10 * s, true, 9 * s, 11 * s, 1, 100 * s, buffer));
+    // The same T offered again later neither restarts nor extends the wait.
+    assert(!gate.offer(10 * s + 1, true, 9 * s, 11 * s, 2, 100 * s + 3 * s / 10, buffer));
+    assert(gate.counts().started == 1);
+    assert(!gate.poll(100 * s + 4 * s / 10, buffer));
+    assert(!gate.poll(100 * s + 4 * s / 10, buffer));      // paused clock: still waiting
+    auto r = gate.poll(100 * s + wait, buffer);
+    assert(r && r->payload == 1 && r->expired && gate.counts().expired_both == 1);
+
+    buffer.add(20 * s, {PoseKind::kRaw, 20 * s, 20 * s});  // lower present, upper never comes
+    assert(!gate.offer(20 * s + 1, true, 20 * s, 21 * s, 3, 200 * s, buffer));
+    r = gate.poll(200 * s + wait, buffer);
+    assert(r && r->expired && gate.counts().expired_upper == 1);
+    buffer.add(31 * s, {PoseKind::kRaw, 31 * s, 31 * s});  // upper present, lower never comes
+    assert(!gate.offer(30 * s + 1, true, 30 * s, 31 * s, 4, 300 * s, buffer));
+    r = gate.poll(300 * s + wait, buffer);
+    assert(r && r->expired && gate.counts().expired_lower == 1);
+  }
+  {  // Superseded: a newer T with its provenance goes out, the held one is dropped.
+    using map_assembly::PoseKind;
+    map_assembly::ProvenanceBuffer buffer;
+    map_assembly::ProvenanceGate<int> gate(s / 2);
+    assert(!gate.offer(10 * s, true, 9 * s, 11 * s, 1, 100 * s, buffer));
+    assert(!gate.offer(12 * s, true, 12 * s, 12 * s, 2, 100 * s + s / 10, buffer));  // newer, also unready
+    assert(gate.counts().started == 1 && gate.floor(0) == 10 * s);                     // the first one stays held
+    buffer.add(12 * s, {PoseKind::kRaw, 12 * s, 12 * s});
+    assert(gate.offer(12 * s, true, 12 * s, 12 * s, 2, 100 * s + s / 5, buffer));
+    assert(gate.counts().superseded == 1 && !gate.holding() && !gate.poll(200 * s, buffer));
+  }
+  {  // A newer candidate without a pose releases the held one (its pose kept) before itself.
+    map_assembly::ProvenanceBuffer buffer;
+    map_assembly::ProvenanceGate<int> gate(s / 2);
+    assert(!gate.offer(10 * s, true, 9 * s, 11 * s, 1, 100 * s, buffer));
+    assert(!gate.offer(11 * s, true, 9 * s, 12 * s, 9, 100 * s + 1, buffer));      // dropped while holding
+    assert(gate.counts().dropped_while_holding == 1);
+    assert(gate.offer(12 * s, false, 0, 0, 2, 100 * s + s / 10, buffer));          // no pose at 12 s
+    const auto released = gate.take_released();
+    assert(released && released->payload == 1 && released->expired);
+    assert(gate.counts().released_for_poseless == 1 && gate.counts().superseded == 0 && !gate.holding());
+    assert(!gate.take_released());
+  }
+  {  // Time-line reset discards the held one.
+    map_assembly::ProvenanceBuffer buffer;
+    map_assembly::ProvenanceGate<int> gate(s / 2);
+    assert(!gate.offer(10 * s, true, 9 * s, 11 * s, 1, 100 * s, buffer));
+    gate.reset();
+    assert(!gate.holding() && gate.counts().reset_discarded == 1 && !gate.poll(200 * s, buffer));
+    gate.reset();
+    assert(gate.counts().reset_discarded == 1);
+  }
+  {  // received(): a layer that never delivered is told apart from one that stopped.
+    map_assembly::LayerHistory<int> layer;
+    assert(!layer.received() && layer.stalled(1, 1));
+    map_assembly::Meta m;
+    m.session = "s"; m.complete_through = 5; m.valid = true;
+    layer.add(10, m, std::make_shared<int>(1));
+    assert(layer.received());
+  }
+  {  // Readiness: first start, starting -> ready once every layer and a pose came and a map went out.
+    map_assembly::Readiness r(0, 5 * s);
+    assert(std::string(r.phase_name()) == "starting" && r.restart_index() == 0);
+    assert((r.missing() == std::vector<std::string>{"lane", "occupancy", "pose"}));
+    r.lane(false, 10 * s);  // invalid snapshots do not count
+    r.lane(true, 11 * s);
+    r.pose(11 * s);
+    assert((r.missing() == std::vector<std::string>{"occupancy"}));
+    r.occupancy(true, 12 * s);
+    r.lane(true, 13 * s);  // the first one stays
+    assert(r.missing().empty() && r.phase() == map_assembly::Readiness::Phase::kStarting);
+    r.published(7 * s + s / 2);
+    assert(std::string(r.phase_name()) == "ready" && r.ready_after_ms() == 2500.0);
+    assert(r.first_lane_ns() == 11 * s && r.first_occupancy_ns() == 12 * s && r.first_pose_ns() == 11 * s);
+    r.published(9 * s);  // later maps change nothing
+    assert(r.ready_after_ms() == 2500.0);
+  }
+  {  // Supervised restart: recovering -> ready.
+    map_assembly::Readiness r(2, 0);
+    assert(std::string(r.phase_name()) == "recovering" && r.restart_index() == 2);
+    r.lane(true, 1);
+    r.occupancy(true, 1);
+    r.pose(1);
+    r.published(s);
+    assert(std::string(r.phase_name()) == "ready" && r.ready_after_ms() == 1000.0);
+  }
+  {  // Same process, clock generation reset: back to recovering, the firsts start over.
+    map_assembly::Readiness r(0, 0);
+    r.lane(true, 50 * s);
+    r.occupancy(true, 50 * s);
+    r.pose(50 * s);
+    r.published(s);
+    r.generation_reset(100 * s);
+    assert(std::string(r.phase_name()) == "recovering" && r.generation_resets() == 1);
+    assert((r.missing() == std::vector<std::string>{"lane", "occupancy", "pose"}) && r.ready_after_ms() < 0);
+    r.lane(true, 3 * s);
+    r.occupancy(true, 3 * s);
+    r.pose(3 * s);
+    assert(r.first_lane_ns() == 3 * s);
+    r.published(104 * s);
+    assert(std::string(r.phase_name()) == "ready" && r.ready_after_ms() == 4000.0);
   }
   return 0;
 }
