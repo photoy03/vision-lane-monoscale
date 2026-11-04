@@ -48,4 +48,9 @@ def nodes(ctx):
         ]
         out.append(ctx.make_node(package='parking_assist', executable='parking_space_detector',
                                  name='parking_line_tracker', output='screen', arguments=arguments))
+        if ctx.args.flag('launch_viewer'):
+            # The detector's bird's-eye view with the goal and the chosen slot drawn on it.
+            out.append(ctx.make_node(package='rqt_image_view', executable='rqt_image_view',
+                                     name='parking_goal_bev_viewer', output='screen',
+                                     arguments=['/parking/debug/goal_bev']))
     return out

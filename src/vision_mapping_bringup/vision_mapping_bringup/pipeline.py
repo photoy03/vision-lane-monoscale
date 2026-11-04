@@ -42,9 +42,13 @@ def _launch(context, group='all'):
         raise ValueError('Unknown launch group: ' + group)
     selected = {}
 
+    gui_nodes = set()
+
     def make_node(**kwargs):
         node = Node(**kwargs)
         selected[id(node)] = _category(kwargs['package'])
+        if kwargs['package'] in ('rqt_image_view', 'rviz2'):
+            gui_nodes.add(id(node))
         return node
 
     args = LaunchArgs(context, drivers=group in ('all', 'sensors'))
@@ -125,9 +129,11 @@ def _launch(context, group='all'):
 
     nodes = [node for node in nodes if group == 'all' or selected[id(node)] == group]
     # Do not keep accumulating against a restarted pose authority or dead input.
+    # Windows are not guarded: closing a viewer (the fused map's, the parking goal view)
+    # must not stop mapping, the same rule lanes.viewers follows.
     guards = [RegisterEventHandler(OnProcessExit(target_action=node, on_exit=[
         EmitEvent(event=Shutdown(reason='stage1 node exited; restart the whole pipeline'))]))
-        for node in nodes]
+        for node in nodes if id(node) not in gui_nodes]
     viewers = lanes.viewers(ctx, share) if group in ('all', 'lanes') else []
     return [LogInfo(msg=f'Upstream MonoScale: vision x/y + F9R yaw -> stabilized odom -> shared map frame: '
                     f'profile={ctx.profile}, accel_shadow={ctx.shadow}, map_fusion_mode={ctx.map_fusion_mode}. '
