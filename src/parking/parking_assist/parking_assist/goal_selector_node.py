@@ -56,6 +56,9 @@ class GoalSelectorNode(Node):
         self.declare_parameter("selected_topic", "/parking/selected_goal")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("rate_hz", 5.0)
+        # grid: one selection step per occupancy map message (the map is what changes the
+        # answer, and the same input bag then gives the same result); timer: at rate_hz.
+        self.declare_parameter("tick_on", "grid")
         defaults = SelectorParams()
         for name in SelectorParams.__dataclass_fields__:
             self.declare_parameter(name, getattr(defaults, name))
@@ -78,8 +81,12 @@ class GoalSelectorNode(Node):
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(OccupancyGrid, str(self.get_parameter("occupancy_topic").value), self.on_grid, grid_qos)
         self.create_subscription(Odometry, str(self.get_parameter("odom_topic").value), self.on_odom, 100)
-        rate = float(self.get_parameter("rate_hz").value)
-        self.create_timer(1.0 / max(rate, 0.1), self.tick)
+        self.tick_on = str(self.get_parameter("tick_on").value)
+        if self.tick_on not in ("grid", "timer"):
+            raise ValueError("tick_on must be grid or timer")
+        if self.tick_on == "timer":
+            rate = float(self.get_parameter("rate_hz").value)
+            self.create_timer(1.0 / max(rate, 0.1), self.tick)
         self.get_logger().info("goal selector: score = %.0f side + %.0f pillar + %.0f distance, footprint margins "
                                "%.2f / %.2f m" % (self.p.weight_side, self.p.weight_pillar, self.p.weight_distance,
                                                    self.p.footprint_margin_side, self.p.footprint_margin_back))
@@ -99,6 +106,8 @@ class GoalSelectorNode(Node):
         i = message.info
         self.grid = Grid(np.asarray(message.data, dtype=np.int8).reshape(i.height, i.width), float(i.resolution),
                          float(i.origin.position.x), float(i.origin.position.y), yaw_of(i.origin.orientation))
+        if self.tick_on == "grid":
+            self.tick()
 
     def on_odom(self, message: Odometry) -> None:
         p = message.pose.pose
@@ -121,8 +130,12 @@ class GoalSelectorNode(Node):
     def tick(self) -> None:
         if not self.poses:
             return
-        stamp, vx, vy, _ = self.poses[-1]
-        chosen = self.selector.step(self.grid, (vx, vy), self.reversing(), stamp)
+        stamp, vx, vy, vyaw = self.poses[-1]
+        older = [q for q in self.poses if q[0] <= stamp - 0.5]
+        speed = 0.0
+        if older and stamp > older[-1][0]:
+            speed = math.hypot(vx - older[-1][1], vy - older[-1][2]) / (stamp - older[-1][0])
+        chosen = self.selector.step(self.grid, (vx, vy), self.reversing(), stamp, vyaw, speed)
         if chosen is not None:
             out = PoseStamped()
             out.header.frame_id = self.map_frame
@@ -136,10 +149,19 @@ class GoalSelectorNode(Node):
                                        f"score {self.selector.evaluations[chosen.cid].score:.2f} "
                                        f"switches={self.selector.switches} locked={self.selector.locked}")
                 self.last_selected = chosen.cid
+        provisional = None
+        if self.selector.provisional is not None:
+            pc, pe = self.selector.provisional
+            provisional = {"id": pc.cid, "x": round(float(pc.xy[0]), 3), "y": round(float(pc.xy[1]), 3),
+                           "yaw_deg": round(math.degrees(pc.yaw), 1), "score": round(pe.score, 3),
+                           "unknown": pe.footprint.get("unknown")}
         report = {"stamp": stamp, "selected": self.selector.selected, "locked": self.selector.locked,
-                  "switches": self.selector.switches,
+                  "switches": self.selector.switches, "provisional": provisional,
+                  "events": self.selector.events, "lock_events": self.selector.lock_events,
                   "candidates": [{"id": c.cid, "x": round(float(c.xy[0]), 3), "y": round(float(c.xy[1]), 3),
                                   "yaw_deg": round(math.degrees(c.yaw), 1), "hits": c.hits,
+                                  "first_seen": c.first_seen, "first_eligible": c.first_eligible,
+                                  "flips": c.flips, "ever_eligible": c.ever_eligible,
                                   **(self.selector.evaluations[c.cid].as_dict()
                                      if c.cid in self.selector.evaluations else {"status": "hold",
                                                                                  "reason": "too few hits"})}
@@ -163,7 +185,9 @@ class GoalSelectorNode(Node):
             m.ns, m.id, m.type, m.action = "slot", c.cid, Marker.LINE_STRIP, Marker.ADD
             m.pose.orientation.w = 1.0
             m.scale.x = 0.12 if c.cid == self.selector.selected else 0.05
-            r, g, b = (1.0, 0.2, 0.9) if c.cid == self.selector.selected else colours[status]
+            provisional = self.selector.provisional is not None and self.selector.provisional[0].cid == c.cid
+            r, g, b = (1.0, 0.2, 0.9) if c.cid == self.selector.selected else (
+                (0.2, 0.6, 1.0) if provisional else colours[status])
             m.color.r, m.color.g, m.color.b, m.color.a = r, g, b, 1.0
             for x, y in list(corners) + [corners[0]]:
                 m.points.append(Point(x=float(x), y=float(y), z=0.05))
@@ -174,7 +198,8 @@ class GoalSelectorNode(Node):
             t.pose.position.x, t.pose.position.y, t.pose.position.z = float(c.xy[0]), float(c.xy[1]), 0.5
             t.scale.z = 0.4
             t.color.r = t.color.g = t.color.b = t.color.a = 1.0
-            t.text = f"{status} {ev.score:.1f}" if ev and status == "eligible" else status
+            t.text = (f"{status} {ev.score:.1f}" if ev and status == "eligible"
+                      else (f"provisional {ev.score:.1f}" if provisional else status))
             out.markers.append(t)
         self.marker_pub.publish(out)
 

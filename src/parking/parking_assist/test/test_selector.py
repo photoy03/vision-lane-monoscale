@@ -216,3 +216,38 @@ def test_candidate_kept_until_its_occupancy_arrives():
         sel2.add(*goal, 0.0)
     sel2.step(unknown, (0.0, -40.0), False, 31.0)
     assert sel2.candidates == []
+
+
+def test_provisional_is_reported_but_never_selected():
+    p = SelectorParams(provisional_output=True)
+    goal = goal_for_slot((0.0, 0.0), math.pi / 2)
+    sel = GoalSelector(p)
+    for _ in range(3):
+        sel.add(*goal, 0.0)
+    assert sel.step(empty_grid(value=-1), (0.0, -10.0), False, 1.0) is None
+    assert sel.selected is None
+    assert sel.provisional is not None  # shown as provisional, never selected
+    g = empty_grid(value=-1)
+    f = slot_frame(*goal, P)
+    fill_box(g, f, 0.0, 1.5, -1.3, 1.3, 0)  # partly seen, still over 50 % unknown
+    fill_box(g, f, 0.0, P.slot_depth, -3.9, -1.3, 0)
+    assert sel.step(g, (0.0, -10.0), False, 2.0) is None
+    assert sel.provisional is not None and sel.selected is None
+
+
+def test_cap_on_kept_candidates():
+    p = SelectorParams(max_kept_near=2)
+    sel = GoalSelector(p)
+    for x in (0.0, 3.0, 6.0, 9.0):
+        for _ in range(3):
+            sel.add(*goal_for_slot((x, 0.0), math.pi / 2), 0.0)
+    sel.step(empty_grid(value=-1), (0.0, -5.0), False, 100.0)  # all unseen for 100 s, all near
+    kept = sorted(round(float(c.xy[0])) for c in sel.candidates)
+    assert kept == [0, 3]
+
+
+def test_bearing():
+    from parking_assist.selector import bearing
+    assert bearing((0, 0), 0.0, (5, 0)) == "front"
+    assert bearing((0, 0), 0.0, (0, 5)) == "side"
+    assert bearing((0, 0), 0.0, (-5, 0)) == "back"

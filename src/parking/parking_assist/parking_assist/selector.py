@@ -69,8 +69,16 @@ class SelectorParams:
     # Candidates near the vehicle are kept however long ago they were seen: the occupancy
     # map covers a slot only as the vehicle passes it (0926: the footprint stayed 75-100 %
     # unknown for ~100 s after the goal was first found), so a slot seen early must still
-    # be there when its occupancy arrives.
+    # be there when its occupancy arrives. A post-hoc change made after looking at 0926
+    # (observer_eval_SEL2 3). At most max_kept_near such candidates, the nearest; one that
+    # has been beyond forget_distance_m and unseen for forget_sec is deleted, and if the
+    # goal node finds that slot again it starts over (hits from 0).
     forget_distance_m: float = 25.0
+    max_kept_near: int = 32
+    # observer_eval_SEL2 4: while nothing is confirmed, report the best held candidate
+    # (scored as if its unknown cells were allowed) as "provisional" in the JSON and the
+    # markers only; /parking/selected_goal is never published from it.
+    provisional_output: bool = False
     switch_margin: float = 1.5
     switch_hold_sec: float = 1.0
     lock_distance_m: float = 5.0
@@ -218,7 +226,8 @@ def find_pillars(grid: Grid, frame: SlotFrame, p: SelectorParams):
     return result, pillar_mask
 
 
-def evaluate(grid: Grid | None, goal_xy, goal_yaw: float, vehicle_xy, p: SelectorParams) -> Evaluation:
+def evaluate(grid: Grid | None, goal_xy, goal_yaw: float, vehicle_xy, p: SelectorParams,
+             score_held: bool = False) -> Evaluation:
     if grid is None:
         return Evaluation("hold", reason="no occupancy grid yet")
     frame = slot_frame(goal_xy, goal_yaw, p)
@@ -233,7 +242,9 @@ def evaluate(grid: Grid | None, goal_xy, goal_yaw: float, vehicle_xy, p: Selecto
         return ev
     if footprint["unknown"] >= p.gate_unknown_max:
         ev.status, ev.reason = "hold", "slot not seen enough"
-        return ev
+        if not score_held or footprint["occupied"] >= p.gate_occupied_max:
+            return ev
+        # Provisional: the terms are scored all the same, the status stays hold.
     if footprint["occupied"] >= p.gate_occupied_max:
         ev.status, ev.reason = "rejected", "slot occupied"
         return ev
@@ -263,6 +274,13 @@ def evaluate(grid: Grid | None, goal_xy, goal_yaw: float, vehicle_xy, p: Selecto
     return ev
 
 
+def bearing(vehicle_xy, vehicle_yaw: float, point) -> str:
+    """front / side / back of `point` relative to the vehicle heading (60 / 120 degree bounds)."""
+    dx, dy = point[0] - vehicle_xy[0], point[1] - vehicle_xy[1]
+    rel = abs(math.degrees(math.atan2(dy, dx) - vehicle_yaw + math.pi) % 360.0 - 180.0)
+    return "front" if rel <= 60.0 else ("side" if rel <= 120.0 else "back")
+
+
 def footprint_occupied(grid: Grid | None, goal_xy, goal_yaw, p: SelectorParams) -> float:
     if grid is None:
         return 0.0
@@ -281,6 +299,10 @@ class Candidate:
     hits: int
     last_seen: float
     first_seen: float
+    first_eligible: float | None = None
+    status: str = "hold"
+    flips: int = 0           # eligible <-> hold changes before the lock
+    ever_eligible: bool = False
 
 
 class GoalSelector:
@@ -295,6 +317,9 @@ class GoalSelector:
         self.challenger: tuple[int, float] | None = None  # (candidate id, since stamp)
         self.switches = 0
         self.evaluations: dict[int, Evaluation] = {}
+        self.provisional: tuple[Candidate, Evaluation] | None = None
+        self.events: list[dict] = []   # selections and locks, for the report
+        self.lock_events: list[dict] = []
 
     def add(self, xy, yaw: float, stamp: float) -> None:
         xy = np.asarray(xy, dtype=float)
@@ -314,16 +339,32 @@ class GoalSelector:
     def get(self, cid):
         return next((c for c in self.candidates if c.cid == cid), None)
 
-    def step(self, grid: Grid | None, vehicle_xy, reversing: bool, stamp: float):
-        """Re-evaluate and return the selected candidate (or None)."""
+    def step(self, grid: Grid | None, vehicle_xy, reversing: bool, stamp: float, vehicle_yaw: float = 0.0,
+             speed: float = 0.0):
+        """Re-evaluate and return the selected candidate (or None). Every time quantity
+        (forgetting, the 1 s switch hold) is taken from `stamp`, the message time."""
         p = self.p
         vehicle = np.asarray(vehicle_xy, dtype=float)
-        self.candidates = [c for c in self.candidates
-                           if stamp - c.last_seen <= p.forget_sec
-                           or float(np.hypot(*(c.xy - vehicle))) <= p.forget_distance_m
-                           or (c.cid == self.selected and self.locked)]
+        recent, near = [], []
+        for c in self.candidates:
+            if stamp - c.last_seen <= p.forget_sec or (c.cid == self.selected and self.locked):
+                recent.append(c)
+            elif float(np.hypot(*(c.xy - vehicle))) <= p.forget_distance_m:
+                near.append(c)
+        near.sort(key=lambda c: float(np.hypot(*(c.xy - vehicle))))
+        self.candidates = recent + near[:p.max_kept_near]
         valid = [c for c in self.candidates if c.hits >= p.min_hits]
-        self.evaluations = {c.cid: evaluate(grid, c.xy, c.yaw, vehicle_xy, p) for c in valid}
+        self.evaluations = {c.cid: evaluate(grid, c.xy, c.yaw, vehicle_xy, p, score_held=p.provisional_output)
+                            for c in valid}
+        for c in valid:
+            status = self.evaluations[c.cid].status
+            if status == "eligible":
+                c.ever_eligible = True
+                if c.first_eligible is None:
+                    c.first_eligible = stamp
+            if not self.locked and {c.status, status} == {"eligible", "hold"}:
+                c.flips += 1
+            c.status = status
         eligible = [c for c in valid if self.evaluations[c.cid].status == "eligible"]
         current = self.get(self.selected) if self.selected is not None else None
         if current is not None and self.locked:
@@ -341,6 +382,8 @@ class GoalSelector:
             self.selected = best.cid if best else None
             self.challenger = None
             current = best
+            if best is not None:
+                self._note("selected", best, vehicle, vehicle_yaw, stamp)
         elif best is not None and best.cid != current.cid:
             cur_score = self.evaluations[current.cid].score if current.cid in self.evaluations else -math.inf
             if self.evaluations[best.cid].score >= cur_score + p.switch_margin:
@@ -351,12 +394,29 @@ class GoalSelector:
                     self.switches += 1
                     self.challenger = None
                     current = best
+                    self._note("switched", best, vehicle, vehicle_yaw, stamp)
             else:
                 self.challenger = None
         else:
             self.challenger = None
-        if current is not None:
+        if current is not None and not self.locked:
             distance = float(np.hypot(*(current.xy - np.asarray(vehicle_xy))))
             if distance <= p.lock_distance_m or reversing:
                 self.locked = True
+                cause = "distance" if distance <= p.lock_distance_m else "reversing"
+                self.lock_events.append({"stamp": stamp, "id": current.cid, "cause": cause,
+                                         "speed_mps": round(speed, 3), "stationary": speed < 0.05})
+        self.provisional = None
+        if current is None and p.provisional_output:
+            held = [c for c in valid if self.evaluations[c.cid].status == "hold" and self.evaluations[c.cid].score > 0]
+            top = max(held, key=lambda c: self.evaluations[c.cid].score, default=None)
+            if top is not None:
+                self.provisional = (top, self.evaluations[top.cid])
         return current
+
+    def _note(self, kind, c, vehicle, vehicle_yaw, stamp):
+        entrance = slot_frame(c.xy, c.yaw, self.p).entrance
+        self.events.append({"event": kind, "id": c.cid, "stamp": stamp, "first_seen": c.first_seen,
+                            "first_eligible": c.first_eligible,
+                            "entrance_distance_m": round(float(np.hypot(*(entrance - vehicle))), 2),
+                            "bearing": bearing(vehicle, vehicle_yaw, entrance)})
