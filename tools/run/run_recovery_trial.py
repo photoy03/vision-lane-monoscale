@@ -52,6 +52,8 @@ OUTPUT_TOPICS = (
     "/localization/monoscale_raw/solve_info",
     "/parking/goal_pose",
     "/parking/goal_valid",
+    "/parking/selected_goal",
+    "/parking/goal_candidates_scored",
     "/parking/cpp/marking_segments_recovered",
 )
 READY_BASE = ("tracking front on", "v5.2 C++ node:", "CPU line map:",
@@ -309,7 +311,7 @@ def main() -> int:
         "occupancy_parallel_cameras", "occupancy_publish_rate_hz", "occupancy_publish_commit_neutralise",
         "occupancy_carve_on_keyframe", "lane_debug_images",
         "lane_bev_x_min_m", "lane_bev_x_max_m", "lane_bev_y_min_m", "lane_bev_y_max_m",
-        "launch_parking_assist", "parking_slot_width_m", "parking_slot_depth_m", "parking_input",
+        "launch_parking_assist", "parking_slot_width_m", "parking_slot_depth_m", "parking_input", "parking_goal_selector",
     }
     launch_overrides: dict[str, str] = {}
     if args.image_input == "gated" and not any(i.startswith("tracker_input_queue_depth=") for i in args.launch_arg):
@@ -330,7 +332,7 @@ def main() -> int:
                     "tracker_use_cuda", "tracker_road_step_gpu", "tracker_road_step_gpu_gram", "tracker_road_step_frame_guard", "tracker_road_step_bracket_escape",
                     "odom_lone_camera_solve", "occupancy_camera_liveness",
                     "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
-                    "lane_debug_images", "launch_parking_assist"}:
+                    "lane_debug_images", "launch_parking_assist", "parking_goal_selector"}:
             if value.lower() not in {"true", "false"}:
                 raise SystemExit(f"{name} must be true or false")
             value = value.lower()

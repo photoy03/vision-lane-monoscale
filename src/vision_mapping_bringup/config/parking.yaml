@@ -10,6 +10,10 @@ launch_arguments:
   #   detections: the C++ lane detector's confirmed per-frame segments
   #     (/parking/cpp/marking_segments) with the odometry interpolated at each frame.
   parking_input: ''
+  # One goal among the candidates (goal_selector: footprint gate, 10 x neighbour slots +
+  # 3 x pillar bonus + 1 x distance, hysteresis and lock) -> /parking/selected_goal.
+  # Empty = on whenever launch_parking_assist is on; false leaves only /parking/goal_pose.
+  parking_goal_selector: ''
   # Slot size the goal search expects (empty = package default 2.60 x 4.37 m, the CARLA
   # lots; a Korean standard bay is 2.5 x 5.0 m).
   parking_slot_width_m: ''

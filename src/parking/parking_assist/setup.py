@@ -21,6 +21,7 @@ setup(
     tests_require=["pytest"],
     entry_points={"console_scripts": [
         "goal_pose_node = parking_assist.goal_pose_node:main",
+        "goal_selector_node = parking_assist.goal_selector_node:main",
         # The owner's detector (parking_space_detector.py), included unchanged.
         "parking_space_detector = parking_assist.parking_space_detector:main",
     ]},
