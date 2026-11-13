@@ -123,6 +123,20 @@ fi
 if [[ -n "$session" ]]; then
   # The mount and calibration the drivers ran with, next to the bag.
   cp -r "$log_dir/run" "$session/driver_run" 2>/dev/null || true
+  # Another resolution than the calibration's: the same lens scaled (full field of view assumed),
+  # beside the bag, where tools/run/watch.sh picks it up.
+  python3 -s - "$root/src/vision_mapping_bringup/config/calibration/front.npz" "$session/calibration.npz" "$width" "$height" <<'PY' || true
+import sys, numpy as np
+src, dst, w, h = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+z = np.load(src, allow_pickle=True)
+sw, sh = (int(v) for v in z["image_size"])
+if (w, h) != (sw, sh):
+    if abs(w / sw - h / sh) > 1e-3:
+        sys.exit(f"{w}x{h} has another aspect than the calibration {sw}x{sh}; calibrate this mode")
+    k = np.array(z["K"], dtype=np.float64); k[0, :] *= w / sw; k[1, :] *= h / sh
+    np.savez(dst, K=k, D=np.array(z["D"]), image_size=np.array([w, h], dtype=np.int64), rms=np.array(z["rms"]))
+    print(f"calibration scaled {sw}x{sh} -> {w}x{h}: {dst}")
+PY
   echo "checking $session"
   python3 -s "$root/tools/run/check_recording.py" "$session" --fps "$fps" \
     $( (( use_rear )) && echo --expect-rear ) --json "$session/check.json" || true

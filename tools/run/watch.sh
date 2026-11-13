@@ -3,7 +3,8 @@
 #
 #   bash tools/run/watch.sh 0926                 a real recording by its date (MMDD) under
 #                                                $VISION_MEASUREMENTS (default ~/vision_lane_measurements)
-#   bash tools/run/watch.sh /path/to/session/bag a recording by path (folder with metadata.yaml)
+#   bash tools/run/watch.sh /path/to/session/bag a recording by path (folder with metadata.yaml);
+#                                                a calibration.npz beside the bag is used
 #   bash tools/run/watch.sh park_h89             a CARLA drive under $CARLA_BAGS (default: the
 #                                                first /media/$USER/*/HERO/hero_bags)
 #   options: --rate R (playback rate; default 1.0, CARLA 0.35), --no-parking
@@ -42,6 +43,8 @@ if [[ -z "$bag" ]] && { [[ -n "$CARLA_BAGS" && -d "$CARLA_BAGS/$target" ]] ||
 fi
 [[ -n "$bag" && -f "$bag/metadata.yaml" ]] || { echo "recording not found: $target" >&2; exit 2; }
 
+# A converted recording (tools/run/rosbag_to_measurement.py) carries its own calibration.
+calib=(); [[ -f "$(dirname "$bag")/calibration.npz" ]] && calib=(--calibration "$(dirname "$bag")/calibration.npz")
 source /opt/ros/humble/setup.bash
 source "$root/install/setup.bash"
 out="${VISION_RUNS:-$HOME/vision_lane_runs}/watch_$(date +%Y%m%d)"
@@ -49,7 +52,7 @@ mkdir -p "$out"
 run="watch_$(basename "$(dirname "$bag")" | cut -c1-30)_$(date +%H%M%S)"
 echo "replaying $bag as $run (windows open in a few seconds; they close when the bag ends)"
 python3 "$root/tools/run/run_recovery_trial.py" --bag "$bag" --run-id "$run" --output-root "$out" \
-  --repo "$root" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --pending on \
+  --repo "$root" "${calib[@]}" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --pending on \
   --instrumentation off --record-outputs on --outputs-light --show ${rate:+--playback-rate "$rate"} \
   --launch-arg launch_fusion=true --launch-arg lane_debug_images=true \
   --launch-arg launch_parking_assist=$parking
