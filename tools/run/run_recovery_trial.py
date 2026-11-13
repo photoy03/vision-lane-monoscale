@@ -72,6 +72,15 @@ CONTRACT_METRIC_SOURCES = {
 }
 
 
+
+def calibration_size(path: Path) -> tuple[int, int]:
+    """image_size (or DIM) of a fisheye calibration .npz."""
+    import numpy as np
+    with np.load(path, allow_pickle=False) as data:
+        key = next(k for k in ("image_size", "DIM", "calibration_size") if k in data)
+        width, height = (int(v) for v in np.asarray(data[key]).reshape(-1)[:2])
+    return width, height
+
 def ros_command(repo: Path, argv: list[str]) -> list[str]:
     script = (
         "source /opt/ros/humble/setup.bash && "
@@ -397,6 +406,9 @@ def main() -> int:
         f"stage_diagnostics:={'true' if args.instrumentation == 'on' else 'false'}",
         "occupancy_use_cuda:=true", "rear_enabled:=true",
         f"rear_rig_file:={rear_rig}", f"calibration:={calibration}", f"rig_file:={rig}",
+        # The capture size is the calibration's: a replay has no camera driver, and nodes that
+        # build image maps from width/height (the parking detector) must match the recorded frames.
+        *(f"{name}:={value}" for name, value in zip(("width", "height"), calibration_size(calibration))),
         f"output_dir:={output}", f"recovery_session_id:={args.run_id}",
         f"lane_pending_recovery:={'true' if args.pending == 'on' else 'false'}",
         "map_fusion_mode:=legacy", "compare_lane_registration:=false",

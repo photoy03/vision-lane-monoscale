@@ -60,9 +60,13 @@ if grep -q "name: /cam1/image_raw/compressed" "$bag/metadata.yaml" && ! grep -q 
         --front /cam1/image_raw/compressed --rear /cam0/image_raw/compressed --imu /imu_data > /dev/null )
   fi
   bag=$converted/bag
+  # The vehicle's measured mount angles (vehicle_live.launch.py uses the same files).
+  cfg="$root/src/vision_mapping_bringup/config"
+  vehicle_rigs=(--rig "$cfg/rig_vehicle_20261113.yaml" --rear-rig "$cfg/rear_rig_vehicle_20261113.yaml")
 fi
 
 # A converted recording (tools/run/rosbag_to_measurement.py) carries its own calibration.
+[[ -n "${vehicle_rigs+x}" ]] || vehicle_rigs=()
 calib=(); [[ -f "$(dirname "$bag")/calibration.npz" ]] && calib=(--calibration "$(dirname "$bag")/calibration.npz")
 source /opt/ros/humble/setup.bash
 source "$root/install/setup.bash"
@@ -71,7 +75,7 @@ mkdir -p "$out"
 run="watch_$(basename "$(dirname "$bag")" | cut -c1-30)_$(date +%H%M%S)"
 echo "replaying $bag as $run (windows open in a few seconds; they close when the bag ends)"
 python3 "$root/tools/run/run_recovery_trial.py" --bag "$bag" --run-id "$run" --output-root "$out" \
-  --repo "$root" "${calib[@]}" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --pending on \
+  --repo "$root" "${calib[@]}" "${vehicle_rigs[@]}" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --pending on \
   --instrumentation off --record-outputs on --outputs-light --show ${rate:+--playback-rate "$rate"} \
   --launch-arg launch_fusion=true --launch-arg lane_debug_images=true \
   --launch-arg launch_parking_assist=$parking

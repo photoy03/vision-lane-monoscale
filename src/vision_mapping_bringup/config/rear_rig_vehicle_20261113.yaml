@@ -1,0 +1,11 @@
+# Rear camera mount as installed on the vehicle 2026-11-13, measured like
+# rig_vehicle_20261113.yaml (20261113_133107: motion direction 3.2 deg right of the image
+# centre, 25.3 deg below it -> pitch 25.25, yaw 180 + 2.75; residual 0.12 deg; the rear
+# bird's-eye view of parallel road arrows is parallel with these values, converging with
+# pitch 30). Position and height are still the provisional ones.
+camera_forward_m: -0.30
+camera_left_m: 0.0
+camera_height_m: 1.20
+pitch_deg: 25.25
+roll_deg: 0.0
+yaw_deg: 182.75

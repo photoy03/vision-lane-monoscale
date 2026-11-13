@@ -5,8 +5,9 @@ The drivers (sensors.launch.py of sensor_record: usb_cam /cam1 front, /cam0 rear
 vehicle_topic_relay.py (camera topics renamed for the pipeline, JPEGs untouched) and the
 pipeline of live.launch.py with: no own drivers, image_input compressed_gray (each node
 decodes the JPEGs itself, to gray, at its own size), the IMU read straight from imu_topic,
-both cameras, and the front calibration scaled to 1920x1080 (same lenses as the 2560x1440
-calibration, full field of view).
+both cameras, the front calibration scaled to 1920x1080 (same lenses as the 2560x1440
+calibration, full field of view) and the mount angles measured on the vehicle
+(config/rig_vehicle_20261113.yaml, rear_rig_vehicle_20261113.yaml).
 
   ros2 launch vision_mapping_bringup vehicle_live.launch.py [front_topic:=/cam1/image_raw/compressed]
       [rear_topic:=/cam0/image_raw/compressed] [imu_topic:=/imu_data] [width:=1920 height:=1080 fps:=30]
@@ -29,6 +30,8 @@ PASSED = (
     ('height', '1080'),
     ('fps', '30'),
     ('calibration', ''),
+    ('rig_file', ''),
+    ('rear_rig_file', ''),
     ('launch_viewer', 'false'),
     ('launch_rviz', 'false'),
     ('launch_parking_assist', 'false'),
@@ -38,11 +41,13 @@ PASSED = (
 
 def generate_launch_description():
     share = Path(get_package_share_directory('vision_mapping_bringup'))
-    default_calibration = str(share / 'config/calibration/front_1920x1080.npz')
+    defaults = {'calibration': str(share / 'config/calibration/front_1920x1080.npz'),
+                # Mount angles measured on the vehicle 2026-11-13 (focus of expansion).
+                'rig_file': str(share / 'config/rig_vehicle_20261113.yaml'),
+                'rear_rig_file': str(share / 'config/rear_rig_vehicle_20261113.yaml')}
     declared = [DeclareLaunchArgument('front_topic', default_value='/cam1/image_raw/compressed'),
                 DeclareLaunchArgument('rear_topic', default_value='/cam0/image_raw/compressed')]
-    declared += [DeclareLaunchArgument(name, default_value=default_calibration if name == 'calibration' else value)
-                 for name, value in PASSED]
+    declared += [DeclareLaunchArgument(name, default_value=defaults.get(name, value)) for name, value in PASSED]
     relay = Node(package='vision_mapping_bringup', executable='vehicle_topic_relay.py', name='vehicle_topic_relay',
                  output='screen', parameters=[{'front_topic': LaunchConfiguration('front_topic'),
                                                'rear_topic': LaunchConfiguration('rear_topic')}])
