@@ -6,7 +6,11 @@
 #       --trial straight_01 [--width 2560 --height 1440 --fps 30] [--no-rear] [--no-imu]
 #       [--imu-topic /imu_data]   instead of --imu: an IMU driver started separately (e.g. WIT)
 #                                 is relayed unchanged to /sensing/imu/imu_data and recorded
-#       [--base-dir $VISION_MEASUREMENTS (default ~/vision_lane_measurements)] [--notes "..."]
+#       [--base-dir DIR] [--notes "..."]
+#
+# Where the session goes (first that applies): --base-dir; $VISION_RECORD_DIR; the external
+# SSD's rosbag folder (/media/$USER/38F7-677B/rosbag) when it is mounted; otherwise
+# $VISION_MEASUREMENTS (default ~/vision_lane_measurements), with a notice.
 #
 # The cameras' own MJPEG frames are recorded untouched (camera_output:=jpeg,
 # image_mode:=camera_jpeg): no decode, no re-encode, nothing else running. Stop with Ctrl+C
@@ -21,7 +25,7 @@
 set -eo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 front="" rear="" imu="" imu_topic="" trial="" notes="" width=2560 height=1440 fps=30
-use_rear=1 use_imu=1 base_dir="${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"
+use_rear=1 use_imu=1 base_dir=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --front) front=$2; shift 2 ;;
@@ -40,6 +44,16 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+ssd_dir="/media/$USER/38F7-677B/rosbag"
+if [[ -z "$base_dir" ]]; then
+  if [[ -n "$VISION_RECORD_DIR" ]]; then base_dir=$VISION_RECORD_DIR
+  elif mountpoint -q "/media/$USER/38F7-677B" && [[ -d "$ssd_dir" && -w "$ssd_dir" ]]; then base_dir=$ssd_dir
+  else
+    base_dir="${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"
+    echo "notice: the external SSD ($ssd_dir) is not mounted; recording to $base_dir" >&2
+  fi
+fi
+echo "recording to: $base_dir"
 [[ -n "$trial" && -n "$front" ]] || { echo "--trial and --front are required (see --help)" >&2; exit 2; }
 (( use_rear )) && [[ -z "$rear" ]] && { echo "--rear DEVICE or --no-rear" >&2; exit 2; }
 [[ -n "$imu" && -n "$imu_topic" ]] && { echo "--imu (F9R device) or --imu-topic, not both" >&2; exit 2; }

@@ -3,6 +3,7 @@
 #
 #   bash tools/run/watch.sh 0926                 a real recording by its date (MMDD) under
 #                                                $VISION_MEASUREMENTS (default ~/vision_lane_measurements)
+#                                                or the external SSD's rosbag folder
 #   bash tools/run/watch.sh /path/to/session/bag a recording by path (folder with metadata.yaml);
 #                                                a calibration.npz beside the bag is used
 #   bash tools/run/watch.sh park_h89             a CARLA drive under $CARLA_BAGS (default: the
@@ -33,7 +34,8 @@ bag=""
 if [[ -f "$target/metadata.yaml" ]]; then bag=$target
 elif [[ -f "$target/bag/metadata.yaml" ]]; then bag=$target/bag
 elif [[ "$target" =~ ^[0-9]{4}$ ]]; then
-  bag=$(ls -d "${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"/????"$target"_*/bag 2>/dev/null | head -1)
+  bag=$(ls -d "${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"/????"$target"_*/bag \
+    /media/"$USER"/38F7-677B/rosbag/????"$target"_*/bag 2>/dev/null | head -1)
 fi
 if [[ -z "$bag" ]] && { [[ -n "$CARLA_BAGS" && -d "$CARLA_BAGS/$target" ]] ||
     ls -d /media/"$USER"/*/HERO/hero_bags/"$target" >/dev/null 2>&1; }; then
