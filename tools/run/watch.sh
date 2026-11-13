@@ -5,7 +5,9 @@
 #                                                $VISION_MEASUREMENTS (default ~/vision_lane_measurements)
 #                                                or the external SSD's rosbag folder
 #   bash tools/run/watch.sh /path/to/session/bag a recording by path (folder with metadata.yaml);
-#                                                a calibration.npz beside the bag is used
+#                                                a calibration.npz beside the bag is used; a bag
+#                                                from sensor_record (/cam0, /cam1, /imu_data) is
+#                                                converted once under $VISION_RUNS/converted/
 #   bash tools/run/watch.sh park_h89             a CARLA drive under $CARLA_BAGS (default: the
 #                                                first /media/$USER/*/HERO/hero_bags)
 #   options: --rate R (playback rate; default 1.0, CARLA 0.35), --no-parking
@@ -36,6 +38,9 @@ elif [[ -f "$target/bag/metadata.yaml" ]]; then bag=$target/bag
 elif [[ "$target" =~ ^[0-9]{4}$ ]]; then
   bag=$(ls -d "${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"/????"$target"_*/bag \
     /media/"$USER"/38F7-677B/rosbag/????"$target"_*/bag 2>/dev/null | head -1)
+  # sensor_record bags: the metadata sits in the dated folder itself.
+  [[ -n "$bag" ]] || bag=$(dirname "$(ls /media/"$USER"/38F7-677B/rosbag/????"$target"_*/metadata.yaml 2>/dev/null | head -1)" 2>/dev/null)
+  [[ "$bag" == "." ]] && bag=""
 fi
 if [[ -z "$bag" ]] && { [[ -n "$CARLA_BAGS" && -d "$CARLA_BAGS/$target" ]] ||
     ls -d /media/"$USER"/*/HERO/hero_bags/"$target" >/dev/null 2>&1; }; then
@@ -44,6 +49,18 @@ if [[ -z "$bag" ]] && { [[ -n "$CARLA_BAGS" && -d "$CARLA_BAGS/$target" ]] ||
   exec bash "$root/tools/run/carla_check.sh" "${extra[@]}" ${rate:+--rate "$rate"} "$target"
 fi
 [[ -n "$bag" && -f "$bag/metadata.yaml" ]] || { echo "recording not found: $target" >&2; exit 2; }
+# A bag from the vehicle PC's sensor_record (usb_cam /cam0 = rear, /cam1 = front, WIT /imu_data):
+# converted once into $VISION_RUNS/converted/<name> (tools/run/rosbag_to_measurement.py), then replayed.
+if grep -q "name: /cam1/image_raw/compressed" "$bag/metadata.yaml" && ! grep -q "name: /measurement/front/" "$bag/metadata.yaml"; then
+  converted="${VISION_RUNS:-$HOME/vision_lane_runs}/converted/$(basename "$bag")"
+  if [[ ! -f "$converted/bag/metadata.yaml" ]]; then
+    [[ -e "$converted" ]] && { echo "incomplete conversion at $converted; remove it and retry" >&2; exit 2; }
+    echo "sensor_record bag: converting into $converted (a few minutes, once)"
+    ( source /opt/ros/humble/setup.bash && python3 -s "$root/tools/run/rosbag_to_measurement.py" "$bag" "$converted" \
+        --front /cam1/image_raw/compressed --rear /cam0/image_raw/compressed --imu /imu_data > /dev/null )
+  fi
+  bag=$converted/bag
+fi
 
 # A converted recording (tools/run/rosbag_to_measurement.py) carries its own calibration.
 calib=(); [[ -f "$(dirname "$bag")/calibration.npz" ]] && calib=(--calibration "$(dirname "$bag")/calibration.npz")
