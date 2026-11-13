@@ -174,9 +174,23 @@ bash tools/run/watch.sh <CARLA 주행 이름>            # $CARLA_BAGS/<이름> 
 **실차 기록만 하기** (처리 없이 카메라 MJPEG + IMU 저장, 끝나면 자동 점검)
 
 ```bash
+bash tools/run/record_vehicle.sh      # 장치·해상도는 tools/run/record_devices.env (FRONT, REAR, IMU_TOPIC=/imu_data, 1920x1080)
 bash tools/run/record_vehicle.sh --front /dev/v4l/by-id/<전방> --rear /dev/v4l/by-id/<후방> \
-  --imu /dev/serial/by-id/<F9R> --trial <이름>
+  --imu /dev/serial/by-id/<F9R> --trial <이름>     # F9R 직접 / WIT 드라이버를 따로 켰으면 --imu-topic /imu_data
 ```
+
+저장 위치는 외장 SSD(`/media/$USER/38F7-677B/rosbag`)가 꽂혀 있으면 그곳, 아니면 `~/vision_lane_measurements`이며 매번 `<날짜_시간>_<trial>` 폴더가 새로 생깁니다.
+
+**차량 PC: 녹화 + 실시간 오돔 동시** (sensor_record 드라이버: usb_cam `/cam1` 전방, `/cam0` 후방, WIT `/imu_data`, Velodyne)
+
+```bash
+ros2 launch <sensor_record>/sensors.launch.py      # 드라이버 (기존 그대로)
+bash tools/run/vehicle_live.sh                     # 녹화(보통 우선순위) + 파이프라인(nice 10), Ctrl+C 한 번으로 종료
+```
+
+녹화는 `~/rosbags/<날짜_시간>/`(`OUT_ROOT` 또는 `--record-dir`로 변경)에 원시 센서 토픽, `/vehicle/status/velocity_status`(CAN 속도, 있으면), 오돔을 저장합니다. 파이프라인은 별도 프로세스라 CPU가 모자라거나 멈춰도 녹화는 계속됩니다. 옵션: `--no-record`, `--no-pipeline`, `--nice N`, `--viewer`, `-- 이름:=값`(launch 인수). 파이프라인만: `ros2 launch vision_mapping_bringup vehicle_live.launch.py` (JPEG 중계, `compressed_gray`, 1920×1080 캘리브레이션 `config/calibration/front_1920x1080.npz`).
+
+sensor_record로 녹화한 bag은 `bash tools/run/watch.sh <MMDD 또는 경로>`가 처음 한 번 `$VISION_RUNS/converted/`로 변환해서 재생합니다(`tools/run/rosbag_to_measurement.py`).
 
 **데이터 위치** (환경변수, 없으면 괄호 안 기본값)
 
