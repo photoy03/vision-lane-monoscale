@@ -57,10 +57,19 @@ stop_all() {
   trap - INT TERM
   echo "stopping ..."
   # Newest first: pipeline, then the recorder (it finishes its bag), the drivers last.
-  local i
+  # INT, then TERM after 20 s, then KILL after 10 s more (a child started in the
+  # background may ignore INT).
+  local i pid t
   for (( i=${#pids[@]}-1; i>=0; i-- )); do
-    kill -INT "${pids[i]}" 2>/dev/null || true
-    wait "${pids[i]}" 2>/dev/null || true
+    pid=${pids[i]}
+    kill -INT "$pid" 2>/dev/null || true
+    for t in $(seq 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    if kill -0 "$pid" 2>/dev/null; then
+      pkill -TERM -P "$pid" 2>/dev/null || true; kill -TERM "$pid" 2>/dev/null || true
+      for t in $(seq 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    fi
+    if kill -0 "$pid" 2>/dev/null; then pkill -KILL -P "$pid" 2>/dev/null || true; kill -KILL "$pid" 2>/dev/null || true; fi
+    wait "$pid" 2>/dev/null || true
   done
 }
 trap stop_all INT TERM
