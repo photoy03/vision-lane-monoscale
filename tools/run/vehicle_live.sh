@@ -81,13 +81,42 @@ if (( drivers )); then
   [[ -f "$sensor_ws/devices.env" ]] && set -a && source "$sensor_ws/devices.env" && set +a
   ( source "$sensor_ws/install/setup.bash" && exec ros2 launch "$sensor_ws/sensors.launch.py" ) &
   pids+=($!)
-  echo "drivers started; waiting for /cam1/image_raw/compressed and /imu_data (30 s) ..."
-  for _ in $(seq 30); do
-    have=$(ros2 topic list 2>/dev/null | grep -cxE "/cam1/image_raw/compressed|/imu_data" || true)
-    [[ "$have" -ge 2 ]] && break
-    sleep 1
-  done
-  [[ "${have:-0}" -ge 2 ]] || { echo "drivers did not come up; see the output above" >&2; stop_all; exit 4; }
+fi
+if (( drivers || record )); then
+  # Data actually flowing, not just topics existing: each camera and the IMU must deliver a
+  # steady stream (a driver that dies right after start, e.g. a camera still held by another
+  # process, fails here) before the recorder starts.
+  echo "checking inputs: /cam1 (front), /cam0 (rear), /imu_data (up to 30 s) ..."
+  if ! python3 - <<'PY'
+import sys, time
+import rclpy
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CompressedImage, Imu
+need = {"/cam1/image_raw/compressed": (CompressedImage, 30), "/cam0/image_raw/compressed": (CompressedImage, 30),
+        "/imu_data": (Imu, 100)}
+rclpy.init()
+node = rclpy.create_node("vehicle_live_input_check")
+seen = {t: [] for t in need}
+for topic, (kind, _) in need.items():
+    node.create_subscription(kind, topic, lambda m, t=topic: seen[t].append(time.monotonic()), qos_profile_sensor_data)
+end = time.monotonic() + 30.0
+ok = False
+while time.monotonic() < end:
+    rclpy.spin_once(node, timeout_sec=0.05)
+    now = time.monotonic()
+    # Steady: enough messages, and the newest within the last 0.5 s.
+    ok = all(len(seen[t]) >= n and now - seen[t][-1] < 0.5 for t, (_, n) in need.items())
+    if ok:
+        break
+for t in need:
+    rate = (len(seen[t]) - 1) / (seen[t][-1] - seen[t][0]) if len(seen[t]) > 1 and seen[t][-1] > seen[t][0] else 0.0
+    print(f"  {t}: {len(seen[t])} messages, {rate:.1f} Hz" + ("" if seen[t] and time.monotonic() - seen[t][-1] < 1.0 else "  <- not arriving"))
+sys.exit(0 if ok else 1)
+PY
+  then
+    echo "an input is not arriving (camera unplugged, held by another program, or its driver died; see above)" >&2
+    stop_all; exit 4
+  fi
 fi
 
 if (( record )); then
