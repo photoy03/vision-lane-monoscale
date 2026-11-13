@@ -4,6 +4,8 @@
 #   bash tools/run/record_vehicle.sh --front /dev/v4l/by-id/<front>-video-index0 \
 #       --rear /dev/v4l/by-id/<rear>-video-index0 --imu /dev/serial/by-id/<f9r>-if00 \
 #       --trial straight_01 [--width 2560 --height 1440 --fps 30] [--no-rear] [--no-imu]
+#       [--imu-topic /imu_data]   instead of --imu: an IMU driver started separately (e.g. WIT)
+#                                 is relayed unchanged to /sensing/imu/imu_data and recorded
 #       [--base-dir $VISION_MEASUREMENTS (default ~/vision_lane_measurements)] [--notes "..."]
 #
 # The cameras' own MJPEG frames are recorded untouched (camera_output:=jpeg,
@@ -18,13 +20,14 @@
 # and refuses to start below 5 minutes or the 3.5 GiB floor.
 set -eo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-front="" rear="" imu="" trial="" notes="" width=2560 height=1440 fps=30
+front="" rear="" imu="" imu_topic="" trial="" notes="" width=2560 height=1440 fps=30
 use_rear=1 use_imu=1 base_dir="${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --front) front=$2; shift 2 ;;
     --rear) rear=$2; shift 2 ;;
     --imu) imu=$2; shift 2 ;;
+    --imu-topic) imu_topic=$2; shift 2 ;;
     --trial) trial=$2; shift 2 ;;
     --notes) notes=$2; shift 2 ;;
     --width) width=$2; shift 2 ;;
@@ -39,7 +42,8 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$trial" && -n "$front" ]] || { echo "--trial and --front are required (see --help)" >&2; exit 2; }
 (( use_rear )) && [[ -z "$rear" ]] && { echo "--rear DEVICE or --no-rear" >&2; exit 2; }
-(( use_imu )) && [[ -z "$imu" ]] && { echo "--imu DEVICE or --no-imu (a session without IMU cannot be mapped)" >&2; exit 2; }
+[[ -n "$imu" && -n "$imu_topic" ]] && { echo "--imu (F9R device) or --imu-topic, not both" >&2; exit 2; }
+(( use_imu )) && [[ -z "$imu" && -z "$imu_topic" ]] && { echo "--imu DEVICE, --imu-topic TOPIC or --no-imu (a session without IMU cannot be mapped)" >&2; exit 2; }
 for dev in "$front" ${rear:+"$rear"} ${imu:+"$imu"}; do
   [[ -e "$dev" ]] || { echo "device not found: $dev" >&2; exit 2; }
 done
@@ -61,10 +65,16 @@ log_dir=$(mktemp -d "${TMPDIR:-/tmp}/record_vehicle_XXXX")
 sensor_args=(device:="$front" camera_output:=jpeg width:="$width" height:="$height" fps:="$fps"
   output_dir:="$log_dir/run")
 if (( use_rear )); then sensor_args+=(rear_enabled:=true rear_device:="$rear"); fi
-if (( use_imu )); then sensor_args+=(launch_f9r:=true imu_device:="$imu"); else sensor_args+=(launch_f9r:=false); fi
+if (( use_imu )) && [[ -n "$imu" ]]; then sensor_args+=(launch_f9r:=true imu_device:="$imu"); else sensor_args+=(launch_f9r:=false); fi
 setsid ros2 launch vision_mapping_bringup sensors.launch.py "${sensor_args[@]}" > "$log_dir/sensors.log" 2>&1 &
 sensors_pid=$!
+relay_pid=""
+if (( use_imu )) && [[ -n "$imu_topic" ]]; then
+  python3 "$root/tools/run/imu_relay.py" "$imu_topic" > "$log_dir/imu_relay.log" 2>&1 &
+  relay_pid=$!
+fi
 stop_sensors() {
+  [[ -n "$relay_pid" ]] && kill -INT "$relay_pid" 2>/dev/null || true
   kill -INT -- -"$sensors_pid" 2>/dev/null || true
   for _ in $(seq 20); do kill -0 "$sensors_pid" 2>/dev/null || return 0; sleep 0.5; done
   kill -TERM -- -"$sensors_pid" 2>/dev/null || true
