@@ -11,6 +11,12 @@ minus the LiDAR heading (measured on 20261113_171835 from the travel direction o
 stretches: +31.1 deg). lidar_x_m / lidar_y_m place the LiDAR in base_link (lever arm; 0 when
 unmeasured). The first pose is the origin, so base_link starts at (0, 0, 0) like the camera
 odometry. Twist is the planar velocity between consecutive poses, in base_link.
+
+Covariance: KISS-ICP publishes a fixed placeholder (0.1 on every diagonal entry). The lane
+pipeline scales each line's confidence by the pose covariance
+(monoscale_pose::pose_confidence_scale), and 0.1 there leaves ~6 % of the confidence, below
+the lane map's minimum, so no line is ever mapped. The output carries position_sigma_m /
+yaw_sigma_deg instead (scan-matching accuracy, not the placeholder).
 """
 import math
 
@@ -36,6 +42,8 @@ class LidarPoseBridge(Node):
         self.offset = math.radians(float(self.declare_parameter('lidar_yaw_offset_deg', 31.1).value))
         self.lever = (float(self.declare_parameter('lidar_x_m', 0.0).value),
                       float(self.declare_parameter('lidar_y_m', 0.0).value))
+        self.position_var = float(self.declare_parameter('position_sigma_m', 0.05).value) ** 2
+        self.yaw_var = math.radians(float(self.declare_parameter('yaw_sigma_deg', 0.5).value)) ** 2
         self.parent = self.declare_parameter('parent_frame', 'odom').value
         self.child = self.declare_parameter('child_frame', 'base_link').value
         self.origin = None
@@ -66,8 +74,8 @@ class LidarPoseBridge(Node):
         out.child_frame_id = self.child
         out.pose.pose.position.x, out.pose.pose.position.y = x, y
         out.pose.pose.orientation.z, out.pose.pose.orientation.w = math.sin(0.5 * yaw), math.cos(0.5 * yaw)
-        cov = list(message.pose.covariance)
-        out.pose.covariance = cov if any(cov) else [0.01 if i in (0, 7, 35) else 0.0 for i in range(36)]
+        out.pose.covariance = [self.position_var if i in (0, 7) else self.yaw_var if i == 35 else 0.0
+                               for i in range(36)]
         if self.last is not None and stamp > self.last[0]:
             dt = stamp - self.last[0]
             dx, dy = x - self.last[1], y - self.last[2]
