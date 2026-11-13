@@ -115,6 +115,8 @@ def _launch(context, group='all'):
     nodes += sensors.mount_transforms(ctx)
     nodes += [monoscale.tracker(ctx), monoscale.odometry(ctx), monoscale.stabilizer(ctx),
               lanes.detection(ctx, lane_defaults, lane_explicit)]
+    if monoscale.pose_source(ctx) == 'lidar':
+        nodes.append(monoscale.lidar_bridge(ctx))
     if ctx.launch_occupancy:
         nodes.append(monoscale.occupancy(ctx))
     nodes += lanes.map_fusion(ctx, {**lane_defaults, **lane_explicit})

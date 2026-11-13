@@ -9,5 +9,6 @@ install(PROGRAMS
   scripts/recording_topic_stats.py
   scripts/clock_guard.py
   scripts/vehicle_topic_relay.py
+  scripts/lidar_pose_bridge.py
   DESTINATION lib/${PROJECT_NAME})
 ament_package()

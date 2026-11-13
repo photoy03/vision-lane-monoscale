@@ -16,7 +16,9 @@ Writes OUT_DIR with
                     assumes the same lens recorded at another resolution with the full field
                     of view (same aspect ratio); it is not a calibration of the new cameras.
   session.yaml      what was converted, from where
-Every other topic (lidar, the source camera_info) is left out.
+    /lidar/odometry, /velodyne_packets               unchanged, when the source has them
+                                                     (pose_source:=lidar, LiDAR re-runs)
+Every other topic (the source camera_info, ...) is left out.
 
 Replay with
   python3 tools/run/run_recovery_trial.py --bag OUT_DIR/bag --calibration OUT_DIR/calibration.npz ...
@@ -70,6 +72,16 @@ def main() -> int:
                                                      type="sensor_msgs/msg/CompressedImage", serialization_format="cdr"))
         writer.create_topic(rosbag2_py.TopicMetadata(name=f"/sensing/camera/{cam}/fisheye/camera_info",
                                                      type="sensor_msgs/msg/CameraInfo", serialization_format="cdr"))
+    # Copied unchanged when present (types read from the source bag).
+    passthrough = {"/lidar/odometry": "nav_msgs/msg/Odometry", "/velodyne_packets": "velodyne_msgs/msg/VelodyneScan"}
+    present = set()
+    for f in files:
+        db = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
+        present |= {name for (name,) in db.execute("select name from topics") if name in passthrough}
+        db.close()
+    for name in sorted(present):
+        writer.create_topic(rosbag2_py.TopicMetadata(name=name, type=passthrough[name], serialization_format="cdr"))
+        sources[name] = name
     writer.create_topic(rosbag2_py.TopicMetadata(name="/sensing/imu/imu_data", type="sensor_msgs/msg/Imu",
                                                  serialization_format="cdr"))
 
@@ -86,6 +98,9 @@ def main() -> int:
         for tid, t, data in db.execute(query):
             kind = ids[tid]
             counts[kind] += 1
+            if kind in passthrough:
+                writer.write(kind, bytes(data), t)
+                continue
             if kind == "imu":
                 writer.write("/sensing/imu/imu_data", bytes(data), t)
                 continue

@@ -33,6 +33,8 @@ TOPICS = (
     "/sensing/camera/rear/fisheye/camera_info",
     "/sensing/imu/imu_data",
 )
+# Replayed when the bag has them (pose_source:=lidar reads /lidar/odometry).
+OPTIONAL_TOPICS = ("/lidar/odometry",)
 OUTPUT_TOPICS = (
     "/localization/monoscale_raw",
     "/localization/kinematic_state",
@@ -320,7 +322,7 @@ def main() -> int:
         "occupancy_parallel_cameras", "occupancy_publish_rate_hz", "occupancy_publish_commit_neutralise",
         "occupancy_carve_on_keyframe", "lane_debug_images",
         "lane_bev_x_min_m", "lane_bev_x_max_m", "lane_bev_y_min_m", "lane_bev_y_max_m",
-        "launch_parking_assist", "parking_slot_width_m", "parking_slot_depth_m", "parking_input", "parking_goal_selector", "parking_detector_nice",
+        "launch_parking_assist", "parking_slot_width_m", "parking_slot_depth_m", "parking_input", "parking_goal_selector", "parking_detector_nice", "pose_source", "lidar_yaw_offset_deg",
     }
     launch_overrides: dict[str, str] = {}
     if args.image_input == "gated" and not any(i.startswith("tracker_input_queue_depth=") for i in args.launch_arg):
@@ -446,6 +448,7 @@ def main() -> int:
         "ros2", "bag", "play", str(bag), "--clock", "30", "--rate", str(args.playback_rate),
         "--disable-keyboard-controls", "--wait-for-all-acked", "2000",
         "--qos-profile-overrides-path", str(qos), "--topics", *TOPICS,
+        *[t for t in OPTIONAL_TOPICS if t in available_topics],
     ]
     commands = {name: (ros_command(repo, argv) if argv is not None else None) for name, argv in
                 (("launch", launch), ("front_republisher", front_repub),
@@ -472,7 +475,7 @@ def main() -> int:
         "sample_plan": str(sample_plan) if sample_plan else None,
         "sample_plan_sha256": sha256(sample_plan) if sample_plan else None,
         "bag_info": info.stdout, "bag_topics": sorted(available_topics),
-        "replayed_topics": list(TOPICS),
+        "replayed_topics": list(TOPICS) + [t for t in OPTIONAL_TOPICS if t in available_topics],
         "recorded_output_topics": [t for t in OUTPUT_TOPICS if not (args.outputs_light and t in LIGHT_EXCLUDED_TOPICS)]
         if args.record_outputs == "on" else [],
         "outputs_light": args.outputs_light,

@@ -60,13 +60,29 @@ def lone_camera(ctx):
     return {'lone_camera_solve_enabled': value == 'true'} if value else {}
 
 
+def pose_source(ctx):
+    value = ctx.args.arg('pose_source').strip().lower() or 'monoscale'
+    if value not in ('monoscale', 'lidar'):
+        raise ValueError('pose_source must be monoscale or lidar')
+    return value
+
+
+def lidar_bridge(ctx):
+    """pose_source:=lidar: /lidar/odometry -> /localization/lidar_raw (odom -> base_link)."""
+    return ctx.make_node(package='vision_mapping_bringup', executable='lidar_pose_bridge.py',
+                         name='lidar_pose_bridge', output='screen', parameters=[{
+                             'use_sim_time': ctx.sim_time,
+                             'lidar_yaw_offset_deg': float(ctx.args.arg('lidar_yaw_offset_deg') or 31.1)}])
+
+
 def stabilizer(ctx):
     """The sole map->base_link authority (/localization/kinematic_state)."""
+    lidar = pose_source(ctx) == 'lidar'
     return ctx.make_node(package='monoscale_pose', executable='odom_stabilizer_node.py',
         name='lane_odom_stabilizer', output='screen', parameters=[
             node_parameters('pose.yaml', 'lane_odom_stabilizer'), {
                 'use_sim_time': ctx.sim_time,
-                'input_odom_topic': ctx.topics.raw_odom,
+                'input_odom_topic': '/localization/lidar_raw' if lidar else ctx.topics.raw_odom,
                 'output_odom_topic': ctx.topics.odom,
                 'input_parent_frame': 'odom',
                 'parent_frame': ctx.world['frame'], 'child_frame': 'base_link',
@@ -84,6 +100,8 @@ def stabilizer(ctx):
                     ('resample_odom_to_camera', 'resample_to_vision_stamps', bool),
                     ('straight_resample_span_sec', 'max_straight_resample_span_sec', float),
                     ('pose_imu_fill', 'imu_fill_enabled', bool))),
+                # The LiDAR pose is used as it is: no camera yaw correction, no IMU fill.
+                **({'yaw_correction_enabled': False, 'imu_fill_enabled': False} if lidar else {}),
             }])
 
 
