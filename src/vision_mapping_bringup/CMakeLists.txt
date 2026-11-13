@@ -8,5 +8,6 @@ install(PROGRAMS
   scripts/measurement_image_compressor.py
   scripts/recording_topic_stats.py
   scripts/clock_guard.py
+  scripts/vehicle_topic_relay.py
   DESTINATION lib/${PROJECT_NAME})
 ament_package()
