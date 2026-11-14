@@ -5,6 +5,28 @@ from vision_mapping_bringup.config import node_parameters
 from vision_mapping_bringup.odom_policy import odom_policy
 
 
+def reference_shift(ctx):
+    """RULING7: metres from the published base_link back to the base_link the tracker and the
+    odometry compute in (the rear axle on the vehicle: 3.61 = kit 3.69 - rig 0.08). 0 = as before."""
+    value = float(ctx.args.arg('monoscale_reference_shift_m') or 0.0)
+    if value != value or abs(value) == float('inf'):
+        raise ValueError('monoscale_reference_shift_m must be finite')
+    return value
+
+
+def shifted(ctx, parameters):
+    """The camera translations moved forward by the reference shift (front and rear alike);
+    the occupancy, lane and parking layers keep the published base_link."""
+    shift = reference_shift(ctx)
+    if shift == 0.0:
+        return parameters
+    out = dict(parameters)
+    for key in ('front.translation_base_from_camera', 'rear.translation_base_from_camera'):
+        if key in out:
+            out[key] = [float(out[key][0]) + shift] + [float(v) for v in out[key][1:]]
+    return out
+
+
 def tracker(ctx):
     # Merge tracker deployment defaults with requested overrides before
     # handing them to launch_ros: duplicated YAML keys retained the old 30.
@@ -14,7 +36,7 @@ def tracker(ctx):
     return ctx.make_node(package='monoscale_tracker', executable='feature_tracker', name='feature_tracker',
         output='screen', parameters=[
             node_parameters('tracker.yaml', 'feature_tracker'),
-            deployment, {
+            deployment, shifted(ctx, {
                 'use_sim_time': ctx.sim_time, 'cameras': ctx.camera_names,
                 'image_topics': ctx.image_topics, 'info_topics': ctx.info_topics,
                 **ctx.rear_parameters,
@@ -30,13 +52,13 @@ def tracker(ctx):
                 'use_cuda': False,
                 'executor_threads': 1, 'opencv_threads': 2,
                 **ctx.tracker_overrides,
-            }])
+            })])
 
 
 def odometry(ctx):
     return ctx.make_node(package='monoscale_odometry', executable='monoscale_odometry', name='monoscale_odometry',
         output='screen', parameters=[
-            node_parameters('odometry.yaml', 'monoscale_odometry'), {
+            node_parameters('odometry.yaml', 'monoscale_odometry'), shifted(ctx, {
                 'use_sim_time': ctx.sim_time, 'cameras': ctx.camera_names,
                 'image_topics': ctx.image_topics, 'info_topics': ctx.info_topics,
                 **ctx.rear_parameters,
@@ -50,7 +72,8 @@ def odometry(ctx):
                 'executor_threads': ctx.odom_executor_threads,
                 'mapping_min_period_sec': 0.2,
                 **lone_camera(ctx),
-            }])
+                **({'reference_shift_m': reference_shift(ctx)} if reference_shift(ctx) != 0.0 else {}),
+            })])
 
 
 def lone_camera(ctx):

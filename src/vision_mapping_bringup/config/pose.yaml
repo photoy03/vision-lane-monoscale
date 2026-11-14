@@ -10,6 +10,11 @@ launch_arguments:
   # LiDAR position in base_link (lever arm), pose_source:=lidar only. Empty = 0 (as before).
   lidar_x_m: ''
   lidar_y_m: ''
+  # RULING7: the camera odometry computes about the rear axle and publishes base_link as before.
+  # Metres from base_link back to the rear axle (vehicle: 3.61 = kit front camera 3.69 - rig 0.08;
+  # kit value). Moves the tracker's and the odometry's camera translations forward by it and
+  # converts the published pose back. Empty = 0 (as before). CARLA's rig is already rear-axle.
+  monoscale_reference_shift_m: ''
   yaw_correction_enabled: ''
   vision_yaw_sign: ''
   imu_yaw_rate_tau_sec: '0.12'
