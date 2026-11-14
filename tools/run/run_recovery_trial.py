@@ -322,7 +322,7 @@ def main() -> int:
         "occupancy_parallel_cameras", "occupancy_publish_rate_hz", "occupancy_publish_commit_neutralise",
         "occupancy_carve_on_keyframe", "lane_debug_images",
         "lane_bev_x_min_m", "lane_bev_x_max_m", "lane_bev_y_min_m", "lane_bev_y_max_m",
-        "lane_bev_meters_per_pixel", "lane_valid_margin_m", "occupancy_max_interpolation_translation_m",
+        "lane_bev_meters_per_pixel", "lane_valid_margin_m", "occupancy_max_interpolation_translation_m", "lidar_x_m", "lidar_y_m",
         "launch_parking_assist", "parking_slot_width_m", "parking_slot_depth_m", "parking_input", "parking_goal_selector", "parking_detector_nice", "pose_source", "lidar_yaw_offset_deg",
     }
     launch_overrides: dict[str, str] = {}

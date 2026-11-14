@@ -19,6 +19,13 @@ stretches: +31.1 deg). lidar_x_m / lidar_y_m place the LiDAR in base_link (lever
 unmeasured). The output starts at (0, 0, 0) like the camera odometry. Twist is the planar
 velocity between consecutive outputs, in base_link.
 
+Mount check: the LiDAR yaw changes with every mounting, so the bridge measures it while
+driving: on 1 s windows with > 0.8 m travel and < 2 deg turn, travel direction minus
+(LiDAR heading + offset). After 30 windows (and every 30 more) it logs the median residual and
+the offset it implies, and warns when that is more than 2 deg away from the configured one.
+It never changes the offset by itself (the maps would shift mid-drive); rerun with the value it
+reports. The latest estimate is also published as JSON on /localization/lidar_bridge/status.
+
 Covariance: KISS-ICP publishes a fixed placeholder (0.1 on every diagonal entry). The lane
 pipeline scales each line's confidence by the pose covariance
 (monoscale_pose::pose_confidence_scale), and 0.1 there leaves ~6 % of the confidence, below
@@ -27,8 +34,11 @@ yaw_sigma_deg instead; fallback outputs carry the camera odometry's own covarian
 """
 import math
 
+import json
+
 import rclpy
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
@@ -78,6 +88,9 @@ class LidarPoseBridge(Node):
         self.last = None          # (stamp, x, y, yaw) of the last output
         self.mode = None
         self.pub = self.create_publisher(Odometry, self.output_topic, 30)
+        self.status_pub = self.create_publisher(String, '/localization/lidar_bridge/status', 10)
+        self.history = []          # (stamp, x, y, yaw) of the LiDAR, last ~2 s
+        self.residuals = []        # straight-window residuals, deg
         self.create_subscription(Odometry, self.input_topic, self.on_lidar, 30)
         self.create_subscription(Odometry, self.fallback_topic, self.on_camera, 30)
         self.get_logger().info(f'{self.input_topic} -> {self.output_topic} (fallback {self.fallback_topic} after '
@@ -109,8 +122,41 @@ class LidarPoseBridge(Node):
             self.anchor = compose(current, between(pose, (0.0, 0.0, 0.0)))
             self.switch('lidar', 'LiDAR pose arriving' if self.mode is None else 'LiDAR back')
         self.last_lidar_stamp = stamp
+        self.check_mount(stamp, message)
         covariance = [self.position_var if i in (0, 7) else self.yaw_var if i == 35 else 0.0 for i in range(36)]
         self.publish(message.header.stamp, stamp, compose(self.anchor, pose), covariance)
+
+    def check_mount(self, stamp: float, message: Odometry) -> None:
+        p = message.pose.pose.position
+        self.history.append((stamp, p.x, p.y, yaw_of(message.pose.pose.orientation)))
+        while self.history and self.history[0][0] < stamp - 2.0:
+            self.history.pop(0)
+        old = next((h for h in self.history if h[0] <= stamp - 1.0), None)
+        if old is None:
+            return
+        dx, dy = p.x - old[1], p.y - old[2]
+        heading = self.history[-1][3]
+        if math.hypot(dx, dy) < 0.8 or abs(wrap(heading - old[3])) > math.radians(2):
+            return
+        residual = wrap(math.atan2(dy, dx) - (0.5 * (heading + old[3]) + self.offset))
+        if abs(residual) > math.pi / 2:          # reversing
+            residual = wrap(residual - math.pi)
+        self.residuals.append(math.degrees(residual))
+        self.history = [self.history[-1]]        # next window starts here
+        if len(self.residuals) % 30 == 0:
+            r = sorted(self.residuals)
+            median = r[len(r) // 2]
+            implied = math.degrees(self.offset) + median
+            status = {'windows': len(r), 'median_residual_deg': round(median, 2),
+                      'configured_offset_deg': round(math.degrees(self.offset), 2),
+                      'implied_offset_deg': round(implied, 2)}
+            self.status_pub.publish(String(data=json.dumps(status)))
+            text = (f'LiDAR mount check: {len(r)} straight windows, travel vs heading residual '
+                    f'{median:+.2f} deg -> offset {implied:.2f} deg (configured {math.degrees(self.offset):.2f})')
+            if abs(median) > 2.0:
+                self.get_logger().warn(text + f' - the LiDAR was remounted? rerun with lidar_yaw_offset_deg:={implied:.1f}')
+            else:
+                self.get_logger().info(text)
 
     def on_camera(self, message: Odometry) -> None:
         stamp = stamp_of(message)

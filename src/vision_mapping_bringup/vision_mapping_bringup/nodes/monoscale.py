@@ -72,7 +72,9 @@ def lidar_bridge(ctx):
     return ctx.make_node(package='vision_mapping_bringup', executable='lidar_pose_bridge.py',
                          name='lidar_pose_bridge', output='screen', parameters=[{
                              'use_sim_time': ctx.sim_time,
-                             'lidar_yaw_offset_deg': float(ctx.args.arg('lidar_yaw_offset_deg') or 31.1)}])
+                             'lidar_yaw_offset_deg': float(ctx.args.arg('lidar_yaw_offset_deg') or 31.1),
+                             'lidar_x_m': float(ctx.args.arg('lidar_x_m') or 0.0),
+                             'lidar_y_m': float(ctx.args.arg('lidar_y_m') or 0.0)}])
 
 
 def stabilizer(ctx):
