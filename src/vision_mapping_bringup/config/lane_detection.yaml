@@ -49,3 +49,6 @@ launch_arguments:
   # detection (package default 0 = off; 0.3 drops the FOV-edge stripes that read as lines).
   lane_bev_meters_per_pixel: ''
   lane_valid_margin_m: ''
+  # 1 = illumination normalised over the valid pixels only and the filter windows that reach
+  # the field-of-view edge left out (package default 0 = off).
+  lane_mask_aware_illumination: ''

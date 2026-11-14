@@ -115,7 +115,7 @@ class CudaPreprocessor {
   Prep preprocess(const cv::Mat &frame, Pipeline &pipeline,
                   double *bev_ms, double *preprocess_ms) {
     ensure_initialized(pipeline.valid_mask().size(), pipeline.valid_mask(),
-                       pipeline.map_x(), pipeline.map_y());
+                       pipeline.map_x(), pipeline.map_y(), pipeline);
     auto stage_start = Clock::now();
     d_input_.upload(frame);
     cv::cuda::remap(d_input_, d_bev_, d_map_x_, d_map_y_, cv::INTER_LINEAR,
@@ -156,6 +156,20 @@ class CudaPreprocessor {
     d_small_blurred_.upload(small_cpu_);
     cv::cuda::resize(d_small_blurred_, d_illum_, bev_size_, 0.0, 0.0,
                      cv::INTER_LINEAR);
+    if (p_.mask_aware_illumination) {
+      // Same estimate as Pipeline::make_response_cpu: blur(V*mask)/blur(mask) where the
+      // support is partial, the plain value where it is full.
+      cv::cuda::multiply(d_source_f_, d_valid_f_, d_masked_f_);
+      cv::cuda::resize(d_masked_f_, d_small_, small_size_, 0.0, 0.0, cv::INTER_AREA);
+      d_small_.download(small_cpu_);
+      cv::GaussianBlur(small_cpu_, small_cpu_, {0,0}, illumination_sigma_,
+                       illumination_sigma_, cv::BORDER_REFLECT);
+      d_small_blurred_.upload(small_cpu_);
+      cv::cuda::resize(d_small_blurred_, d_masked_illum_, bev_size_, 0.0, 0.0,
+                       cv::INTER_LINEAR);
+      cv::cuda::divide(d_masked_illum_, d_illum_support_, d_masked_illum_);
+      d_masked_illum_.copyTo(d_illum_, d_illum_use_masked_);
+    }
     cv::cuda::add(d_illum_, cv::Scalar::all(1e-6), d_denom_);
     cv::cuda::divide(d_source_f_, d_denom_, d_norm_f_, p_.normalization_scale);
     d_norm_f_.convertTo(d_normalized_, CV_8U);
@@ -190,7 +204,8 @@ class CudaPreprocessor {
   }
 
   void ensure_initialized(const cv::Size &bev_size, const cv::Mat &valid,
-                          const cv::Mat &map_x, const cv::Mat &map_y) {
+                          const cv::Mat &map_x, const cv::Mat &map_y,
+                          const Pipeline &pipeline) {
     if (bev_size == bev_size_ && !d_valid_.empty()) return;
     bev_size_ = bev_size;
     small_size_ = {
@@ -200,6 +215,11 @@ class CudaPreprocessor {
     illumination_sigma_ = std::max(
       1.0, p_.illumination_sigma_m / p_.mpp * p_.illumination_scale);
     d_valid_.upload(valid);
+    if (p_.mask_aware_illumination) {
+      d_valid_f_.upload(pipeline.valid_float());
+      d_illum_support_.upload(pipeline.illum_support());
+      d_illum_use_masked_.upload(pipeline.illum_use_masked());
+    }
     d_map_x_.upload(map_x);
     d_map_y_.upload(map_y);
     blur3_ = cv::cuda::createGaussianFilter(
@@ -223,6 +243,7 @@ class CudaPreprocessor {
   cv::cuda::GpuMat d_source_f_, d_small_, d_small_blurred_, d_illum_, d_denom_;
   cv::cuda::GpuMat d_norm_f_, d_normalized_, d_masked_normalized_, d_blurred_;
   cv::cuda::GpuMat d_response_, d_packed_;
+  cv::cuda::GpuMat d_valid_f_, d_illum_support_, d_illum_use_masked_, d_masked_f_, d_masked_illum_;
 };
 #endif
 
