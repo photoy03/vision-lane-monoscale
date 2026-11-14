@@ -15,11 +15,13 @@
 #   and recorded (/localization/monoscale_raw). Without LiDAR poses (not connected, dropped)
 #   the bridge warns and continues on the camera odometry. Default (no --pose, or
 #   --pose monoscale): unchanged, the maps use the camera odometry.
-#   The LiDAR profile (observer ruling LIDARPOSE-OPTS) also sets lane_valid_margin_m 0.3
-#   (temporary: replaced once invalid pixels are excluded properly) and
+#   The LiDAR profile (rulings LIDARPOSE-OPTS, RULING4) also sets
 #   occupancy_max_interpolation_translation_m 0.3 (that occupancy map: output axis only
-#   verified), and passes lidar_x_m explicitly (--lidar-x M, default 0: the lever arm is not
-#   confirmed). The active profile is printed at start and written to the recording's
+#   verified) and passes lidar_x_m explicitly (--lidar-x M, default -2.71: the LiDAR 0.9 m
+#   ahead of the rear axle, the front camera 3.69 m ahead of it (kit value) and 0.08 m ahead of
+#   base_link, so -2.71 = 0.9 - (3.69 - 0.08) in this rig's base_link). The profile is
+#   experimental: its maps are not a baseline or ground truth until the LiDAR pose jitter check
+#   passes (RULING3 A). The active profile is printed at start and written to the recording's
 #   vehicle_live_manifest.json.
 #
 # Two separate processes:
@@ -37,7 +39,7 @@
 # Do not open the .db3 files while recording (sqlite lock kills the recorder).
 set -eo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-drivers=0 record=1 pipeline=1 lidar=1 pose=monoscale lidar_x=0 nice_level=10 record_dir="${OUT_ROOT:-}" extra=(launch_viewer:=false)
+drivers=0 record=1 pipeline=1 lidar=1 pose=monoscale lidar_x=-2.71 nice_level=10 record_dir="${OUT_ROOT:-}" extra=(launch_viewer:=false)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --drivers) drivers=1; shift ;;
@@ -50,7 +52,7 @@ while [[ $# -gt 0 ]]; do
     --nice) nice_level=$2; shift 2 ;;
     --viewer) extra=(launch_viewer:=true); shift ;;
     --) shift; extra+=("$@"); break ;;
-    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -59,10 +61,10 @@ case "$pose" in
   monoscale) ;;
   lidar)
     if (( lidar )); then
-      profile=(pose_source:=lidar lane_valid_margin_m:=0.3 occupancy_max_interpolation_translation_m:=0.3 "lidar_x_m:=$lidar_x")
+      profile=(pose_source:=lidar occupancy_max_interpolation_translation_m:=0.3 "lidar_x_m:=$lidar_x")
       extra+=("${profile[@]}")
       echo "LiDAR pose profile: ${profile[*]}"
-      echo "  lane_valid_margin_m 0.3 is temporary (replaced once invalid pixels are excluded); the occupancy map of this profile is verified on its output axis only; lidar_x_m $lidar_x (lever arm not confirmed)"
+      echo "  experimental: the occupancy map of this profile is verified on its output axis only; lidar_x_m $lidar_x (kit geometry, -2.71 = 0.9 - (3.69 - 0.08))"
     else
       echo "warning: --pose lidar with --no-lidar: no LiDAR odometry, the maps use the camera odometry" >&2
     fi ;;
