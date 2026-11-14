@@ -45,3 +45,7 @@ launch_arguments:
   lane_bev_x_max_m: ''
   lane_bev_y_min_m: ''
   lane_bev_y_max_m: ''
+  # BEV resolution (package default 0.0125 m/px) and the field-of-view edge margin left out of
+  # detection (package default 0 = off; 0.3 drops the FOV-edge stripes that read as lines).
+  lane_bev_meters_per_pixel: ''
+  lane_valid_margin_m: ''

@@ -57,6 +57,10 @@ struct Params {
   double glare_min_area_ratio{0.006};
   double illumination_sigma_m{0.60}, illumination_scale{0.35}, normalization_scale{128.0};
   double tophat_size_m{0.30};
+  // Pixels within this distance of the camera's field-of-view edge are left out: the
+  // illumination normalisation there divides by a background darkened by the black outside
+  // the image, so the edge itself comes out as a bright stripe that reads as a line.
+  double valid_margin_m{0.0};
   int threshold_bands{6}, threshold_update_interval{3}, threshold_sample_stride{4};
   double mad_k{5.5}, threshold_margin{3.0}, threshold_min{8.0}, threshold_max{80.0};
   double threshold_alpha{0.20}, strong_response_margin{36.0}, glare_recovery_margin{20.0};
@@ -159,6 +163,10 @@ class Pipeline {
       if (depth_ok[i] && image[i].x >= 0 && image[i].x < source_w-1 &&
           image[i].y >= 0 && image[i].y < source_h-1) valid_.at<uint8_t>(v,u)=255;
     }
+    const int margin_px=static_cast<int>(std::llround(std::max(0.0,p_.valid_margin_m)/p_.mpp));
+    if(margin_px>0)
+      cv::erode(valid_,valid_,cv::getStructuringElement(cv::MORPH_ELLIPSE,{2*margin_px+1,2*margin_px+1}),
+                {-1,-1},1,cv::BORDER_CONSTANT,cv::Scalar(0));
     source_size_ = {source_w, source_h};
     thresholds_.assign(std::max(1,p_.threshold_bands), p_.threshold_min);
     return true;
@@ -377,7 +385,7 @@ Params load_params(GetDouble get_double, GetInt get_int) {
 #define I(name,field,val) p.field=get_int(name,val)
     D("camera_height_m",camera_height,0.8);D("camera_forward_m",camera_forward,0);D("camera_left_m",camera_left,0);D("pitch_deg",pitch_deg,30);D("roll_deg",roll_deg,0);D("yaw_deg",yaw_deg,0);D("x_min_m",x_min,-4);D("x_max_m",x_max,4);D("y_min_m",y_min,0);D("y_max_m",y_max,5);D("meters_per_pixel",mpp,0.02);
     I("white_s_max",white_s_max,60);I("white_v_min",white_v_min,140);I("yellow_h_min",yellow_h_min,15);I("yellow_h_max",yellow_h_max,40);I("yellow_s_min",yellow_s_min,70);I("yellow_v_min",yellow_v_min,70);I("glare_v_min",glare_v_min,248);I("glare_s_max",glare_s_max,95);D("glare_min_area_ratio",glare_min_area_ratio,0.006);I("glare_dilate",glare_dilate,9);
-    D("illumination_sigma_m",illumination_sigma_m,0.60);D("illumination_scale",illumination_scale,0.35);D("normalization_scale",normalization_scale,128);D("tophat_size_m",tophat_size_m,0.30);I("threshold_bands",threshold_bands,6);I("threshold_update_interval",threshold_update_interval,3);I("threshold_sample_stride",threshold_sample_stride,4);D("mad_k",mad_k,5.5);D("threshold_margin",threshold_margin,3);D("threshold_min",threshold_min,8);D("threshold_max",threshold_max,80);D("strong_response_margin",strong_response_margin,36);D("glare_recovery_margin",glare_recovery_margin,20);
+    D("illumination_sigma_m",illumination_sigma_m,0.60);D("illumination_scale",illumination_scale,0.35);D("normalization_scale",normalization_scale,128);D("tophat_size_m",tophat_size_m,0.30);D("valid_margin_m",valid_margin_m,0.0);I("threshold_bands",threshold_bands,6);I("threshold_update_interval",threshold_update_interval,3);I("threshold_sample_stride",threshold_sample_stride,4);D("mad_k",mad_k,5.5);D("threshold_margin",threshold_margin,3);D("threshold_min",threshold_min,8);D("threshold_max",threshold_max,80);D("strong_response_margin",strong_response_margin,36);D("glare_recovery_margin",glare_recovery_margin,20);
     I("hough_threshold",hough_threshold,28);D("hough_min_line_length_m",hough_min_len,0.65);D("hough_max_line_gap_m",hough_max_gap,0.18);I("hough_max_raw_segments",max_raw,120);D("candidate_min_length_m",candidate_min_len,0.70);D("candidate_min_binary_support",min_binary,0.72);D("candidate_min_color_support",min_color,0.08);D("candidate_min_score",candidate_min_score,0.46);D("candidate_max_glare_ratio",max_glare,0.85);D("line_min_width_m",line_min_width,0.05);D("line_max_width_m",line_max_width,0.22);D("line_target_width_m",line_target_width,0.12);D("dominant_angle_tolerance_deg",dominant_tol,12);D("dominant_min_confidence",dominant_min_conf,0.35);D("merge_distance_m",merge_distance,0.20);D("merge_gap_m",merge_gap,0.35);D("final_min_span_m",final_min_span,0.85);D("final_min_score",final_min_score,0.52);I("max_vectors_each",max_each,8);I("vectorize_every_n",vectorize_every_n,2);
     I("temporal_history_size",history,5);I("temporal_confirm_hits",confirm_hits,3);D("temporal_angle_gate_deg",temporal_angle,7);D("temporal_offset_gate_m",temporal_offset,0.32);D("temporal_anchor_offset_m",temporal_anchor_offset,0.40);D("temporal_gap_gate_m",temporal_gap,0.60);I("temporal_max_missed_updates",max_missed,3);D("temporal_ema_alpha",ema,0.35);
     D("map_x_min_m",map_x_min,-2);D("map_x_max_m",map_x_max,20);D("map_y_min_m",map_y_min,-10);D("map_y_max_m",map_y_max,10);D("map_resolution_m",map_res,0.03);D("map_evidence_increment",map_inc,1);D("map_evidence_max",map_max,20);D("map_confirm_evidence",map_confirm,3);D("map_min_translation_m",map_min_translation,0.05);D("map_min_yaw_deg",map_min_yaw_deg,1);

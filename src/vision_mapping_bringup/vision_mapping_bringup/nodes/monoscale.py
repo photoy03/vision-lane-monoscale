@@ -131,6 +131,7 @@ def occupancy(ctx):
             ('occupancy_use_cuda', 'use_cuda', bool),
             ('occupancy_rolling_radius_m', 'rolling_radius_m', float),
             ('occupancy_keyframe_travel_m', 'keyframe_travel_m', float),
+            ('occupancy_max_interpolation_translation_m', 'max_odom_interpolation_translation_m', float),
             ('occupancy_occupied_probability', 'occupied_probability', float),
             ('occupancy_free_probability', 'free_probability', float),
             ('occupancy_free_cost_max', 'free_cost_max', float),

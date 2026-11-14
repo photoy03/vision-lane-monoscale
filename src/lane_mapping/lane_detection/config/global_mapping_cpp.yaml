@@ -55,6 +55,9 @@ global_mapping_cpp:
     illumination_scale: 0.35
     normalization_scale: 128.0
     tophat_size_m: 0.3
+    # FOV-edge margin left out of detection (the edge reads as a line otherwise); 0 = off
+    # (default, as before). Option: lane_valid_margin_m:=0.3.
+    valid_margin_m: 0.0
     threshold_bands: 6
     threshold_update_interval: 3
     threshold_sample_stride: 4

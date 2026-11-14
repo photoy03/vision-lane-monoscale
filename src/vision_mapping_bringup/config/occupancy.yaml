@@ -7,6 +7,9 @@ launch_arguments:
   occupancy_use_cuda: ''
   occupancy_rolling_radius_m: ''
   occupancy_keyframe_travel_m: ''
+  # Largest gap between the two poses a frame is interpolated between (package default 0.1 m).
+  # A ~9 Hz LiDAR pose at 1.4 m/s is 0.16 m apart, so pose_source:=lidar drops most frames.
+  occupancy_max_interpolation_translation_m: ''
   occupancy_occupied_probability: ''
   occupancy_free_probability: ''
   occupancy_free_cost_max: ''

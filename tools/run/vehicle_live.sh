@@ -10,6 +10,11 @@
 #   LiDAR (default on, --no-lidar to leave it out): with --drivers the Velodyne driver starts
 #   too (launch_lidar:=true), and $SENSOR_WS/lidar_odometry.launch.py (KISS-ICP) turns
 #   /velodyne_points into /lidar/odometry next to the camera odometry; both are recorded.
+#   --pose lidar: the live lane, occupancy and fused maps use the LiDAR pose
+#   (pose_source:=lidar, scripts/lidar_pose_bridge.py); the camera odometry is still computed
+#   and recorded (/localization/monoscale_raw). Without LiDAR poses (not connected, dropped)
+#   the bridge warns and continues on the camera odometry. Default (no --pose, or
+#   --pose monoscale): unchanged, the maps use the camera odometry.
 #
 # Two separate processes:
 #   recorder  ros2 bag record of the raw sensor topics (cameras' JPEG, camera_info, IMU, lidar
@@ -26,22 +31,33 @@
 # Do not open the .db3 files while recording (sqlite lock kills the recorder).
 set -eo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-drivers=0 record=1 pipeline=1 lidar=1 nice_level=10 record_dir="${OUT_ROOT:-}" extra=(launch_viewer:=false)
+drivers=0 record=1 pipeline=1 lidar=1 pose=monoscale nice_level=10 record_dir="${OUT_ROOT:-}" extra=(launch_viewer:=false)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --drivers) drivers=1; shift ;;
     --no-record) record=0; shift ;;
     --no-lidar) lidar=0; shift ;;
+    --pose) pose=$2; shift 2 ;;
     --no-pipeline) pipeline=0; shift ;;
     --record-dir) record_dir=$2; shift 2 ;;
     --nice) nice_level=$2; shift 2 ;;
     --viewer) extra=(launch_viewer:=true); shift ;;
     --) shift; extra+=("$@"); break ;;
-    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 (( record || pipeline )) || { echo "nothing to do" >&2; exit 2; }
+case "$pose" in
+  monoscale) ;;
+  lidar)
+    if (( lidar )); then
+      extra+=(pose_source:=lidar)
+    else
+      echo "warning: --pose lidar with --no-lidar: no LiDAR odometry, the maps use the camera odometry" >&2
+    fi ;;
+  *) echo "--pose must be monoscale or lidar" >&2; exit 2 ;;
+esac
 if [[ -z "$record_dir" ]]; then
   if mountpoint -q "/media/$USER/38F7-677B" && [[ -w "/media/$USER/38F7-677B/rosbag" ]]; then
     record_dir="/media/$USER/38F7-677B/rosbag"
@@ -128,6 +144,7 @@ PY
       echo "  /velodyne_packets: arriving"
     else
       echo "  /velodyne_packets: not arriving within 5 s  <- LiDAR off/unplugged or its network (192.168.1.x) not set; recording continues without it" >&2
+      [[ "$pose" == lidar ]] && echo "  --pose lidar: the maps start on the camera odometry and switch to the LiDAR pose once it arrives" >&2
     fi
   fi
 fi
