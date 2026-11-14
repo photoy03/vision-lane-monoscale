@@ -160,7 +160,10 @@ public:
     // (the camera translations it is given are shifted by the same amount, in the bringup).
     // Published: p = p_estimator + R(yaw) (s, 0) - R(yaw_0) (s, 0), yaw unchanged, the body
     // velocity at the published point (v_y + omega s). The constant last term keeps the odom
-    // origin at the first published base_link as before. 0 (default) = unchanged.
+    // origin at the first published base_link as before: yaw_0 is taken from the first
+    // published pose and never updated (this node never re-creates or resets the estimator;
+    // a restarted node starts a new odom frame anyway). 0 (default) = unchanged: the whole
+    // block is skipped and the twist keeps v_y as it was.
     reference_shift_m_ = declare_parameter<double>("reference_shift_m", 0.0);
     if (!std::isfinite(reference_shift_m_)) {
       throw std::invalid_argument("reference_shift_m must be finite");
@@ -260,6 +263,9 @@ public:
       configuration_.topics.pose, reliable);
     rclcpp::QoS latched(1);
     latched.reliable().transient_local();
+    // ground_points_topic: the estimator's own frame. With reference_shift_m != 0 these
+    // points are NOT converted to the published base_link (a constant offset from the
+    // odometry's odom origin); no node in this workspace subscribes (RULING7, open item).
     points_ = create_publisher<sensor_msgs::msg::PointCloud2>(
       configuration_.topics.ground_points, latched);
 

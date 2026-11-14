@@ -14,6 +14,8 @@ launch_arguments:
   # Metres from base_link back to the rear axle (vehicle: 3.61 = kit front camera 3.69 - rig 0.08;
   # kit value). Moves the tracker's and the odometry's camera translations forward by it and
   # converts the published pose back. Empty = 0 (as before). CARLA's rig is already rear-axle.
+  # Not converted: the odometry's ground_points_topic (/perception/ground_points) stays in the
+  # estimator's frame when non-zero (no consumer in this workspace; open item).
   monoscale_reference_shift_m: ''
   yaw_correction_enabled: ''
   vision_yaw_sign: ''
