@@ -15,6 +15,12 @@
 #   and recorded (/localization/monoscale_raw). Without LiDAR poses (not connected, dropped)
 #   the bridge warns and continues on the camera odometry. Default (no --pose, or
 #   --pose monoscale): unchanged, the maps use the camera odometry.
+#   The LiDAR profile (observer ruling LIDARPOSE-OPTS) also sets lane_valid_margin_m 0.3
+#   (temporary: replaced once invalid pixels are excluded properly) and
+#   occupancy_max_interpolation_translation_m 0.3 (that occupancy map: output axis only
+#   verified), and passes lidar_x_m explicitly (--lidar-x M, default 0: the lever arm is not
+#   confirmed). The active profile is printed at start and written to the recording's
+#   vehicle_live_manifest.json.
 #
 # Two separate processes:
 #   recorder  ros2 bag record of the raw sensor topics (cameras' JPEG, camera_info, IMU, lidar
@@ -31,19 +37,20 @@
 # Do not open the .db3 files while recording (sqlite lock kills the recorder).
 set -eo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-drivers=0 record=1 pipeline=1 lidar=1 pose=monoscale nice_level=10 record_dir="${OUT_ROOT:-}" extra=(launch_viewer:=false)
+drivers=0 record=1 pipeline=1 lidar=1 pose=monoscale lidar_x=0 nice_level=10 record_dir="${OUT_ROOT:-}" extra=(launch_viewer:=false)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --drivers) drivers=1; shift ;;
     --no-record) record=0; shift ;;
     --no-lidar) lidar=0; shift ;;
     --pose) pose=$2; shift 2 ;;
+    --lidar-x) lidar_x=$2; shift 2 ;;
     --no-pipeline) pipeline=0; shift ;;
     --record-dir) record_dir=$2; shift 2 ;;
     --nice) nice_level=$2; shift 2 ;;
     --viewer) extra=(launch_viewer:=true); shift ;;
     --) shift; extra+=("$@"); break ;;
-    -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -52,7 +59,10 @@ case "$pose" in
   monoscale) ;;
   lidar)
     if (( lidar )); then
-      extra+=(pose_source:=lidar)
+      profile=(pose_source:=lidar lane_valid_margin_m:=0.3 occupancy_max_interpolation_translation_m:=0.3 "lidar_x_m:=$lidar_x")
+      extra+=("${profile[@]}")
+      echo "LiDAR pose profile: ${profile[*]}"
+      echo "  lane_valid_margin_m 0.3 is temporary (replaced once invalid pixels are excluded); the occupancy map of this profile is verified on its output axis only; lidar_x_m $lidar_x (lever arm not confirmed)"
     else
       echo "warning: --pose lidar with --no-lidar: no LiDAR odometry, the maps use the camera odometry" >&2
     fi ;;
@@ -155,6 +165,13 @@ if (( record )); then
   echo "recording to $out ($(df -h --output=avail "$record_dir" | tail -1 | tr -d ' ') free)"
   ros2 bag record -o "$out" -s sqlite3 --max-bag-size 2147483648 "${topics[@]}" > "$record_dir/.record_$(basename "$out").log" 2>&1 &
   pids+=($!)
+  if [[ "$pose" == lidar ]]; then
+    # The profile next to the bag (the recorder creates the folder when it starts).
+    ( for _ in $(seq 30); do [[ -d "$out" ]] && break; sleep 0.5; done
+      m="$out/vehicle_live_manifest.json"; [[ -d "$out" ]] || m="$record_dir/.vehicle_live_$(basename "$out").json"
+      printf '{"started": "%s", "pose": "%s", "lidar": %s, "launch_args": "%s", "repo_commit": "%s"}\n' \
+        "$(date -Iseconds)" "$pose" "$lidar" "${extra[*]}" "$(git -C "$root" rev-parse --short HEAD 2>/dev/null)" > "$m" ) &
+  fi
 fi
 if (( pipeline )); then
   echo "pipeline at nice $nice_level (vehicle_live.launch.py ${extra[*]})"
