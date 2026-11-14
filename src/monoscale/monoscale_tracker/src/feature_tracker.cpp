@@ -606,6 +606,21 @@ struct RoadEscape
   double new_score = 0.0;
 };
 
+// road_step_trace_dump: what one photometric search ran with, filled by
+// measure_step_photometric_impl only while the dump is on (read-only record).
+struct RoadSearchTrace
+{
+  bool filled = false;
+  bool have_centre = false;
+  double centre = 0.0;
+  double low = 0.0;
+  double high = 0.0;
+  double coarse = 0.0;
+  double fine = 0.0;
+  double fine_peak = 0.0;
+  cv::Rect roi;
+};
+
 struct TrackState
 {
   cv::Mat previous_gray;
@@ -1042,6 +1057,12 @@ public:
     // keeps the single-region search.
     road_step_tiles_ = declare_parameter<int>("road_step_tiles", 1);
     road_step_dump_ = declare_parameter<std::string>("road_step_dump", "");
+    // Measurement only (RULING3 D), default "" = off: one line per photometric search
+    // with its bracket (low, high, centre, whether it was reset), the coarse and fine
+    // answers, the final step and score, and per third of the search region (near =
+    // bottom) the textured pixels on the search's sample grid and those the score used.
+    // Nothing it computes feeds back into the search or the published values.
+    road_step_trace_dump_ = declare_parameter<std::string>("road_step_trace_dump", "");
     // Run the optical flow on the GPU.
     //
     // This is the one stage in the whole stack where a GPU has a case to make.
@@ -2030,6 +2051,9 @@ private:
           state.road_step = answer;
           state.road_bracket = std::isfinite(state.road_bracket) && !escape.adopted
             ? state.road_bracket + 0.7 * (answer - state.road_bracket) : answer;
+        }
+        if (!road_step_trace_dump_.empty()) {
+          write_road_trace(stamp, name, gray, found, answer, peak, reach);
         }
       }
     }
@@ -3844,6 +3868,8 @@ private:
     // prediction that has been bad widens on its own. `predicted_error` is
     // negative when the caller has no estimate yet, which keeps the old width.
     double peak = 0.0;
+    RoadSearchTrace * trace = road_step_trace_dump_.empty() ? nullptr : &road_search_trace();
+    if (trace != nullptr) {*trace = RoadSearchTrace();}
     const double width_fraction =
       (road_step_bracket_k_ > 0.0 && predicted_error >= 0.0)
       ? std::min(std::max(road_step_bracket_k_ * predicted_error, 0.02), 0.35)
@@ -3905,6 +3931,17 @@ private:
     double found = scan(
       previous, current, roi, coarse - spacing, coarse + spacing,
       road_step_samples_, true, fine_peak);
+    if (trace != nullptr) {
+      trace->filled = true;
+      trace->have_centre = have_centre;
+      trace->centre = centre;
+      trace->low = low;
+      trace->high = high;
+      trace->coarse = coarse;
+      trace->fine = found;
+      trace->fine_peak = fine_peak;
+      trace->roi = roi;
+    }
     if (escape != nullptr && have_centre && magnitude > 0.0) {
       // Which edge, if any. The side toward zero counts only while it can still move
       // toward zero: at the 5 % floor it is where a step near zero belongs.
@@ -5795,6 +5832,54 @@ private:
   std::string road_step_dump_;
   std::mutex road_step_lock_;
   std::FILE * road_step_file_ = nullptr;
+  std::string road_step_trace_dump_;
+  std::FILE * road_trace_file_ = nullptr;
+
+  static RoadSearchTrace & road_search_trace()
+  {
+    thread_local RoadSearchTrace trace;
+    return trace;
+  }
+
+  // One road_step_trace_dump line (measurement only; see the parameter).
+  void write_road_trace(
+    double stamp, const std::string & name, const cv::Mat & gray, double found,
+    double answer, double peak, double reach)
+  {
+    const RoadSearchTrace & tr = road_search_trace();
+    std::array<int, 3> textured{0, 0, 0};
+    std::array<int, 3> sampled{0, 0, 0};
+    if (tr.filled && tr.roi.area() > 0) {
+      const cv::Mat region = gray(tr.roi);
+      cv::Mat gx, gy;
+      cv::Sobel(region, gx, CV_32F, 1, 0, 3);
+      cv::Sobel(region, gy, CV_32F, 0, 1, 3);
+      const int stride = std::max(road_step_stride_, 1);
+      for (int y = 0; y < region.rows; y += stride) {
+        // Thirds of the region, near = the bottom one.
+        const int third = 2 - std::min(2, (3 * y) / std::max(region.rows, 1));
+        for (int x = 0; x < region.cols; x += stride) {
+          ++sampled[static_cast<size_t>(third)];
+          const float a = gx.at<float>(y, x), b = gy.at<float>(y, x);
+          if (a * a + b * b >= 64.0f * 64.0f) {++textured[static_cast<size_t>(third)];}
+        }
+      }
+    }
+    std::lock_guard<std::mutex> guard(road_step_lock_);
+    if (road_trace_file_ == nullptr) {
+      road_trace_file_ = std::fopen(road_step_trace_dump_.c_str(), "w");
+      if (road_trace_file_ == nullptr) {return;}
+      std::fprintf(road_trace_file_,
+        "stamp,camera,reach,have_centre,centre,low,high,coarse,fine,found,answer,fine_peak,score,"
+        "sampled_near,sampled_mid,sampled_far,textured_near,textured_mid,textured_far\n");
+    }
+    std::fprintf(road_trace_file_,
+      "%.6f,%s,%.4f,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.5f,%.5f,%d,%d,%d,%d,%d,%d\n",
+      stamp, name.c_str(), reach, tr.have_centre ? 1 : 0, tr.centre, tr.low, tr.high, tr.coarse,
+      tr.fine, found, answer, tr.fine_peak, peak, sampled[0], sampled[1], sampled[2],
+      textured[0], textured[1], textured[2]);
+    std::fflush(road_trace_file_);
+  }
   std::FILE * synthetic_file_ = nullptr;
 
   struct SyntheticTruth
