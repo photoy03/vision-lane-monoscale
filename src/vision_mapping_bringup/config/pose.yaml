@@ -7,11 +7,8 @@ launch_arguments:
   # its vision yaw correction and IMU fill off). lidar_yaw_offset_deg: vehicle minus LiDAR heading.
   pose_source: monoscale
   lidar_yaw_offset_deg: '31.1'
-  # LiDAR position in base_link (lever arm), pose_source:=lidar only. base_link here is the front
-  # bumper (front camera 0.08 m ahead of it); LiDAR 0.9 m ahead of the rear axle, rear axle 3.6135 m
-  # behind the bumper (vehicle 4.5135 m, rear overhang 0.90) -> -2.71 (owner 2026-11-14).
-  # On 20261113_172234 it moved camera-occupied cells on LiDAR obstacles from 19 % to 48 %.
-  lidar_x_m: '-2.71'
+  # LiDAR position in base_link (lever arm), pose_source:=lidar only. Empty = 0 (as before).
+  lidar_x_m: ''
   lidar_y_m: ''
   yaw_correction_enabled: ''
   vision_yaw_sign: ''
