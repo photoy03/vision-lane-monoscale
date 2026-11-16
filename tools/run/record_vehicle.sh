@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 # Record-only vehicle session: camera drivers + F9R IMU + rosbag, no processing.
 #
+#   bash tools/run/record_vehicle.sh             with the devices in tools/run/record_devices.env
+#
+# Every start makes a new session folder <base>/<YYYYmmdd_HHMMSS>_<trial> (trial default
+# "drive"). Arguments override the env file:
 #   bash tools/run/record_vehicle.sh --front /dev/v4l/by-id/<front>-video-index0 \
 #       --rear /dev/v4l/by-id/<rear>-video-index0 --imu /dev/serial/by-id/<f9r>-if00 \
 #       --trial straight_01 [--width 2560 --height 1440 --fps 30] [--no-rear] [--no-imu]
-#       [--base-dir $VISION_MEASUREMENTS (default ~/vision_lane_measurements)] [--notes "..."]
+#       [--imu-topic /imu_data]   instead of --imu: an IMU driver started separately (e.g. WIT)
+#                                 is relayed unchanged to /sensing/imu/imu_data and recorded
+#       [--base-dir DIR] [--notes "..."]
+#
+# Where the session goes (first that applies): --base-dir; $VISION_RECORD_DIR; the external
+# SSD's rosbag folder (/media/$USER/38F7-677B/rosbag) when it is mounted; otherwise
+# $VISION_MEASUREMENTS (default ~/vision_lane_measurements), with a notice.
 #
 # The cameras' own MJPEG frames are recorded untouched (camera_output:=jpeg,
 # image_mode:=camera_jpeg): no decode, no re-encode, nothing else running. Stop with Ctrl+C
@@ -18,13 +28,19 @@
 # and refuses to start below 5 minutes or the 3.5 GiB floor.
 set -eo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-front="" rear="" imu="" trial="" notes="" width=2560 height=1440 fps=30
-use_rear=1 use_imu=1 base_dir="${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"
+# Defaults from the device file (FRONT, REAR, IMU, IMU_TOPIC, WIDTH, HEIGHT, FPS, TRIAL).
+devices_file="${VISION_RECORD_DEVICES:-$root/tools/run/record_devices.env}"
+FRONT="" REAR="" IMU="" IMU_TOPIC="" WIDTH=2560 HEIGHT=1440 FPS=30 TRIAL=drive
+# shellcheck source=/dev/null
+[[ -f "$devices_file" ]] && source "$devices_file"
+front=$FRONT rear=$REAR imu=$IMU imu_topic=$IMU_TOPIC trial=$TRIAL notes="" width=$WIDTH height=$HEIGHT fps=$FPS
+use_rear=1 use_imu=1 base_dir=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --front) front=$2; shift 2 ;;
     --rear) rear=$2; shift 2 ;;
-    --imu) imu=$2; shift 2 ;;
+    --imu) imu=$2; imu_topic=""; shift 2 ;;
+    --imu-topic) imu_topic=$2; imu=""; shift 2 ;;
     --trial) trial=$2; shift 2 ;;
     --notes) notes=$2; shift 2 ;;
     --width) width=$2; shift 2 ;;
@@ -33,13 +49,29 @@ while [[ $# -gt 0 ]]; do
     --base-dir) base_dir=$2; shift 2 ;;
     --no-rear) use_rear=0; shift ;;
     --no-imu) use_imu=0; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[[ -n "$trial" && -n "$front" ]] || { echo "--trial and --front are required (see --help)" >&2; exit 2; }
+ssd_dir="/media/$USER/38F7-677B/rosbag"
+if [[ -z "$base_dir" ]]; then
+  if [[ -n "$VISION_RECORD_DIR" ]]; then base_dir=$VISION_RECORD_DIR
+  elif mountpoint -q "/media/$USER/38F7-677B" && [[ -d "$ssd_dir" && -w "$ssd_dir" ]]; then base_dir=$ssd_dir
+  else
+    base_dir="${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"
+    echo "notice: the external SSD ($ssd_dir) is not mounted; recording to $base_dir" >&2
+  fi
+fi
+echo "recording to: $base_dir"
+if [[ -z "$front" ]]; then
+  echo "no front camera: set FRONT in $devices_file (or --front). Cameras connected now:" >&2
+  ls -1 /dev/v4l/by-id/ 2>/dev/null | grep index0 | sed 's|^|  /dev/v4l/by-id/|' >&2 || echo "  (none)" >&2
+  exit 2
+fi
+[[ -n "$trial" ]] || trial=drive
 (( use_rear )) && [[ -z "$rear" ]] && { echo "--rear DEVICE or --no-rear" >&2; exit 2; }
-(( use_imu )) && [[ -z "$imu" ]] && { echo "--imu DEVICE or --no-imu (a session without IMU cannot be mapped)" >&2; exit 2; }
+[[ -n "$imu" && -n "$imu_topic" ]] && { echo "--imu (F9R device) or --imu-topic, not both" >&2; exit 2; }
+(( use_imu )) && [[ -z "$imu" && -z "$imu_topic" ]] && { echo "--imu DEVICE, --imu-topic TOPIC or --no-imu (a session without IMU cannot be mapped)" >&2; exit 2; }
 for dev in "$front" ${rear:+"$rear"} ${imu:+"$imu"}; do
   [[ -e "$dev" ]] || { echo "device not found: $dev" >&2; exit 2; }
 done
@@ -61,10 +93,16 @@ log_dir=$(mktemp -d "${TMPDIR:-/tmp}/record_vehicle_XXXX")
 sensor_args=(device:="$front" camera_output:=jpeg width:="$width" height:="$height" fps:="$fps"
   output_dir:="$log_dir/run")
 if (( use_rear )); then sensor_args+=(rear_enabled:=true rear_device:="$rear"); fi
-if (( use_imu )); then sensor_args+=(launch_f9r:=true imu_device:="$imu"); else sensor_args+=(launch_f9r:=false); fi
+if (( use_imu )) && [[ -n "$imu" ]]; then sensor_args+=(launch_f9r:=true imu_device:="$imu"); else sensor_args+=(launch_f9r:=false); fi
 setsid ros2 launch vision_mapping_bringup sensors.launch.py "${sensor_args[@]}" > "$log_dir/sensors.log" 2>&1 &
 sensors_pid=$!
+relay_pid=""
+if (( use_imu )) && [[ -n "$imu_topic" ]]; then
+  python3 "$root/tools/run/imu_relay.py" "$imu_topic" > "$log_dir/imu_relay.log" 2>&1 &
+  relay_pid=$!
+fi
 stop_sensors() {
+  [[ -n "$relay_pid" ]] && kill -INT "$relay_pid" 2>/dev/null || true
   kill -INT -- -"$sensors_pid" 2>/dev/null || true
   for _ in $(seq 20); do kill -0 "$sensors_pid" 2>/dev/null || return 0; sleep 0.5; done
   kill -TERM -- -"$sensors_pid" 2>/dev/null || true
@@ -123,6 +161,20 @@ fi
 if [[ -n "$session" ]]; then
   # The mount and calibration the drivers ran with, next to the bag.
   cp -r "$log_dir/run" "$session/driver_run" 2>/dev/null || true
+  # Another resolution than the calibration's: the same lens scaled (full field of view assumed),
+  # beside the bag, where tools/run/watch.sh picks it up.
+  python3 -s - "$root/src/vision_mapping_bringup/config/calibration/front.npz" "$session/calibration.npz" "$width" "$height" <<'PY' || true
+import sys, numpy as np
+src, dst, w, h = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+z = np.load(src, allow_pickle=True)
+sw, sh = (int(v) for v in z["image_size"])
+if (w, h) != (sw, sh):
+    if abs(w / sw - h / sh) > 1e-3:
+        sys.exit(f"{w}x{h} has another aspect than the calibration {sw}x{sh}; calibrate this mode")
+    k = np.array(z["K"], dtype=np.float64); k[0, :] *= w / sw; k[1, :] *= h / sh
+    np.savez(dst, K=k, D=np.array(z["D"]), image_size=np.array([w, h], dtype=np.int64), rms=np.array(z["rms"]))
+    print(f"calibration scaled {sw}x{sh} -> {w}x{h}: {dst}")
+PY
   echo "checking $session"
   python3 -s "$root/tools/run/check_recording.py" "$session" --fps "$fps" \
     $( (( use_rear )) && echo --expect-rear ) --json "$session/check.json" || true

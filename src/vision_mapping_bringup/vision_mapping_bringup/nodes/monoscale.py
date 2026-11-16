@@ -5,6 +5,28 @@ from vision_mapping_bringup.config import node_parameters
 from vision_mapping_bringup.odom_policy import odom_policy
 
 
+def reference_shift(ctx):
+    """RULING7: metres from the published base_link back to the base_link the tracker and the
+    odometry compute in (the rear axle on the vehicle: 3.61 = kit 3.69 - rig 0.08). 0 = as before."""
+    value = float(ctx.args.arg('monoscale_reference_shift_m') or 0.0)
+    if value != value or abs(value) == float('inf'):
+        raise ValueError('monoscale_reference_shift_m must be finite')
+    return value
+
+
+def shifted(ctx, parameters):
+    """The camera translations moved forward by the reference shift (front and rear alike);
+    the occupancy, lane and parking layers keep the published base_link."""
+    shift = reference_shift(ctx)
+    if shift == 0.0:
+        return parameters
+    out = dict(parameters)
+    for key in ('front.translation_base_from_camera', 'rear.translation_base_from_camera'):
+        if key in out:
+            out[key] = [float(out[key][0]) + shift] + [float(v) for v in out[key][1:]]
+    return out
+
+
 def tracker(ctx):
     # Merge tracker deployment defaults with requested overrides before
     # handing them to launch_ros: duplicated YAML keys retained the old 30.
@@ -14,7 +36,7 @@ def tracker(ctx):
     return ctx.make_node(package='monoscale_tracker', executable='feature_tracker', name='feature_tracker',
         output='screen', parameters=[
             node_parameters('tracker.yaml', 'feature_tracker'),
-            deployment, {
+            deployment, shifted(ctx, {
                 'use_sim_time': ctx.sim_time, 'cameras': ctx.camera_names,
                 'image_topics': ctx.image_topics, 'info_topics': ctx.info_topics,
                 **ctx.rear_parameters,
@@ -30,13 +52,13 @@ def tracker(ctx):
                 'use_cuda': False,
                 'executor_threads': 1, 'opencv_threads': 2,
                 **ctx.tracker_overrides,
-            }])
+            })])
 
 
 def odometry(ctx):
     return ctx.make_node(package='monoscale_odometry', executable='monoscale_odometry', name='monoscale_odometry',
         output='screen', parameters=[
-            node_parameters('odometry.yaml', 'monoscale_odometry'), {
+            node_parameters('odometry.yaml', 'monoscale_odometry'), shifted(ctx, {
                 'use_sim_time': ctx.sim_time, 'cameras': ctx.camera_names,
                 'image_topics': ctx.image_topics, 'info_topics': ctx.info_topics,
                 **ctx.rear_parameters,
@@ -50,7 +72,8 @@ def odometry(ctx):
                 'executor_threads': ctx.odom_executor_threads,
                 'mapping_min_period_sec': 0.2,
                 **lone_camera(ctx),
-            }])
+                **({'reference_shift_m': reference_shift(ctx)} if reference_shift(ctx) != 0.0 else {}),
+            })])
 
 
 def lone_camera(ctx):
@@ -60,13 +83,31 @@ def lone_camera(ctx):
     return {'lone_camera_solve_enabled': value == 'true'} if value else {}
 
 
+def pose_source(ctx):
+    value = ctx.args.arg('pose_source').strip().lower() or 'monoscale'
+    if value not in ('monoscale', 'lidar'):
+        raise ValueError('pose_source must be monoscale or lidar')
+    return value
+
+
+def lidar_bridge(ctx):
+    """pose_source:=lidar: /lidar/odometry -> /localization/lidar_raw (odom -> base_link)."""
+    return ctx.make_node(package='vision_mapping_bringup', executable='lidar_pose_bridge.py',
+                         name='lidar_pose_bridge', output='screen', parameters=[{
+                             'use_sim_time': ctx.sim_time,
+                             'lidar_yaw_offset_deg': float(ctx.args.arg('lidar_yaw_offset_deg') or 31.1),
+                             'lidar_x_m': float(ctx.args.arg('lidar_x_m') or 0.0),
+                             'lidar_y_m': float(ctx.args.arg('lidar_y_m') or 0.0)}])
+
+
 def stabilizer(ctx):
     """The sole map->base_link authority (/localization/kinematic_state)."""
+    lidar = pose_source(ctx) == 'lidar'
     return ctx.make_node(package='monoscale_pose', executable='odom_stabilizer_node.py',
         name='lane_odom_stabilizer', output='screen', parameters=[
             node_parameters('pose.yaml', 'lane_odom_stabilizer'), {
                 'use_sim_time': ctx.sim_time,
-                'input_odom_topic': ctx.topics.raw_odom,
+                'input_odom_topic': '/localization/lidar_raw' if lidar else ctx.topics.raw_odom,
                 'output_odom_topic': ctx.topics.odom,
                 'input_parent_frame': 'odom',
                 'parent_frame': ctx.world['frame'], 'child_frame': 'base_link',
@@ -84,6 +125,8 @@ def stabilizer(ctx):
                     ('resample_odom_to_camera', 'resample_to_vision_stamps', bool),
                     ('straight_resample_span_sec', 'max_straight_resample_span_sec', float),
                     ('pose_imu_fill', 'imu_fill_enabled', bool))),
+                # The LiDAR pose is used as it is: no camera yaw correction, no IMU fill.
+                **({'yaw_correction_enabled': False, 'imu_fill_enabled': False} if lidar else {}),
             }])
 
 
@@ -113,6 +156,7 @@ def occupancy(ctx):
             ('occupancy_use_cuda', 'use_cuda', bool),
             ('occupancy_rolling_radius_m', 'rolling_radius_m', float),
             ('occupancy_keyframe_travel_m', 'keyframe_travel_m', float),
+            ('occupancy_max_interpolation_translation_m', 'max_odom_interpolation_translation_m', float),
             ('occupancy_occupied_probability', 'occupied_probability', float),
             ('occupancy_free_probability', 'free_probability', float),
             ('occupancy_free_cost_max', 'free_cost_max', float),

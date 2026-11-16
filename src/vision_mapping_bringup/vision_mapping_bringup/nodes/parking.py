@@ -35,6 +35,16 @@ def nodes(ctx):
     out = [ctx.make_node(package='parking_assist', executable='goal_pose_node',
                          name='parking_goal_pose_node', output='screen',
                          parameters=[node_parameters('parking.yaml', 'parking_goal_pose_node'), explicit])]
+    selector = ctx.args.arg('parking_goal_selector').strip().lower()
+    if selector not in ('', 'true', 'false'):
+        raise ValueError('parking_goal_selector must be true, false or empty')
+    if selector != 'false':
+        out.append(ctx.make_node(package='parking_assist', executable='goal_selector_node',
+                                 name='parking_goal_selector', output='screen',
+                                 parameters=[{'use_sim_time': ctx.sim_time, 'odom_topic': ctx.topics.odom,
+                                              'map_frame': ctx.world['frame'],
+                                              **ctx.args.given((('parking_slot_width_m', 'slot_width', float),
+                                                                ('parking_slot_depth_m', 'slot_depth', float)))}]))
     if source == 'python_detector':
         rig, setup = ctx.setup.rig, ctx.setup
         arguments = [
@@ -46,8 +56,12 @@ def nodes(ctx):
             '--camera-y-m', str(rig['camera_left_m']), '--pitch-deg', str(rig['pitch_deg']),
             '--roll-deg', str(rig['roll_deg']), '--yaw-deg', str(rig['yaw_deg']),
         ]
+        nice = ctx.args.arg('parking_detector_nice').strip()
+        if nice and not (nice.isdigit() and 1 <= int(nice) <= 19):
+            raise ValueError('parking_detector_nice must be 1..19 or empty')
         out.append(ctx.make_node(package='parking_assist', executable='parking_space_detector',
-                                 name='parking_line_tracker', output='screen', arguments=arguments))
+                                 name='parking_line_tracker', output='screen', arguments=arguments,
+                                 **({'prefix': f'nice -n {nice}'} if nice else {})))
         if ctx.args.flag('launch_viewer'):
             # The detector's bird's-eye view with the goal and the chosen slot drawn on it.
             out.append(ctx.make_node(package='rqt_image_view', executable='rqt_image_view',

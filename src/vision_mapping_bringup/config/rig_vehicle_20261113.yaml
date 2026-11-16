@@ -1,0 +1,16 @@
+# Front camera mount as installed on the vehicle 2026-11-13 (1920x1080 recordings).
+# pitch and yaw measured from the focus of expansion on straight stretches of
+# 20261113_133107 (IMU |wz| < 0.02 rad/s): motion direction 1.3 deg right of the image
+# centre, 31.4 deg below it -> pitch 31.25, yaw +1.0 (fit residual 0.14 deg). Height,
+# position and roll are the previous values (not measured here).
+camera_height_m: 0.80
+camera_forward_m: 0.08
+camera_left_m: 0.0
+pitch_deg: 31.25
+roll_deg: 0.0
+yaw_deg: 1.0
+
+# MonoScale consumes IMU axes directly, without a TF-based rotation.
+# Keep true ONLY when the incoming data is x-forward/y-left/z-up.
+imu_axes_aligned_with_base: true
+imu_position_m: [-0.03, 0.0, 0.805]

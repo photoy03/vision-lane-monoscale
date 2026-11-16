@@ -156,6 +156,18 @@ public:
     configuration_ = declare_and_read(*this);
     estimator_ = std::make_unique<monoscale::Estimator>(configuration_.estimator);
     timing_csv_path_ = declare_parameter<std::string>("timing_csv_path", "");
+    // RULING7: the estimator's base_link is reference_shift_m behind the published one
+    // (the camera translations it is given are shifted by the same amount, in the bringup).
+    // Published: p = p_estimator + R(yaw) (s, 0) - R(yaw_0) (s, 0), yaw unchanged, the body
+    // velocity at the published point (v_y + omega s). The constant last term keeps the odom
+    // origin at the first published base_link as before: yaw_0 is taken from the first
+    // published pose and never updated (this node never re-creates or resets the estimator;
+    // a restarted node starts a new odom frame anyway). 0 (default) = unchanged: the whole
+    // block is skipped and the twist keeps v_y as it was.
+    reference_shift_m_ = declare_parameter<double>("reference_shift_m", 0.0);
+    if (!std::isfinite(reference_shift_m_)) {
+      throw std::invalid_argument("reference_shift_m must be finite");
+    }
     if (!timing_csv_path_.empty()) {
       timing_csv_.open(timing_csv_path_);
       if (!timing_csv_) throw std::runtime_error("cannot open odometry timing CSV: " + timing_csv_path_);
@@ -251,6 +263,9 @@ public:
       configuration_.topics.pose, reliable);
     rclcpp::QoS latched(1);
     latched.reliable().transient_local();
+    // ground_points_topic: the estimator's own frame. With reference_shift_m != 0 these
+    // points are NOT converted to the published base_link (a constant offset from the
+    // odometry's odom origin); no node in this workspace subscribes (RULING7, open item).
     points_ = create_publisher<sensor_msgs::msg::PointCloud2>(
       configuration_.topics.ground_points, latched);
 
@@ -594,6 +609,15 @@ private:
         odometry.child_frame_id = configuration_.topics.base_frame;
         odometry.pose.pose.position.x = update.pose.x;
         odometry.pose.pose.position.y = update.pose.y;
+        if (reference_shift_m_ != 0.0) {
+          if (!shift_origin_set_) {
+            shift_origin_x_ = reference_shift_m_ * std::cos(update.pose.yaw);
+            shift_origin_y_ = reference_shift_m_ * std::sin(update.pose.yaw);
+            shift_origin_set_ = true;
+          }
+          odometry.pose.pose.position.x += reference_shift_m_ * std::cos(update.pose.yaw) - shift_origin_x_;
+          odometry.pose.pose.position.y += reference_shift_m_ * std::sin(update.pose.yaw) - shift_origin_y_;
+        }
         // Roll and pitch come from the attitude filter and yaw from the planar
         // solve, which is the split the estimator is built on. Publishing yaw
         // alone told every consumer the vehicle is permanently level, while the
@@ -602,7 +626,8 @@ private:
           orientation_of(update.pose.yaw, update.tilt_valid ? update.roll : 0.0,
             update.tilt_valid ? update.pitch : 0.0);
         odometry.twist.twist.linear.x = update.twist.x();
-        odometry.twist.twist.linear.y = update.twist.y();
+        odometry.twist.twist.linear.y = reference_shift_m_ != 0.0
+          ? update.twist.y() + reference_shift_m_ * update.twist.z() : update.twist.y();
         // The instrument's, resolved into the body: the planar solve owns only
         // the third one, and the other two are measured and were being dropped.
         odometry.twist.twist.angular.x = last_rate_.x();
@@ -629,8 +654,8 @@ private:
           transform.header.stamp = stamp;
           transform.header.frame_id = configuration_.topics.odom_frame;
           transform.child_frame_id = configuration_.topics.base_frame;
-          transform.transform.translation.x = update.pose.x;
-          transform.transform.translation.y = update.pose.y;
+          transform.transform.translation.x = odometry.pose.pose.position.x;
+          transform.transform.translation.y = odometry.pose.pose.position.y;
           // The same orientation the odometry carries. base_link is the body and
           // the body leans; publishing a level transform beside a tilted pose
           // would make the two disagree about the same vehicle.
@@ -826,6 +851,9 @@ private:
   std::unique_ptr<monoscale::Estimator> estimator_;
   std::mutex lock_;
   std::string timing_csv_path_;
+  double reference_shift_m_ = 0.0;
+  bool shift_origin_set_ = false;
+  double shift_origin_x_ = 0.0, shift_origin_y_ = 0.0;
   std::ofstream timing_csv_;
   uint64_t timing_rows_{0};
 

@@ -33,6 +33,8 @@ TOPICS = (
     "/sensing/camera/rear/fisheye/camera_info",
     "/sensing/imu/imu_data",
 )
+# Replayed when the bag has them (pose_source:=lidar reads /lidar/odometry).
+OPTIONAL_TOPICS = ("/lidar/odometry",)
 OUTPUT_TOPICS = (
     "/localization/monoscale_raw",
     "/localization/kinematic_state",
@@ -52,6 +54,8 @@ OUTPUT_TOPICS = (
     "/localization/monoscale_raw/solve_info",
     "/parking/goal_pose",
     "/parking/goal_valid",
+    "/parking/selected_goal",
+    "/parking/goal_candidates_scored",
     "/parking/cpp/marking_segments_recovered",
 )
 READY_BASE = ("tracking front on", "v5.2 C++ node:", "CPU line map:",
@@ -69,6 +73,15 @@ CONTRACT_METRIC_SOURCES = {
     "snapshot_fallbacks, jobs_dropped, publishes": ["launch.log (sweep_node)"],
 }
 
+
+
+def calibration_size(path: Path) -> tuple[int, int]:
+    """image_size (or DIM) of a fisheye calibration .npz."""
+    import numpy as np
+    with np.load(path, allow_pickle=False) as data:
+        key = next(k for k in ("image_size", "DIM", "calibration_size") if k in data)
+        width, height = (int(v) for v in np.asarray(data[key]).reshape(-1)[:2])
+    return width, height
 
 def ros_command(repo: Path, argv: list[str]) -> list[str]:
     script = (
@@ -309,7 +322,8 @@ def main() -> int:
         "occupancy_parallel_cameras", "occupancy_publish_rate_hz", "occupancy_publish_commit_neutralise",
         "occupancy_carve_on_keyframe", "lane_debug_images",
         "lane_bev_x_min_m", "lane_bev_x_max_m", "lane_bev_y_min_m", "lane_bev_y_max_m",
-        "launch_parking_assist", "parking_slot_width_m", "parking_slot_depth_m", "parking_input",
+        "lane_bev_meters_per_pixel", "lane_valid_margin_m", "lane_mask_aware_illumination", "occupancy_max_interpolation_translation_m", "lidar_x_m", "lidar_y_m", "monoscale_reference_shift_m",
+        "launch_parking_assist", "parking_slot_width_m", "parking_slot_depth_m", "parking_input", "parking_goal_selector", "parking_detector_nice", "pose_source", "lidar_yaw_offset_deg",
     }
     launch_overrides: dict[str, str] = {}
     if args.image_input == "gated" and not any(i.startswith("tracker_input_queue_depth=") for i in args.launch_arg):
@@ -330,7 +344,7 @@ def main() -> int:
                     "tracker_use_cuda", "tracker_road_step_gpu", "tracker_road_step_gpu_gram", "tracker_road_step_frame_guard", "tracker_road_step_bracket_escape",
                     "odom_lone_camera_solve", "occupancy_camera_liveness",
                     "pose_imu_fill", "lane_pending_drop_unresolvable", "lane_pending_readiness",
-                    "lane_debug_images", "launch_parking_assist"}:
+                    "lane_debug_images", "launch_parking_assist", "parking_goal_selector"}:
             if value.lower() not in {"true", "false"}:
                 raise SystemExit(f"{name} must be true or false")
             value = value.lower()
@@ -395,6 +409,9 @@ def main() -> int:
         f"stage_diagnostics:={'true' if args.instrumentation == 'on' else 'false'}",
         "occupancy_use_cuda:=true", "rear_enabled:=true",
         f"rear_rig_file:={rear_rig}", f"calibration:={calibration}", f"rig_file:={rig}",
+        # The capture size is the calibration's: a replay has no camera driver, and nodes that
+        # build image maps from width/height (the parking detector) must match the recorded frames.
+        *(f"{name}:={value}" for name, value in zip(("width", "height"), calibration_size(calibration))),
         f"output_dir:={output}", f"recovery_session_id:={args.run_id}",
         f"lane_pending_recovery:={'true' if args.pending == 'on' else 'false'}",
         "map_fusion_mode:=legacy", "compare_lane_registration:=false",
@@ -432,6 +449,7 @@ def main() -> int:
         "ros2", "bag", "play", str(bag), "--clock", "30", "--rate", str(args.playback_rate),
         "--disable-keyboard-controls", "--wait-for-all-acked", "2000",
         "--qos-profile-overrides-path", str(qos), "--topics", *TOPICS,
+        *[t for t in OPTIONAL_TOPICS if t in available_topics],
     ]
     commands = {name: (ros_command(repo, argv) if argv is not None else None) for name, argv in
                 (("launch", launch), ("front_republisher", front_repub),
@@ -458,7 +476,7 @@ def main() -> int:
         "sample_plan": str(sample_plan) if sample_plan else None,
         "sample_plan_sha256": sha256(sample_plan) if sample_plan else None,
         "bag_info": info.stdout, "bag_topics": sorted(available_topics),
-        "replayed_topics": list(TOPICS),
+        "replayed_topics": list(TOPICS) + [t for t in OPTIONAL_TOPICS if t in available_topics],
         "recorded_output_topics": [t for t in OUTPUT_TOPICS if not (args.outputs_light and t in LIGHT_EXCLUDED_TOPICS)]
         if args.record_outputs == "on" else [],
         "outputs_light": args.outputs_light,

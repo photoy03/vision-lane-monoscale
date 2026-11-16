@@ -55,6 +55,13 @@ global_mapping_cpp:
     illumination_scale: 0.35
     normalization_scale: 128.0
     tophat_size_m: 0.3
+    # FOV-edge margin left out of detection (the edge reads as a line otherwise); 0 = off
+    # (default, as before). Option: lane_valid_margin_m:=0.3.
+    valid_margin_m: 0.0
+    # Option (0 = off, default): illumination from the valid pixels only,
+    # blur(V*mask)/blur(mask), and pixels whose filter windows reach the FOV edge are "no
+    # data" (RULING4 E). Option: lane_mask_aware_illumination:=1.
+    mask_aware_illumination: 0
     threshold_bands: 6
     threshold_update_interval: 3
     threshold_sample_stride: 4

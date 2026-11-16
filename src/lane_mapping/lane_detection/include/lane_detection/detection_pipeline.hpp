@@ -57,6 +57,16 @@ struct Params {
   double glare_min_area_ratio{0.006};
   double illumination_sigma_m{0.60}, illumination_scale{0.35}, normalization_scale{128.0};
   double tophat_size_m{0.30};
+  // Pixels within this distance of the camera's field-of-view edge are left out: the
+  // illumination normalisation there divides by a background darkened by the black outside
+  // the image, so the edge itself comes out as a bright stripe that reads as a line.
+  double valid_margin_m{0.0};
+  // Option (default 0 = off): illumination estimated from the valid pixels only,
+  // blur(V*mask)/blur(mask), and every pixel whose filter windows (3x3 smoothing, top-hat,
+  // 3x3 edge) reach an invalid pixel, or whose blur(mask) is below
+  // kMaskAwareMinSupport, is "no data" for thresholding and segment extraction. Pixels
+  // with blur(mask) >= 1-1e-6 keep the plain illumination value exactly.
+  int mask_aware_illumination{0};
   int threshold_bands{6}, threshold_update_interval{3}, threshold_sample_stride{4};
   double mad_k{5.5}, threshold_margin{3.0}, threshold_min{8.0}, threshold_max{80.0};
   double threshold_alpha{0.20}, strong_response_margin{36.0}, glare_recovery_margin{20.0};
@@ -96,6 +106,9 @@ using lane_tracking::Primitive;
 
 
 
+
+// blur(mask) below this: too little valid support for an illumination estimate.
+constexpr double kMaskAwareMinSupport = 0.5;
 
 inline double percentile(std::vector<float> values, double q) {
   if (values.empty()) return 0.0;
@@ -159,9 +172,38 @@ class Pipeline {
       if (depth_ok[i] && image[i].x >= 0 && image[i].x < source_w-1 &&
           image[i].y >= 0 && image[i].y < source_h-1) valid_.at<uint8_t>(v,u)=255;
     }
+    const int margin_px=static_cast<int>(std::llround(std::max(0.0,p_.valid_margin_m)/p_.mpp));
+    if(margin_px>0)
+      cv::erode(valid_,valid_,cv::getStructuringElement(cv::MORPH_ELLIPSE,{2*margin_px+1,2*margin_px+1}),
+                {-1,-1},1,cv::BORDER_CONSTANT,cv::Scalar(0));
     source_size_ = {source_w, source_h};
     thresholds_.assign(std::max(1,p_.threshold_bands), p_.threshold_min);
+    if (p_.mask_aware_illumination) init_mask_aware();
     return true;
+  }
+
+  // Static per BEV (the valid mask does not change): the mask as float, blur(mask) at full
+  // size, where the masked estimate replaces the plain one, and the detection mask with the
+  // "no data" pixels removed. The CPU and the CUDA path use these same matrices.
+  void init_mask_aware() {
+    valid_f_ = cv::Mat(); valid_.convertTo(valid_f_, CV_32F, 1.0/255.0);
+    cv::Mat small;
+    cv::resize(valid_f_, small, {}, p_.illumination_scale, p_.illumination_scale, cv::INTER_AREA);
+    const double sigma=std::max(1.0,p_.illumination_sigma_m/p_.mpp*p_.illumination_scale);
+    cv::GaussianBlur(small, small, {0,0}, sigma, sigma, cv::BORDER_REFLECT);
+    cv::resize(small, illum_support_, valid_.size(), 0,0, cv::INTER_LINEAR);
+    cv::Mat full, enough, not_full;
+    cv::compare(illum_support_, 1.0-1e-6, full, cv::CMP_GE);
+    cv::compare(illum_support_, kMaskAwareMinSupport, enough, cv::CMP_GE);
+    cv::bitwise_not(full, not_full);
+    cv::bitwise_and(not_full, enough, illum_use_masked_);
+    // Window radius: 3x3 smoothing (1) + top-hat (tk/2) + 3x3 edge (1).
+    const int tk=std::max(3,static_cast<int>(std::llround(p_.tophat_size_m/p_.mpp))|1);
+    const int reach=1+tk/2+1;
+    cv::Mat window_ok;
+    cv::erode(valid_, window_ok, cv::getStructuringElement(cv::MORPH_RECT,{2*reach+1,2*reach+1}),
+              {-1,-1},1,cv::BORDER_CONSTANT,cv::Scalar(0));
+    cv::bitwise_and(window_ok, enough, detect_valid_);
   }
 
   cv::Mat remap_bev(const cv::Mat &frame) const {
@@ -171,6 +213,12 @@ class Pipeline {
   }
 
   const cv::Mat &valid_mask() const { return valid_; }
+  // The mask detection runs on: valid_ normally, valid_ without the "no data" pixels with
+  // mask_aware_illumination on.
+  const cv::Mat &detect_mask() const { return p_.mask_aware_illumination ? detect_valid_ : valid_; }
+  const cv::Mat &valid_float() const { return valid_f_; }
+  const cv::Mat &illum_support() const { return illum_support_; }
+  const cv::Mat &illum_use_masked() const { return illum_use_masked_; }
   const cv::Mat &map_x() const { return map_x_; }
   const cv::Mat &map_y() const { return map_y_; }
 
@@ -193,23 +241,24 @@ class Pipeline {
 
   Prep finalize_preprocess(const cv::Mat &color, const cv::Mat &glare_seed_input,
                            const cv::Mat &response_input) {
+    const cv::Mat &dm = detect_mask();
     Prep out;
-    cv::bitwise_and(color, valid_, out.color);
+    cv::bitwise_and(color, dm, out.color);
     cv::Mat white_support;
     cv::dilate(out.color, white_support, cv::getStructuringElement(cv::MORPH_RECT,{3,3}));
     cv::Mat glare_seed;
-    cv::bitwise_and(glare_seed_input, valid_, glare_seed);
+    cv::bitwise_and(glare_seed_input, dm, glare_seed);
     cv::Mat labels, stats, centers;
     const int count=cv::connectedComponentsWithStats(glare_seed,labels,stats,centers,8);
     out.glare=cv::Mat::zeros(glare_seed.size(),CV_8U);
-    const int min_area=std::max(1,static_cast<int>(std::llround(valid_.total()*p_.glare_min_area_ratio)));
+    const int min_area=std::max(1,static_cast<int>(std::llround(dm.total()*p_.glare_min_area_ratio)));
     for(int label=1;label<count;++label)if(stats.at<int>(label,cv::CC_STAT_AREA)>=min_area)
       out.glare.setTo(255,labels==label);
     int gk=std::max(1,p_.glare_dilate)|1;
     if(gk>1)cv::dilate(out.glare,out.glare,cv::getStructuringElement(cv::MORPH_ELLIPSE,{gk,gk}));
-    cv::bitwise_and(out.glare, valid_, out.glare);
+    cv::bitwise_and(out.glare, dm, out.glare);
     response_input.copyTo(out.response);
-    cv::bitwise_and(out.response, valid_, out.response);
+    cv::bitwise_and(out.response, dm, out.response);
 
     out.threshold_map = cv::Mat(out.response.size(), CV_32F);
     cv::Mat raw = cv::Mat::zeros(out.response.size(), CV_8U);
@@ -222,7 +271,7 @@ class Pipeline {
       if(recompute){std::vector<float> values;
         const int stride=std::max(1,p_.threshold_sample_stride);
         for (int y=y0;y<y1;y+=stride) for (int x=0;x<out.response.cols;x+=stride)
-          if (valid_.at<uint8_t>(y,x) && !out.glare.at<uint8_t>(y,x)) values.push_back(out.response.at<uint8_t>(y,x));
+          if (dm.at<uint8_t>(y,x) && !out.glare.at<uint8_t>(y,x)) values.push_back(out.response.at<uint8_t>(y,x));
         double now=p_.threshold_min;
         if(values.size()>=32){std::vector<float> bg=values;const double trim=percentile(values,0.90);
           bg.erase(std::remove_if(bg.begin(),bg.end(),[&](float v){return v>trim;}),bg.end());if(bg.empty())bg=values;
@@ -236,7 +285,7 @@ class Pipeline {
     cv::Mat strong, rf; out.response.convertTo(rf,CV_32F);
     cv::compare(rf, out.threshold_map + p_.strong_response_margin, strong, cv::CMP_GE);
     cv::Mat support; cv::bitwise_or(white_support,strong,support);
-    cv::bitwise_and(raw,support,out.binary); cv::bitwise_and(out.binary,valid_,out.binary);
+    cv::bitwise_and(raw,support,out.binary); cv::bitwise_and(out.binary,dm,out.binary);
     cv::Mat recovery, outside, not_glare;
     cv::compare(rf, out.threshold_map + p_.glare_recovery_margin, recovery, cv::CMP_GE);
     cv::bitwise_and(recovery,out.glare,recovery);cv::bitwise_not(out.glare,not_glare);
@@ -294,6 +343,16 @@ class Pipeline {
     const double sigma=std::max(1.0,p_.illumination_sigma_m/p_.mpp*p_.illumination_scale);
     cv::GaussianBlur(small, small, {0,0}, sigma, sigma, cv::BORDER_REFLECT);
     cv::resize(small, illum, value.size(), 0,0, cv::INTER_LINEAR);
+    if (p_.mask_aware_illumination) {
+      // blur(V*mask)/blur(mask) where the support is partial; the plain value stays where it
+      // is full (and where it is too thin, those pixels are "no data" anyway).
+      cv::Mat masked_small, masked;
+      cv::resize(source_f.mul(valid_f_), masked_small, {}, p_.illumination_scale, p_.illumination_scale, cv::INTER_AREA);
+      cv::GaussianBlur(masked_small, masked_small, {0,0}, sigma, sigma, cv::BORDER_REFLECT);
+      cv::resize(masked_small, masked, value.size(), 0,0, cv::INTER_LINEAR);
+      cv::divide(masked, illum_support_, masked);
+      masked.copyTo(illum, illum_use_masked_);
+    }
     cv::Mat normf, normalized;
     cv::divide(source_f, illum + 1e-6, normf, p_.normalization_scale);
     normf.convertTo(normalized,CV_8U); cv::bitwise_and(normalized, valid_, normalized);
@@ -365,7 +424,8 @@ class Pipeline {
     auto keep=[&](const Observation&v){return v.confidence>=p_.inference_min_score||v.confidence>=p_.strong_single_score;};
     a.erase(std::remove_if(a.begin(),a.end(),[&](auto&v){return !keep(v);}),a.end());b.erase(std::remove_if(b.begin(),b.end(),[&](auto&v){return !keep(v);}),b.end());
   }
-  Params p_; cv::Mat map_x_,map_y_,valid_; cv::Size source_size_; std::vector<double>thresholds_; int threshold_frame_{0};
+  Params p_; cv::Mat map_x_,map_y_,valid_; cv::Size source_size_;
+  cv::Mat valid_f_, illum_support_, illum_use_masked_, detect_valid_; std::vector<double>thresholds_; int threshold_frame_{0};
 };
 
 // Detection parameters by name (E-8): the node passes declare_parameter, the offline replay
@@ -377,7 +437,7 @@ Params load_params(GetDouble get_double, GetInt get_int) {
 #define I(name,field,val) p.field=get_int(name,val)
     D("camera_height_m",camera_height,0.8);D("camera_forward_m",camera_forward,0);D("camera_left_m",camera_left,0);D("pitch_deg",pitch_deg,30);D("roll_deg",roll_deg,0);D("yaw_deg",yaw_deg,0);D("x_min_m",x_min,-4);D("x_max_m",x_max,4);D("y_min_m",y_min,0);D("y_max_m",y_max,5);D("meters_per_pixel",mpp,0.02);
     I("white_s_max",white_s_max,60);I("white_v_min",white_v_min,140);I("yellow_h_min",yellow_h_min,15);I("yellow_h_max",yellow_h_max,40);I("yellow_s_min",yellow_s_min,70);I("yellow_v_min",yellow_v_min,70);I("glare_v_min",glare_v_min,248);I("glare_s_max",glare_s_max,95);D("glare_min_area_ratio",glare_min_area_ratio,0.006);I("glare_dilate",glare_dilate,9);
-    D("illumination_sigma_m",illumination_sigma_m,0.60);D("illumination_scale",illumination_scale,0.35);D("normalization_scale",normalization_scale,128);D("tophat_size_m",tophat_size_m,0.30);I("threshold_bands",threshold_bands,6);I("threshold_update_interval",threshold_update_interval,3);I("threshold_sample_stride",threshold_sample_stride,4);D("mad_k",mad_k,5.5);D("threshold_margin",threshold_margin,3);D("threshold_min",threshold_min,8);D("threshold_max",threshold_max,80);D("strong_response_margin",strong_response_margin,36);D("glare_recovery_margin",glare_recovery_margin,20);
+    D("illumination_sigma_m",illumination_sigma_m,0.60);D("illumination_scale",illumination_scale,0.35);D("normalization_scale",normalization_scale,128);D("tophat_size_m",tophat_size_m,0.30);D("valid_margin_m",valid_margin_m,0.0);I("mask_aware_illumination",mask_aware_illumination,0);I("threshold_bands",threshold_bands,6);I("threshold_update_interval",threshold_update_interval,3);I("threshold_sample_stride",threshold_sample_stride,4);D("mad_k",mad_k,5.5);D("threshold_margin",threshold_margin,3);D("threshold_min",threshold_min,8);D("threshold_max",threshold_max,80);D("strong_response_margin",strong_response_margin,36);D("glare_recovery_margin",glare_recovery_margin,20);
     I("hough_threshold",hough_threshold,28);D("hough_min_line_length_m",hough_min_len,0.65);D("hough_max_line_gap_m",hough_max_gap,0.18);I("hough_max_raw_segments",max_raw,120);D("candidate_min_length_m",candidate_min_len,0.70);D("candidate_min_binary_support",min_binary,0.72);D("candidate_min_color_support",min_color,0.08);D("candidate_min_score",candidate_min_score,0.46);D("candidate_max_glare_ratio",max_glare,0.85);D("line_min_width_m",line_min_width,0.05);D("line_max_width_m",line_max_width,0.22);D("line_target_width_m",line_target_width,0.12);D("dominant_angle_tolerance_deg",dominant_tol,12);D("dominant_min_confidence",dominant_min_conf,0.35);D("merge_distance_m",merge_distance,0.20);D("merge_gap_m",merge_gap,0.35);D("final_min_span_m",final_min_span,0.85);D("final_min_score",final_min_score,0.52);I("max_vectors_each",max_each,8);I("vectorize_every_n",vectorize_every_n,2);
     I("temporal_history_size",history,5);I("temporal_confirm_hits",confirm_hits,3);D("temporal_angle_gate_deg",temporal_angle,7);D("temporal_offset_gate_m",temporal_offset,0.32);D("temporal_anchor_offset_m",temporal_anchor_offset,0.40);D("temporal_gap_gate_m",temporal_gap,0.60);I("temporal_max_missed_updates",max_missed,3);D("temporal_ema_alpha",ema,0.35);
     D("map_x_min_m",map_x_min,-2);D("map_x_max_m",map_x_max,20);D("map_y_min_m",map_y_min,-10);D("map_y_max_m",map_y_max,10);D("map_resolution_m",map_res,0.03);D("map_evidence_increment",map_inc,1);D("map_evidence_max",map_max,20);D("map_confirm_evidence",map_confirm,3);D("map_min_translation_m",map_min_translation,0.05);D("map_min_yaw_deg",map_min_yaw_deg,1);

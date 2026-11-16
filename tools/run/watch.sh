@@ -3,7 +3,11 @@
 #
 #   bash tools/run/watch.sh 0926                 a real recording by its date (MMDD) under
 #                                                $VISION_MEASUREMENTS (default ~/vision_lane_measurements)
-#   bash tools/run/watch.sh /path/to/session/bag a recording by path (folder with metadata.yaml)
+#                                                or the external SSD's rosbag folder
+#   bash tools/run/watch.sh /path/to/session/bag a recording by path (folder with metadata.yaml);
+#                                                a calibration.npz beside the bag is used; a bag
+#                                                from sensor_record (/cam0, /cam1, /imu_data) is
+#                                                converted once under $VISION_RUNS/converted/
 #   bash tools/run/watch.sh park_h89             a CARLA drive under $CARLA_BAGS (default: the
 #                                                first /media/$USER/*/HERO/hero_bags)
 #   options: --rate R (playback rate; default 1.0, CARLA 0.35), --no-parking
@@ -32,7 +36,11 @@ bag=""
 if [[ -f "$target/metadata.yaml" ]]; then bag=$target
 elif [[ -f "$target/bag/metadata.yaml" ]]; then bag=$target/bag
 elif [[ "$target" =~ ^[0-9]{4}$ ]]; then
-  bag=$(ls -d "${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"/????"$target"_*/bag 2>/dev/null | head -1)
+  bag=$(ls -d "${VISION_MEASUREMENTS:-$HOME/vision_lane_measurements}"/????"$target"_*/bag \
+    /media/"$USER"/38F7-677B/rosbag/????"$target"_*/bag 2>/dev/null | head -1)
+  # sensor_record bags: the metadata sits in the dated folder itself.
+  [[ -n "$bag" ]] || bag=$(dirname "$(ls /media/"$USER"/38F7-677B/rosbag/????"$target"_*/metadata.yaml 2>/dev/null | head -1)" 2>/dev/null)
+  [[ "$bag" == "." ]] && bag=""
 fi
 if [[ -z "$bag" ]] && { [[ -n "$CARLA_BAGS" && -d "$CARLA_BAGS/$target" ]] ||
     ls -d /media/"$USER"/*/HERO/hero_bags/"$target" >/dev/null 2>&1; }; then
@@ -41,7 +49,25 @@ if [[ -z "$bag" ]] && { [[ -n "$CARLA_BAGS" && -d "$CARLA_BAGS/$target" ]] ||
   exec bash "$root/tools/run/carla_check.sh" "${extra[@]}" ${rate:+--rate "$rate"} "$target"
 fi
 [[ -n "$bag" && -f "$bag/metadata.yaml" ]] || { echo "recording not found: $target" >&2; exit 2; }
+# A bag from the vehicle PC's sensor_record (usb_cam /cam0 = rear, /cam1 = front, WIT /imu_data):
+# converted once into $VISION_RUNS/converted/<name> (tools/run/rosbag_to_measurement.py), then replayed.
+if grep -q "name: /cam1/image_raw/compressed" "$bag/metadata.yaml" && ! grep -q "name: /measurement/front/" "$bag/metadata.yaml"; then
+  converted="${VISION_RUNS:-$HOME/vision_lane_runs}/converted/$(basename "$bag")"
+  if [[ ! -f "$converted/bag/metadata.yaml" ]]; then
+    [[ -e "$converted" ]] && { echo "incomplete conversion at $converted; remove it and retry" >&2; exit 2; }
+    echo "sensor_record bag: converting into $converted (a few minutes, once)"
+    ( source /opt/ros/humble/setup.bash && python3 -s "$root/tools/run/rosbag_to_measurement.py" "$bag" "$converted" \
+        --front /cam1/image_raw/compressed --rear /cam0/image_raw/compressed --imu /imu_data > /dev/null )
+  fi
+  bag=$converted/bag
+  # The vehicle's measured mount angles (vehicle_live.launch.py uses the same files).
+  cfg="$root/src/vision_mapping_bringup/config"
+  vehicle_rigs=(--rig "$cfg/rig_vehicle_20261113.yaml" --rear-rig "$cfg/rear_rig_vehicle_20261113.yaml")
+fi
 
+# A converted recording (tools/run/rosbag_to_measurement.py) carries its own calibration.
+[[ -n "${vehicle_rigs+x}" ]] || vehicle_rigs=()
+calib=(); [[ -f "$(dirname "$bag")/calibration.npz" ]] && calib=(--calibration "$(dirname "$bag")/calibration.npz")
 source /opt/ros/humble/setup.bash
 source "$root/install/setup.bash"
 out="${VISION_RUNS:-$HOME/vision_lane_runs}/watch_$(date +%Y%m%d)"
@@ -49,7 +75,7 @@ mkdir -p "$out"
 run="watch_$(basename "$(dirname "$bag")" | cut -c1-30)_$(date +%H%M%S)"
 echo "replaying $bag as $run (windows open in a few seconds; they close when the bag ends)"
 python3 "$root/tools/run/run_recovery_trial.py" --bag "$bag" --run-id "$run" --output-root "$out" \
-  --repo "$root" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --pending on \
+  --repo "$root" "${calib[@]}" "${vehicle_rigs[@]}" --domain-id "${ROS_DOMAIN_ID:-96}" --minimum-free-gib 3.5 --pending on \
   --instrumentation off --record-outputs on --outputs-light --show ${rate:+--playback-rate "$rate"} \
   --launch-arg launch_fusion=true --launch-arg lane_debug_images=true \
   --launch-arg launch_parking_assist=$parking
