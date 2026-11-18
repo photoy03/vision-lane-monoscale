@@ -1,0 +1,41 @@
+parking_slot_map_node:
+  ros__parameters:
+    fused_map_topic: /mapping/fused_map
+    slot_map_topic: /parking/slot_map
+    marker_topic: /parking/slot_markers
+    mapping_complete_topic: /parking/mapping_complete
+    require_complete_fused_map: true
+
+    slot_width: 2.60
+    slot_depth: 4.37
+    width_tolerance: 0.50
+    depth_tolerance: 1.17
+    side_depth_difference_max: 1.0
+    orthogonal_tolerance_deg: 15.0
+    intersection_tolerance: 0.45
+    side_min_length: 1.0
+
+    slot_match_distance: 0.75
+    slot_match_angle_deg: 15.0
+    confirmation_observations: 3
+
+    occupancy_threshold: 70
+    occupied_ratio_threshold: 0.20
+    free_ratio_threshold: 0.05
+    minimum_known_coverage: 0.50
+    occupancy_inner_margin: 0.25
+    occupancy_confirmations: 3
+
+parking_goal_selector_node:
+  ros__parameters:
+    slot_map_topic: /parking/slot_map
+    odom_topic: /localization/kinematic_state
+    goal_topic: /parking/goal_pose
+    goal_valid_topic: /parking/goal_valid
+    selected_slot_topic: /parking/selected_slot_id
+    mapping_complete_topic: /parking/mapping_complete
+    entrance_to_goal_distance: 3.75
+    reverse_parking: true
+    allow_unknown_occupancy: false
+    heading_cost_weight: 1.0
+    publish_rate_hz: 5.0
