@@ -46,6 +46,7 @@ if os.environ.get('PLAN_DET'):                      # harness only: search limit
     [v for v in vars(planner).values() if hasattr(v, 'time_limit_s')][0].time_limit_s = 1e9
 from parking_scenario.line_memory import LineGate
 gate = LineGate(float(os.environ.get('YAW', 0.0)))
+LYAW = math.radians(float(os.environ.get('LYAW', 0.0)))      # harness only (diagnosis): camera lines turned about the rig origin
 mem = LineMemory(float(os.environ.get('LINE_MEM', 2.0))); all_lines = []; timeline = []; next_step = None; last_seg = -1; lines_last = []; plan = None; plan_for = None; t0 = events[0][0]
 for t, topic, m in events:
     if topic == '/localization/kinematic_state':
@@ -55,7 +56,7 @@ for t, topic, m in events:
         sc.on_scan([(p.stamp.sec + p.stamp.nanosec * 1e-9, bytes(p.data)) for p in m.packets])
     else:
         if sc.poses.t and sc.poses.t[0] <= t:
-            tq_ = min(t, sc.poses.t[-1]); x, y, yaw = (float(v) for v in sc.poses.at(tq_)); c, sn = math.cos(yaw), math.sin(yaw)
+            tq_ = min(t, sc.poses.t[-1]); x, y, yaw = (float(v) for v in sc.poses.at(tq_)); c, sn = math.cos(yaw + LYAW), math.sin(yaw + LYAW)
             if topic == 'npz_lines':
                 for r_ in m:
                     if gate.enabled and not gate.accept(sc.poses, tq_): continue
