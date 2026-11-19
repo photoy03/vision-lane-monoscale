@@ -259,6 +259,60 @@ class DisplayFilter:
         return shown, selected, shown_goal, shown_path
 
 
+class EgoSmoother:
+    """Steady vehicle pose for the picture (display only, used with the predicted picture rate).
+
+    The LiDAR pose comes at ~10 Hz and its one-step speed and yaw rate are noisy (speed changes by
+    0.45 m/s rms from one message to the next at walking speed), so a picture extrapolated with them
+    jumps by centimetres every frame. Here the speed and yaw rate are taken over the last base_sec of
+    poses, and the shown pose moves with them and is pulled toward the extrapolated measured pose with
+    the time constant tau_sec: no steps, no lag at constant speed."""
+
+    def __init__(self, tau_sec: float = 0.15, base_sec: float = 0.5, max_extrapolate_sec: float = 0.4) -> None:
+        self.tau, self.base, self.max_extrapolate = tau_sec, base_sec, max_extrapolate_sec
+        self.poses: list = []          # (t, x, y, unwrapped yaw)
+        self.speed = self.rate = 0.0
+        self.shown = None
+        self.shown_t = None
+
+    def add(self, t: float, x: float, y: float, yaw: float) -> None:
+        if self.poses:
+            if t <= self.poses[-1][0]:
+                return
+            yaw = self.poses[-1][3] + wrap(yaw - self.poses[-1][3])
+            if t - self.poses[-1][0] > 1.0:               # a gap: start again
+                self.poses, self.shown = [], None
+        self.poses.append((t, x, y, yaw))
+        while len(self.poses) > 2 and self.poses[1][0] <= t - self.base:
+            self.poses.pop(0)
+        t0, x0, y0, yaw0 = self.poses[0]
+        if t > t0:
+            mid = 0.5 * (yaw + yaw0)
+            self.speed = ((x - x0) * math.cos(mid) + (y - y0) * math.sin(mid)) / (t - t0)
+            self.rate = (yaw - yaw0) / (t - t0)
+
+    def at(self, now: float):
+        """Shown pose (x, y, yaw) at time now, or None before the first pose."""
+        if not self.poses:
+            return None
+        t, x, y, yaw = self.poses[-1]
+        e = min(max(now - t, 0.0), self.max_extrapolate)
+        mid = yaw + 0.5 * self.rate * e
+        target = (x + self.speed * e * math.cos(mid), y + self.speed * e * math.sin(mid), yaw + self.rate * e)
+        dt = 0.0 if self.shown_t is None else now - self.shown_t
+        if self.shown is None or dt <= 0.0 or dt > 0.5:
+            self.shown = list(target)
+        else:
+            mid = self.shown[2] + 0.5 * self.rate * dt
+            self.shown[0] += self.speed * dt * math.cos(mid)
+            self.shown[1] += self.speed * dt * math.sin(mid)
+            self.shown[2] += self.rate * dt
+            g = 1.0 - math.exp(-dt / self.tau)
+            self.shown = [a + g * (b - a) for a, b in zip(self.shown, target)]
+        self.shown_t = now
+        return self.shown[0], self.shown[1], wrap(self.shown[2])
+
+
 def to_body(ego, x, y):
     """Map point -> the vehicle's frame (rear axle, x forward, y left)."""
     c, s = math.cos(ego[2]), math.sin(ego[2])

@@ -47,6 +47,16 @@ def shrunk_corners(slot: ParkingSlot, inset: float):
             for p in pts]
 
 
+def goal_box(goal, vehicle, margin: float):
+    """Body box at the goal pose (rear axle) grown by margin."""
+    c, s = math.cos(goal[2]), math.sin(goal[2])
+    return [(goal[0] + c * a - s * b, goal[1] + s * a + c * b)
+            for a, b in ((-vehicle.rear_overhang - margin, -0.5 * vehicle.width - margin),
+                         (-vehicle.rear_overhang - margin, 0.5 * vehicle.width + margin),
+                         (vehicle.front + margin, 0.5 * vehicle.width + margin),
+                         (vehicle.front + margin, -0.5 * vehicle.width - margin))]
+
+
 class PlannerNode(Node):
     def __init__(self) -> None:
         super().__init__("parking_path_planner")
@@ -138,11 +148,18 @@ class PlannerNode(Node):
             cm.verify([(x + c * a - s * b, y + s * a + c * b)
                        for a, b in ((-v.rear_overhang, -0.5 * v.width), (-v.rear_overhang, 0.5 * v.width),
                                     (v.front, 0.5 * v.width), (v.front, -0.5 * v.width))])
+        # neighbours first, the selected slot last: a neighbour rectangle that lies partly on the
+        # selected slot (the same painted slot extracted twice) must not close the goal
+        for slot in self.slots.slots if self.slots else []:
+            if int(slot.slot_id) != self.selected and slot.occupancy_state != ParkingSlot.OCCUPANCY_FREE:
+                cm.block(shrunk_corners(slot, 0.2))
         for slot in self.slots.slots if self.slots else []:
             if int(slot.slot_id) == self.selected:
                 cm.verify([(c.x, c.y) for c in slot.corners])
-            elif slot.occupancy_state != ParkingSlot.OCCUPANCY_FREE:
-                cm.block(shrunk_corners(slot, 0.2))
+        # The scenario selects a slot only when the body at the goal is clear of LiDAR obstacles by
+        # 0.20 m (slot_logic.body_clear); a neighbour rectangle drawn a little too wide or too deep
+        # must not close that goal either.
+        cm.verify(goal_box(self.goal, v, 0.15))
         cm.finish()
         return cm
 

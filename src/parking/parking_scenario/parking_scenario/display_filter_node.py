@@ -24,7 +24,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from std_msgs.msg import String, UInt64
 from visualization_msgs.msg import Marker, MarkerArray
 
-from parking_scenario.display_filter import DisplayFilter, FilterParams, to_body
+from parking_scenario.display_filter import DisplayFilter, EgoSmoother, FilterParams, to_body
 
 
 def yaw_of(q) -> float:
@@ -75,6 +75,9 @@ class DisplayFilterNode(Node):
         self.predict_hz = float(d("predict_hz", 0.0).value)
         self.predict_max = float(d("predict_max_sec", 0.4).value)
         self.last_odom = None          # (stamp s, ego, forward speed, yaw rate)
+        # 0 = off. With predict_hz: the shown vehicle pose is smoothed (see EgoSmoother); display only.
+        smooth = float(d("ego_smooth_sec", 0.0).value)
+        self.smoother = EgoSmoother(smooth) if smooth > 0.0 and self.predict_hz > 0.0 else None
         if self.predict_hz > 0.0:
             self.create_timer(1.0 / self.predict_hz, self.on_predict)
 
@@ -103,6 +106,8 @@ class DisplayFilterNode(Node):
         t = stamp_s(msg.header.stamp)
         ego = (msg.pose.pose.position.x, msg.pose.pose.position.y, yaw_of(msg.pose.pose.orientation))
         self.last_odom = (t, ego, msg.twist.twist.linear.x, msg.twist.twist.angular.z)
+        if self.smoother is not None:
+            self.smoother.add(t, *ego)
         if self.predict_hz > 0.0:
             return                                        # the timer draws, at a steady rate
         self.render(t, ego, msg.header.stamp)
@@ -116,6 +121,9 @@ class DisplayFilterNode(Node):
         if dt > self.predict_max + self.stale:
             return                                        # pose lost: blank, as without prediction
         dt = min(max(dt, 0.0), self.predict_max)
+        if self.smoother is not None:
+            self.render(t0 + dt, self.smoother.at(t0 + dt), now.to_msg())
+            return
         mid = yaw + 0.5 * rate * dt
         ego = (x + speed * dt * math.cos(mid), y + speed * dt * math.sin(mid), yaw + rate * dt)
         self.render(t0 + dt, ego, now.to_msg())

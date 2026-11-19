@@ -80,11 +80,12 @@ for t, topic, m in events:
             g, origin, res = st['grid']; goal = st['goal']
             cm = CostMap(g, origin, res, [st['ego'][:2], goal[:2]], 9.0); BLK = []
             for k, v in st['slots'].items():
-                if k == st['selected']: cm.verify(v['corners'])
-                elif v['state'] != FREE:
+                if k != st['selected'] and v['state'] != FREE:
                     e, yw, w, d = v['entrance'], v['yaw'], v['width'] - 0.4, v['depth'] - 0.4
                     c, s = math.cos(yw), math.sin(yw)
                     BLK.append([(e[0] + c * a - s * b, e[1] + s * a + c * b) for a, b in ((0.2, -w / 2), (0.2, w / 2), (0.2 + d, w / 2), (0.2 + d, -w / 2))]); cm.block(BLK[-1])
+            cm.verify(st['slots'][st['selected']]['corners'])          # last, as planner_node
+            V_ = P.vehicle; gc_, gs_ = math.cos(goal[2]), math.sin(goal[2]); cm.verify([(goal[0] + gc_ * a - gs_ * b, goal[1] + gs_ * a + gc_ * b) for a, b in ((-V_.rear_overhang - .15, -.5 * V_.width - .15), (-V_.rear_overhang - .15, .5 * V_.width + .15), (V_.front + .15, .5 * V_.width + .15), (V_.front + .15, -.5 * V_.width - .15))])   # as planner_node.goal_box
             if os.environ.get('PLAN_DUMP'): DUMP.append((g.copy(), origin, res, st['ego'], goal, [v['corners'] for k, v in st['slots'].items() if k == st['selected']], BLK))
             cm.finish(); plan = planner.plan(cm, st['ego'], goal); plan_for = st['selected']
             rec['plan'] = {'ok': plan.ok, 'reason': plan.reason, 'len': round(plan.length_m, 1), 'gear': plan.gear_changes, 'unverified': round(plan.unverified_m, 1), 't': round(plan.elapsed_s, 2),
