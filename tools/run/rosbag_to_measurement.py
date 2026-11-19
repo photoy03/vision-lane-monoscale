@@ -46,6 +46,11 @@ def main() -> int:
     ap.add_argument("--imu", required=True)
     ap.add_argument("--calibration", type=Path,
                     default=REPO / "src/vision_mapping_bringup/config/calibration/front.npz")
+    ap.add_argument("--image-stamp-shift-sec", type=float, default=0.0,
+                    help="added to every image header stamp (default 0 = stamps unchanged). Hypothesis under "
+                         "test for 20261113_171835: its images are received 0.886 s after their stamp while "
+                         "20261113_172234 images are received 0.112 s after it, so 0.774 is tried there. The "
+                         "value comes from bag timing only and is not to be adjusted to fit LiDAR.")
     a = ap.parse_args()
     if a.out.exists():
         sys.exit(f"{a.out} exists")
@@ -88,6 +93,7 @@ def main() -> int:
     size = None
     counts = {k: 0 for k in sources.values()}
     stamp_offsets = []
+    per_camera = {"front": [], "rear": []}     # receive time minus the ORIGINAL header stamp
     for f in files:
         db = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
         ids = {tid: sources[name] for tid, name in db.execute("select id, name from topics") if name in sources}
@@ -110,6 +116,12 @@ def main() -> int:
                 size = (img.shape[1], img.shape[0])
             if counts[kind] % 200 == 1:
                 stamp_offsets.append(t * 1e-9 - (m.header.stamp.sec + m.header.stamp.nanosec * 1e-9))
+            if counts[kind] % 50 == 1:
+                per_camera[kind].append(t * 1e-9 - (m.header.stamp.sec + m.header.stamp.nanosec * 1e-9))
+            if a.image_stamp_shift_sec:
+                shifted = m.header.stamp.sec * 1_000_000_000 + m.header.stamp.nanosec + round(
+                    a.image_stamp_shift_sec * 1e9)
+                m.header.stamp.sec, m.header.stamp.nanosec = divmod(shifted, 1_000_000_000)
             m.header.frame_id = FRAMES[kind]
             m.format = "jpeg"
             writer.write(f"/measurement/{kind}/image_raw/compressed", serialize_message(m), t)
@@ -137,6 +149,11 @@ def main() -> int:
         "receive_minus_header_stamp_sec": {"median": float(np.median(stamp_offsets)) if stamp_offsets else None,
                                            "max": float(np.max(stamp_offsets)) if stamp_offsets else None},
     }
+    if a.image_stamp_shift_sec:      # a shifted bag must be recognisable; an unshifted session.yaml is unchanged
+        session["image_stamp_shift_sec"] = a.image_stamp_shift_sec
+        session["receive_minus_original_stamp_sec"] = {
+            cam: {"median": float(np.median(v)), "p5": float(np.percentile(v, 5)), "p95": float(np.percentile(v, 95))}
+            for cam, v in per_camera.items() if v}
     (a.out / "session.yaml").write_text(yaml.safe_dump(session, sort_keys=False, allow_unicode=True))
     print(yaml.safe_dump(session, sort_keys=False, allow_unicode=True))
     return 0
