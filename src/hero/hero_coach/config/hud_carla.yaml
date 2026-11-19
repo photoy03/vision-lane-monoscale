@@ -1,0 +1,13 @@
+# hero_hud/config/hud.yaml 위에 겹친다. CARLA 차량은 IONIQ 가 아니라 Prius 다.
+#
+# 코리도 곡률은 축거로 조향각을 궤적으로 바꾸므로 축거가 틀리면 코리도가 휜다
+# (2.700 대 2.8192, 4%). 폭은 coach 의 차체 상자와 같게 둔다 — HUD 가 장애물을
+# 코리도 폭으로 걸러내므로 둘이 다르면 코치가 막혔다고 본 것을 HUD 가 지나친다.
+# 값의 출처는 ioniq_carla_bridge/config/sensor_kit_calibration.yaml.
+
+hero_hud:
+  ros__parameters:
+    vehicle:
+      wheelbase_m: 2.8192
+      width_m: 2.0
+      length_m: 4.514

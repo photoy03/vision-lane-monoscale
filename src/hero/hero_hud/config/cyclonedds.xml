@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  시뮬레이션 PC → Orin 으로 영상이 넘어갈 때만 필요하다.
+  인지와 HUD 가 같은 Orin 에 있으면(토폴로지 A) 영상은 프로세스 경계를 안 넘으므로
+  이 파일이 필요 없다 — 그 경우엔 컴포저블 노드로 묶어 직렬화를 아예 없애는 편이 낫다.
+
+  상위 문서 13-2 가 이미 재놓은 함정:
+    net.core.rmem_max 가 212,992 B 인데 mono8 프레임 하나가 518,400 B 다.
+    프레임이 UDP 조각 수백 개로 오고, 하나만 잃으면 샘플 전체가 버려진다.
+    증상은 "40 Hz 만 도착한다" 로 나타나고 해상도를 줄여도 안 변한다.
+
+  커널도 같이 올려야 한다. 이 XML 만으로는 안 된다:
+    sudo sysctl -w net.core.rmem_max=16777216
+    sudo sysctl -w net.core.rmem_default=8388608
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <!-- 루프백만 쓰는 단일 호스트가 아니면 인터페이스를 명시하는 편이 안전하다. -->
+      <MaxMessageSize>65500B</MaxMessageSize>
+      <FragmentSize>4000B</FragmentSize>
+    </General>
+
+    <Internal>
+      <!-- 프레임 하나가 통째로 들어갈 만큼. 부족하면 조각이 버려진다. -->
+      <SocketReceiveBufferSize min="16MB"/>
+      <!-- 큰 샘플의 조각 재조립을 기다리는 큐. -->
+      <DefragUnreliableMaxSamples>16</DefragUnreliableMaxSamples>
+      <Watermarks>
+        <WhcHigh>4MB</WhcHigh>
+      </Watermarks>
+    </Internal>
+
+    <Discovery>
+      <!-- 두 대뿐이면 멀티캐스트 탐색보다 고정 피어가 조용하고 빠르다.
+           주소는 실제 IP 로 바꿔 쓴다. -->
+      <ParticipantIndex>auto</ParticipantIndex>
+      <!--
+      <Peers>
+        <Peer address="192.168.0.10"/>
+        <Peer address="192.168.0.20"/>
+      </Peers>
+      -->
+    </Discovery>
+  </Domain>
+</CycloneDDS>

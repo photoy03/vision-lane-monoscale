@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- 흰 선화로 그린다. 렌더러가 휘도로 잉크를 뽑으므로 단색 선화가 가장 잘 변환된다. -->
+  <polygon points="30,4 70,4 96,30 96,70 70,96 30,96 4,70 4,30"
+           fill="none" stroke="#fff" stroke-width="9"/>
+  <text x="50" y="62" font-family="sans-serif" font-size="30" font-weight="bold"
+        text-anchor="middle" fill="#fff">STOP</text>
+</svg>

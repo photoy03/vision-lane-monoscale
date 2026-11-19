@@ -1,0 +1,10 @@
+build/
+install/
+log/
+
+**/__pycache__/
+*.py[cod]
+
+# 회귀 확인용 캡처는 docs/screens/ 에만 둔다. 다른 곳의 임시 캡처는 안 넣는다.
+/*.png
+/tools/*.png
