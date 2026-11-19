@@ -56,10 +56,19 @@ def nodes(ctx):
             '--camera-y-m', str(rig['camera_left_m']), '--pitch-deg', str(rig['pitch_deg']),
             '--roll-deg', str(rig['roll_deg']), '--yaw-deg', str(rig['yaw_deg']),
         ]
+        detector_input = ctx.args.arg('parking_detector_input').strip().lower() or 'raw'
+        if detector_input not in ('raw', 'jpeg'):
+            raise ValueError('parking_detector_input must be raw, jpeg or empty')
+        executable = 'parking_space_detector'
+        if detector_input == 'jpeg':
+            # The detector itself is unchanged; only its image input is (see parking_space_detector_jpeg.py).
+            executable = 'parking_space_detector_jpeg'
+            jpeg_topic = ctx.compressed_topics[0] if ctx.compressed_topics else '/measurement/front/image_raw/compressed'
+            arguments = ['--jpeg-topic', jpeg_topic] + arguments
         nice = ctx.args.arg('parking_detector_nice').strip()
         if nice and not (nice.isdigit() and 1 <= int(nice) <= 19):
             raise ValueError('parking_detector_nice must be 1..19 or empty')
-        out.append(ctx.make_node(package='parking_assist', executable='parking_space_detector',
+        out.append(ctx.make_node(package='parking_assist', executable=executable,
                                  name='parking_line_tracker', output='screen', arguments=arguments,
                                  **({'prefix': f'nice -n {nice}'} if nice else {})))
         if ctx.args.flag('launch_viewer'):

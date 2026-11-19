@@ -18,6 +18,12 @@ launch_arguments:
   # value 1..19 runs it below the mapping nodes so the occupancy sweep keeps its share of
   # the CPU. Empty = normal priority (the detector itself is unchanged either way).
   parking_detector_nice: ''
+  # Where the Python detector's front image comes from (parking_input python_detector):
+  #   empty / raw: the raw image topic, as before (replays: a republisher decodes the bag's JPEG).
+  #   jpeg: the detector decodes the front camera's JPEG topic itself (parking_space_detector_jpeg).
+  #     Needed on the vehicle (vehicle_live.launch.py, image_input compressed_gray), where no raw
+  #     image topic exists and the detector would otherwise receive nothing.
+  parking_detector_input: ''
   # Slot size the goal search expects (empty = package default 2.60 x 4.37 m, the CARLA
   # lots; a Korean standard bay is 2.5 x 5.0 m).
   parking_slot_width_m: ''

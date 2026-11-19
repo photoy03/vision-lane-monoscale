@@ -188,6 +188,8 @@ ros2 launch <sensor_record>/sensors.launch.py      # 드라이버 (기존 그대
 bash tools/run/vehicle_live.sh                     # 녹화(보통 우선순위) + 파이프라인(nice 10), Ctrl+C 한 번으로 종료
 ```
 
+주차 시나리오까지 한 번에(드라이버 + 파이프라인 + 주차 시나리오 + HUD + 상태 줄): `bash tools/run/parking_live.sh` (`docs/PARKING_SCENARIO_HANDOVER_KO.md` 11-10절).
+
 녹화는 `~/rosbags/<날짜_시간>/`(`OUT_ROOT` 또는 `--record-dir`로 변경)에 원시 센서 토픽, `/vehicle/status/velocity_status`(CAN 속도, 있으면), 오돔을 저장합니다. 파이프라인은 별도 프로세스라 CPU가 모자라거나 멈춰도 녹화는 계속됩니다. 옵션: `--no-record`, `--no-pipeline`, `--nice N`, `--viewer`, `-- 이름:=값`(launch 인수). 파이프라인만: `ros2 launch vision_mapping_bringup vehicle_live.launch.py` (JPEG 중계, `compressed_gray`, 1920×1080 캘리브레이션 `config/calibration/front_1920x1080.npz`).
 
 sensor_record로 녹화한 bag은 `bash tools/run/watch.sh <MMDD 또는 경로>`가 처음 한 번 `$VISION_RUNS/converted/`로 변환해서 재생합니다(`tools/run/rosbag_to_measurement.py`).

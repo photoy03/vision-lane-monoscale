@@ -9,7 +9,8 @@
 source "$(dirname "$0")/env.sh"
 rec=$1; start=${2:-0}; dur=${3:-0}; rate=${4:-1.0}
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-97}
-OPTS=${OPTS-"select_mode:=nearest select_max_distance_m:=15.0 select_switch_margin_m:=1.0 line_max_yaw_rate_dps:=8.0 max_plan_distance_m:=25.0 planner_step_m:=0.6 planner_xy_resolution_m:=0.4 planner_footprint_check:=true planner_native:=true planner_cost_table:=false planner_heuristic_weight:=1.2 planner_time_limit_sec:=0.025 display_predict_hz:=30.0 display_ego_smooth_sec:=0.15 display_align_rows:=true display_fill_slots:=2"}
+source "$WS/tools/run/parking_preset.bash"               # the evaluated options, shared with tools/run/parking_live.sh
+OPTS=${OPTS-$PARKING_PRESET}
 [ -f $WORK/detfast_$rec.npz ] || { echo "run first: run_fast.sh $rec"; exit 1; }
 pids=()
 setsid ros2 launch parking_scenario parking_scenario.launch.py use_sim_time:=true $OPTS ${FREE_ONLY:+display_free_only:=true} > $WORK/hud_${rec}_scenario.log 2>&1 & pids+=($!)
@@ -18,7 +19,7 @@ if [ -n "$REC_OUT" ]; then
 fi
 if [ -z "$NOHUD" ]; then
   [ -n "$SHOT" ] && export HERO_HUD_SCREENSHOT=$SHOT HERO_HUD_SCREENSHOT_DELAY_MS=$(( ${SHOT_AT:-20} * 1000 ))
-  setsid ros2 run hero_hud hud_node --ros-args --params-file $WS/install/hero_hud/share/hero_hud/config/hud.yaml -p display.mirror_horizontal:=${MIRROR:-false} -p parking.plan_view:=true -p parking.ahead_m:=${AHEAD:-12.0} -p parking.behind_m:=${BEHIND:-14.0} > $WORK/hud_${rec}_hud.log 2>&1 & pids+=($!)
+  setsid ros2 run hero_hud hud_node --ros-args --params-file $WS/install/hero_hud/share/hero_hud/config/hud.yaml -p display.mirror_horizontal:=${MIRROR:-false} -p parking.plan_view:=true -p parking.ahead_m:=${AHEAD:-$PARKING_HUD_AHEAD_M} -p parking.behind_m:=${BEHIND:-$PARKING_HUD_BEHIND_M} > $WORK/hud_${rec}_hud.log 2>&1 & pids+=($!)
 fi
 sleep 3
 python3 $EVAL/play_inputs.py $WORK/pose_$rec $WORK/detfast_$rec.npz $WORK/conv_$rec/bag --rate $rate --start $start --duration $dur

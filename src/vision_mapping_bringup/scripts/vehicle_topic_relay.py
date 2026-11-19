@@ -18,6 +18,12 @@ def main() -> None:
     rclpy.init()
     node = rclpy.create_node("vehicle_topic_relay")
     out_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
+    # 0 = stamps unchanged. A camera driver whose stamps are off by a constant (20261113_171835: 0.774 s
+    # too early; the frames themselves arrived on time) puts every camera measurement at the wrong pose.
+    # This many seconds are added to both cameras' stamps (tools/run/parking_status.py shows the stamp age).
+    shift_ns = int(round(float(node.declare_parameter("stamp_shift_sec", 0.0).value) * 1e9))
+    if shift_ns:
+        node.get_logger().warn(f"camera stamps moved by {shift_ns * 1e-9:+.3f} s (stamp_shift_sec)")
     for camera, default in (("front", "/cam1/image_raw/compressed"), ("rear", "/cam0/image_raw/compressed")):
         source = str(node.declare_parameter(f"{camera}_topic", default).value)
         if not source:
@@ -27,6 +33,9 @@ def main() -> None:
 
         def forward(message, image_pub=image_pub, info_pub=info_pub, frame=FRAMES[camera]):
             message.header.frame_id = frame
+            if shift_ns:
+                total = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec + shift_ns
+                message.header.stamp.sec, message.header.stamp.nanosec = divmod(total, 1_000_000_000)
             message.format = "jpeg"
             image_pub.publish(message)
             info = CameraInfo()

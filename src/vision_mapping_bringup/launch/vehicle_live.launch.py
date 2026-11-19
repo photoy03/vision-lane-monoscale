@@ -11,7 +11,7 @@ calibration, full field of view) and the mount angles measured on the vehicle
 
   ros2 launch vision_mapping_bringup vehicle_live.launch.py [front_topic:=/cam1/image_raw/compressed]
       [rear_topic:=/cam0/image_raw/compressed] [imu_topic:=/imu_data] [width:=1920 height:=1080 fps:=30]
-      [calibration:=<npz>] [launch_viewer:=false] [launch_parking_assist:=false]
+      [calibration:=<npz>] [launch_viewer:=false] [launch_parking_assist:=false] [camera_stamp_shift_sec:=0.0]
 
 tools/run/vehicle_live.sh runs this at a lower CPU priority next to a rosbag recorder.
 """
@@ -23,6 +23,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 PASSED = (
     ('imu_topic', '/imu_data'),
@@ -46,11 +47,15 @@ def generate_launch_description():
                 'rig_file': str(share / 'config/rig_vehicle_20261113.yaml'),
                 'rear_rig_file': str(share / 'config/rear_rig_vehicle_20261113.yaml')}
     declared = [DeclareLaunchArgument('front_topic', default_value='/cam1/image_raw/compressed'),
-                DeclareLaunchArgument('rear_topic', default_value='/cam0/image_raw/compressed')]
+                DeclareLaunchArgument('rear_topic', default_value='/cam0/image_raw/compressed'),
+                # 0 = unchanged; seconds added to both cameras' stamps by the relay (see vehicle_topic_relay.py)
+                DeclareLaunchArgument('camera_stamp_shift_sec', default_value='0.0')]
     declared += [DeclareLaunchArgument(name, default_value=defaults.get(name, value)) for name, value in PASSED]
     relay = Node(package='vision_mapping_bringup', executable='vehicle_topic_relay.py', name='vehicle_topic_relay',
                  output='screen', parameters=[{'front_topic': LaunchConfiguration('front_topic'),
-                                               'rear_topic': LaunchConfiguration('rear_topic')}])
+                                               'rear_topic': LaunchConfiguration('rear_topic'),
+                                               'stamp_shift_sec': ParameterValue(
+                                                   LaunchConfiguration('camera_stamp_shift_sec'), value_type=float)}])
     pipeline = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(share / 'launch/live.launch.py')),
         launch_arguments={
