@@ -9,7 +9,7 @@
 source "$(dirname "$0")/env.sh"
 rec=$1; start=${2:-0}; dur=${3:-0}; rate=${4:-1.0}
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-97}
-OPTS=${OPTS-"select_mode:=nearest select_max_distance_m:=15.0 select_switch_margin_m:=1.0 line_max_yaw_rate_dps:=8.0 max_plan_distance_m:=25.0 planner_step_m:=0.6 planner_xy_resolution_m:=0.4 planner_footprint_check:=true display_predict_hz:=30.0 display_ego_smooth_sec:=0.15 display_align_rows:=true display_fill_slots:=2"}
+OPTS=${OPTS-"select_mode:=nearest select_max_distance_m:=15.0 select_switch_margin_m:=1.0 line_max_yaw_rate_dps:=8.0 max_plan_distance_m:=25.0 planner_step_m:=0.6 planner_xy_resolution_m:=0.4 planner_footprint_check:=true planner_native:=true planner_cost_table:=false planner_heuristic_weight:=1.2 planner_time_limit_sec:=0.025 display_predict_hz:=30.0 display_ego_smooth_sec:=0.15 display_align_rows:=true display_fill_slots:=2"}
 [ -f $WORK/detfast_$rec.npz ] || { echo "run first: run_fast.sh $rec"; exit 1; }
 pids=()
 setsid ros2 launch parking_scenario parking_scenario.launch.py use_sim_time:=true $OPTS ${FREE_ONLY:+display_free_only:=true} > $WORK/hud_${rec}_scenario.log 2>&1 & pids+=($!)

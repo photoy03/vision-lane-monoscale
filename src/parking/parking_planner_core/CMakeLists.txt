@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.8)
+project(parking_planner_core LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+find_package(ament_cmake REQUIRED)
+add_library(parking_planner_core SHARED src/planner_core.cpp)
+# no -ffast-math: the search must order its nodes exactly as the Python reference does
+target_compile_options(parking_planner_core PRIVATE -O3 -Wall -Wextra -Wno-misleading-indentation)
+install(TARGETS parking_planner_core LIBRARY DESTINATION lib)
+ament_package()

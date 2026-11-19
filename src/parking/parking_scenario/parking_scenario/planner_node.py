@@ -78,8 +78,14 @@ class PlannerNode(Node):
         params = PlannerParams(time_limit_s=float(d("time_limit_sec", 1.0).value),
                                step_m=float(d("step_m", defaults.step_m).value),
                                xy_resolution=float(d("xy_resolution_m", defaults.xy_resolution).value),
-                               footprint_check=bool(d("footprint_check", False).value))
+                               footprint_check=bool(d("footprint_check", False).value),
+                               native=bool(d("native", False).value),
+                               cost_table=bool(d("cost_table", True).value),
+                               heuristic_weight=float(d("heuristic_weight", defaults.heuristic_weight).value))
         self.planner = HybridAStar(self.vehicle, params)
+        if self.planner.native_missing:
+            self.get_logger().warn("native:=true but libparking_planner_core.so was not found "
+                                   "(build the package parking_planner_core); using the Python search")
         self.margin = params.window_margin_m
         self.course_out = float(d("course_out_m", 1.0).value)
         self.cooldown = float(d("replan_cooldown_sec", 1.0).value)

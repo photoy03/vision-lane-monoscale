@@ -41,7 +41,7 @@ events = [(t + LINE_DT, tp, m) if tp in ('/parking/lines', 'npz_lines') else (t,
 events.sort(key=lambda e: e[0])
 P.release_distance_m = float(os.environ.get('RELEASE', 0.0)); P.select_mode = os.environ.get('SELECT', 'sticky'); P.select_max_distance_m = float(os.environ.get('SELMAX', 25.0)); P.select_switch_margin_m = float(os.environ.get('SWITCH', 3.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
 from parking_scenario.hybrid_astar import PlannerParams
-sc = Scenario(P); planner = HybridAStar(P.vehicle, PlannerParams(step_m=float(os.environ.get('PSTEP', 0.35)), xy_resolution=float(os.environ.get('PRES', 0.25)), footprint_check=bool(os.environ.get('PFOOT')))); DUMP = []
+sc = Scenario(P); planner = HybridAStar(P.vehicle, PlannerParams(step_m=float(os.environ.get('PSTEP', 0.35)), xy_resolution=float(os.environ.get('PRES', 0.25)), footprint_check=bool(os.environ.get('PFOOT')), native=bool(os.environ.get('PNATIVE')), cost_table=os.environ.get('PTABLE', '1') != '0', heuristic_weight=float(os.environ.get('PHW', 1.5)))); DUMP = []
 if os.environ.get('PLAN_DET'):                      # harness only: search limited by expansions, not wall clock
     [v for v in vars(planner).values() if hasattr(v, 'time_limit_s')][0].time_limit_s = 1e9
 from parking_scenario.line_memory import LineGate

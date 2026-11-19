@@ -12,6 +12,7 @@ Cost map rules fixed by the third-party review (2026-11-19):
 """
 from __future__ import annotations
 
+import ctypes
 import heapq
 import math
 import time
@@ -42,6 +43,44 @@ class PlannerParams:
     # occupied cell by up to about half a cell. With this on, a found path whose exact body box touches
     # a lethal cell is reported as failed ("footprint") instead of being shown.
     footprint_check: bool = False
+    # Off by default. The search loop runs in the compiled library of the package
+    # parking_planner_core (same algorithm, same path; about 50 times faster). Without the library
+    # the Python loop is used and HybridAStar.native_missing is set.
+    native: bool = False
+    # True (default) = as before. The obstacle-free cost table is in fact almost empty: it is built
+    # with float32 costs compared against float64 ones, the build stops after ~130 of 147 000 poses
+    # and the rest holds one constant (18.9). Within about 19 m of the goal that constant is larger
+    # than the 2D distance, so the search has no direction and expands everything by cost alone.
+    # False: the table is not used; the obstacle-aware 2D distance guides the search (far fewer
+    # expansions, slightly different paths).
+    cost_table: bool = True
+
+
+class _NativeInput(ctypes.Structure):
+    """struct Input of parking_planner_core/src/planner_core.cpp (same order)."""
+    _fields_ = [("distance", ctypes.c_void_p), ("unknown", ctypes.c_void_p), ("rows", ctypes.c_int), ("cols", ctypes.c_int),
+                ("ox", ctypes.c_double), ("oy", ctypes.c_double), ("res", ctypes.c_double),
+                ("circles", ctypes.c_void_p), ("n_circles", ctypes.c_int),
+                ("hfield", ctypes.c_void_p), ("hrows", ctypes.c_int), ("hcols", ctypes.c_int), ("hk", ctypes.c_int),
+                ("table", ctypes.c_void_p), ("tn", ctypes.c_int), ("tbins", ctypes.c_int),
+                ("textent", ctypes.c_double), ("tcell", ctypes.c_double),
+                ("prim", ctypes.c_void_p), ("n_prim", ctypes.c_int),
+                ("start", ctypes.c_double * 3), ("goal", ctypes.c_double * 3),
+                ("xy_resolution", ctypes.c_double), ("heading_bins", ctypes.c_int), ("step_m", ctypes.c_double),
+                ("reverse_cost", ctypes.c_double), ("switch_cost", ctypes.c_double), ("steer_cost", ctypes.c_double),
+                ("unknown_cost", ctypes.c_double), ("capture_heading_rad", ctypes.c_double),
+                ("capture_length_m", ctypes.c_double), ("time_limit_s", ctypes.c_double),
+                ("heuristic_weight", ctypes.c_double), ("max_expansions", ctypes.c_int), ("kappa_max", ctypes.c_double)]
+
+
+def _load_native():
+    try:
+        lib = ctypes.CDLL("libparking_planner_core.so")
+        lib.parking_plan.restype = ctypes.c_int
+        lib.parking_hfield.restype = None
+        return lib
+    except OSError:
+        return None
 
 
 @dataclass
@@ -167,6 +206,10 @@ class HybridAStar:
                          for x in (rear + inset, front - inset) for y in (-half_w + inset, half_w - inset)]
         self.steers = [f * vehicle.max_steer_rad for f in self.p.steer_fractions]
         self.table = kinematic_table(vehicle, self.p)
+        if not self.p.cost_table:
+            self.table = (np.zeros_like(self.table[0]),) + self.table[1:]
+        self.lib = _load_native() if self.p.native else None
+        self.native_missing = self.p.native and self.lib is None
 
     # ------------------------------------------------------------ checks
     def collides(self, cm: CostMap, x, y, yaw) -> bool:
@@ -192,6 +235,17 @@ class HybridAStar:
     def _heuristic_field(self, cm: CostMap, goal):
         """Obstacle-aware 2D distance to the goal on a coarse grid (holonomic)."""
         k = max(1, int(round(0.5 / cm.res)))
+        if self.lib is not None:
+            hrows, hcols = len(range(0, cm.shape[0], k)), len(range(0, cm.shape[1], k))
+            gr, gc = cm.index(goal[0], goal[1])
+            gr, gc = min(max(gr // k, 0), hrows - 1), min(max(gc // k, 0), hcols - 1)
+            distance = np.ascontiguousarray(cm.distance, dtype=np.float32)
+            h = np.empty((hrows, hcols), dtype=np.float64)
+            self.lib.parking_hfield(ctypes.c_void_p(distance.ctypes.data), ctypes.c_int(cm.shape[1]), ctypes.c_int(k),
+                                    ctypes.c_double(0.5 * self.vehicle.width), ctypes.c_double(cm.res),
+                                    ctypes.c_int(gr), ctypes.c_int(gc), ctypes.c_void_p(h.ctypes.data),
+                                    ctypes.c_int(hrows), ctypes.c_int(hcols))
+            return h, k
         free = cm.distance[::k, ::k] >= 0.5 * self.vehicle.width
         h = np.full(free.shape, np.inf)
         gr, gc = cm.index(goal[0], goal[1])
@@ -318,6 +372,13 @@ class HybridAStar:
         circ_r = np.array([c[2] for c in self.circles])
         inv_res = 1.0 / cm.res
 
+        if self.lib is not None:
+            found = self._native_search(cm, start, goal, hfield, k, prim_x, prim_y, prim_yaw, prim_reverse,
+                                        prim_steer, kappa_max, result)
+            result.elapsed_s = time.monotonic() - began
+            if found is None:
+                return result
+            return self._finish(cm, result, *found)
         start_key = key(*start)
         nodes = {start_key: (0.0, start, None, None)}      # cost, pose, parent key, reverse
         heap = [(heuristic(*start), 0.0, start_key)]
@@ -379,6 +440,40 @@ class HybridAStar:
             node_key = parent
         chain.reverse()
         # the start pose takes the direction of the first move
+        first = chain[1][3] if len(chain) > 1 else (final_run[0][3] if final_run else False)
+        return self._finish(cm, result, chain, final_run)
+
+    def _native_search(self, cm, start, goal, hfield, k, prim_x, prim_y, prim_yaw, prim_reverse, prim_steer,
+                       kappa_max, result):
+        """The search loop in parking_planner_core. -> (chain, final_run) or None (result.reason set)."""
+        p = self.p
+        table, extent, cell, bins = self.table
+        keep = [np.ascontiguousarray(cm.distance, dtype=np.float32), np.ascontiguousarray(cm.unknown, dtype=np.uint8),
+                np.ascontiguousarray(self.circles, dtype=np.float64), np.ascontiguousarray(hfield, dtype=np.float64),
+                np.ascontiguousarray(table, dtype=np.float32),
+                np.ascontiguousarray(np.column_stack([prim_x, prim_y, prim_yaw, np.array(prim_reverse, dtype=float),
+                                                      np.array(prim_steer, dtype=float)]), dtype=np.float64)]
+        ptr = [a.ctypes.data for a in keep]
+        arg = _NativeInput(ptr[0], ptr[1], cm.shape[0], cm.shape[1], cm.origin[0], cm.origin[1], cm.res,
+                           ptr[2], len(self.circles), ptr[3], hfield.shape[0], hfield.shape[1], k,
+                           ptr[4], table.shape[0], bins, extent, cell, ptr[5], len(prim_reverse),
+                           (ctypes.c_double * 3)(*start), (ctypes.c_double * 3)(*goal),
+                           p.xy_resolution, p.heading_bins, p.step_m, p.reverse_cost, p.switch_cost, p.steer_cost,
+                           p.unknown_cost, math.radians(p.capture_heading_deg), p.capture_length_m, p.time_limit_s,
+                           p.heuristic_weight, p.max_expansions, kappa_max)
+        out = np.zeros((4096, 4), dtype=np.float64)
+        n_chain, n_run, expansions = ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0)
+        code = self.lib.parking_plan(ctypes.byref(arg), ctypes.c_void_p(out.ctypes.data), len(out), ctypes.byref(n_chain),
+                                     ctypes.byref(n_run), ctypes.byref(expansions))
+        result.expansions = expansions.value
+        if code != 0:
+            result.reason = "search limit" if code == 1 else "no path"
+            return None
+        rows = [(float(x), float(y), float(yaw), None if r < 0 else bool(r)) for x, y, yaw, r in out[:n_chain.value + n_run.value]]
+        return rows[:n_chain.value], rows[n_chain.value:]
+
+    def _finish(self, cm, result, chain, final_run):
+        p = self.p
         first = chain[1][3] if len(chain) > 1 else (final_run[0][3] if final_run else False)
         chain[0] = (chain[0][0], chain[0][1], chain[0][2], first)
         poses = chain + final_run
