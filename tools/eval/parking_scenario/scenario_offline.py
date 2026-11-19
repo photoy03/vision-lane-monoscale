@@ -42,8 +42,8 @@ events.sort(key=lambda e: e[0])
 LIVE = bool(os.environ.get('LIVE_ORDER')) and bool(NPZ)     # harness only: the events in the order they reach scenario_node (detector_live_sim.py)
 ARRIVE = lambda e: e[0]
 if LIVE:                                                  # poses and lines by their arrival time, LiDAR scans by their stamp (they arrive at once)
-    Z_ = np.load(NPZ); PUB_ = {float(a): float(b) for a, b in Z_['published']}; PA_ = {round(float(a), 6): float(b) for a, b in Z_['pose_arrival']}
-    ARRIVE = lambda e: PUB_.get(e[0], e[0]) if e[1] == 'npz_lines' else (PA_.get(round(e[0], 6), e[0] + 0.04) if e[1] == '/localization/kinematic_state' else e[0])
+    Z_ = np.load(NPZ); PUB_ = {float(a): float(b) for a, b in Z_['published']}; PUB_.update({round(k, 6): v for k, v in list(PUB_.items())}); PA_ = {round(float(a), 6): float(b) for a, b in Z_['pose_arrival']}
+    ARRIVE = lambda e: PUB_.get(e[0], PUB_.get(round(e[0] - LINE_DT, 6), e[0] - LINE_DT + 0.13)) if e[1] == 'npz_lines' else (PA_.get(round(e[0], 6), e[0] + 0.04) if e[1] == '/localization/kinematic_state' else e[0])
     events.sort(key=ARRIVE)
 P.release_distance_m = float(os.environ.get('RELEASE', 0.0)); P.select_mode = os.environ.get('SELECT', 'sticky'); P.select_max_distance_m = float(os.environ.get('SELMAX', 25.0)); P.select_switch_margin_m = float(os.environ.get('SWITCH', 3.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
 from parking_scenario.hybrid_astar import PlannerParams
@@ -52,6 +52,7 @@ if os.environ.get('PLAN_DET'):                      # harness only: search limit
     [v for v in vars(planner).values() if hasattr(v, 'time_limit_s')][0].time_limit_s = 1e9
 from parking_scenario.line_memory import LineGate
 gate = LineGate(float(os.environ.get('YAW', 0.0)))
+MINHITS = int(os.environ.get('MINHITS') or 0); XMAX = float(os.environ.get('XMAX') or 0.0)   # trials (handover 11-12): memory lines seen fewer times are not used; line observations farther ahead than XMAX m are dropped
 LYAW = math.radians(float(os.environ.get('LYAW', 0.0)))      # harness only (diagnosis): camera lines turned about the rig origin
 mem = LineMemory(float(os.environ.get('LINE_MEM', 2.0))); all_lines = []; timeline = []; next_step = None; last_seg = -1; lines_last = []; plan = None; plan_for = None; t0 = events[0][0]
 late_lines = 0
@@ -68,6 +69,7 @@ for t, topic, m in events:
             tq_ = min(t, sc.poses.t[-1]); x, y, yaw = (float(v) for v in sc.poses.at(tq_)); c, sn = math.cos(yaw + LYAW), math.sin(yaw + LYAW)
             if topic == 'npz_lines':
                 for r_ in m:
+                    if XMAX and 0.5 * (r_[1] + r_[3]) > XMAX: continue
                     if gate.enabled and not gate.accept(sc.poses, tq_): continue
                     a_ = (x + c * r_[1] - sn * r_[2], y + sn * r_[1] + c * r_[2]); b_ = (x + c * r_[3] - sn * r_[4], y + sn * r_[3] + c * r_[4])
                     mem.add(t, a_, b_); all_lines.append((a_[0], a_[1], b_[0], b_[1]))
@@ -78,14 +80,14 @@ for t, topic, m in events:
                     if gate.enabled and not gate.accept(sc.poses, tq_): continue
                     mem.add(t, a_, b_); all_lines.append((a_[0], a_[1], b_[0], b_[1]))
         if not LIVE and t - last_seg >= 0.4:
-            last_seg = t; lines_last = mem.lines(t); sc.on_segments(int(t * 1e9), lines_last)
+            last_seg = t; lines_last = [l_ for l_ in mem.lines(t) if l_[5] >= MINHITS]; sc.on_segments(int(t * 1e9), lines_last)
     if next_step is None or ta >= next_step:
         next_step = ta + 0.2
         if LIVE:                                          # scenario_node.step: its clock is the stamp of the newest pose
             if not sc.poses.t: continue
             t = sc.poses.t[-1]
             if t - last_seg >= 0.4:
-                last_seg = t; lines_last = mem.lines(t); sc.on_segments(int(t * 1e9), lines_last)
+                last_seg = t; lines_last = [l_ for l_ in mem.lines(t) if l_[5] >= MINHITS]; sc.on_segments(int(t * 1e9), lines_last)
         st = sc.step()
         if st['ego'] is None: continue
         rec = {'t': round(t - t0, 2), 'ego': [round(v, 3) for v in st['ego']], 'selected': st['selected'], 'goal': [round(v, 3) for v in st['goal']] if st['goal'] else None,
