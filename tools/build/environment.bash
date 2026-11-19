@@ -7,6 +7,10 @@ vision_env_backend=${1:-cpu}
 unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH LD_LIBRARY_PATH PYTHONPATH OpenCV_DIR
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
 export PYTHONNOUSERSITE=1
+# Machine-specific settings (CUDA toolkit path, GPU architecture ...) live in tools/build/local.bash,
+# which is not committed. Without that file the defaults below (the laptop's) apply. See local.bash.example.
+vision_env_local="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/local.bash"
+[[ -f "$vision_env_local" ]] && source "$vision_env_local"
 case "$vision_env_backend" in
   cpu) ;;
   cuda)

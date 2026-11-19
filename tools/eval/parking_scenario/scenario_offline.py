@@ -39,8 +39,9 @@ events += list(read(conv, {'/velodyne_packets': VelodyneScan}))
 LINE_DT = float(os.environ.get('LINE_DT', 0.0))
 events = [(t + LINE_DT, tp, m) if tp in ('/parking/lines', 'npz_lines') else (t, tp, m) for t, tp, m in events]   # harness-only stamp shift
 events.sort(key=lambda e: e[0])
-P.release_distance_m = float(os.environ.get('RELEASE', 0.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
-sc = Scenario(P); planner = HybridAStar(P.vehicle)
+P.release_distance_m = float(os.environ.get('RELEASE', 0.0)); P.select_mode = os.environ.get('SELECT', 'sticky'); P.select_max_distance_m = float(os.environ.get('SELMAX', 25.0)); P.select_switch_margin_m = float(os.environ.get('SWITCH', 3.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
+from parking_scenario.hybrid_astar import PlannerParams
+sc = Scenario(P); planner = HybridAStar(P.vehicle, PlannerParams(step_m=float(os.environ.get('PSTEP', 0.35)), xy_resolution=float(os.environ.get('PRES', 0.25)), footprint_check=bool(os.environ.get('PFOOT')))); DUMP = []
 if os.environ.get('PLAN_DET'):                      # harness only: search limited by expansions, not wall clock
     [v for v in vars(planner).values() if hasattr(v, 'time_limit_s')][0].time_limit_s = 1e9
 from parking_scenario.line_memory import LineGate
@@ -76,13 +77,14 @@ for t, topic, m in events:
                'slots': {k: (v['confirmed'], v['state'], v['detail'].get('largest_cluster'), round(v['detail'].get('block_coverage', 0), 2)) for k, v in st['slots'].items()}}
         if st['selected'] is not None and st['grid'] is not None and (plan is None or plan_for != st['selected']):
             g, origin, res = st['grid']; goal = st['goal']
-            cm = CostMap(g, origin, res, [st['ego'][:2], goal[:2]], 9.0)
+            cm = CostMap(g, origin, res, [st['ego'][:2], goal[:2]], 9.0); BLK = []
             for k, v in st['slots'].items():
                 if k == st['selected']: cm.verify(v['corners'])
                 elif v['state'] != FREE:
                     e, yw, w, d = v['entrance'], v['yaw'], v['width'] - 0.4, v['depth'] - 0.4
                     c, s = math.cos(yw), math.sin(yw)
-                    cm.block([(e[0] + c * a - s * b, e[1] + s * a + c * b) for a, b in ((0.2, -w / 2), (0.2, w / 2), (0.2 + d, w / 2), (0.2 + d, -w / 2))])
+                    BLK.append([(e[0] + c * a - s * b, e[1] + s * a + c * b) for a, b in ((0.2, -w / 2), (0.2, w / 2), (0.2 + d, w / 2), (0.2 + d, -w / 2))]); cm.block(BLK[-1])
+            if os.environ.get('PLAN_DUMP'): DUMP.append((g.copy(), origin, res, st['ego'], goal, [v['corners'] for k, v in st['slots'].items() if k == st['selected']], BLK))
             cm.finish(); plan = planner.plan(cm, st['ego'], goal); plan_for = st['selected']
             rec['plan'] = {'ok': plan.ok, 'reason': plan.reason, 'len': round(plan.length_m, 1), 'gear': plan.gear_changes, 'unverified': round(plan.unverified_m, 1), 't': round(plan.elapsed_s, 2),
                            'boxhit': any(planner.footprint_hits(cm, x, y, yw) for x, y, yw, _ in plan.poses)}
@@ -106,6 +108,7 @@ for k, v in ():
     if v['confirmed']: cv2.polylines(img, [np.array([px(*c) for c in v['corners']], np.int32)], True, (255, 0, 255), 2)
 cv2.imwrite(out + '/final.png', cv2.flip(img, 0)) if False else cv2.imwrite(out + '/final.png', img[::-1].copy())
 np.save(out + '/lines.npy', np.array(all_lines))
+if os.environ.get('PLAN_DUMP'): __import__('pickle').dump(DUMP, open(os.environ['PLAN_DUMP'], 'wb'))
 json.dump(timeline, open(out + '/timeline.json', 'w'))
 json.dump([{'id': k, 'confirmed': bool(v['confirmed']), 'state': int(v['state']), 'entrance': list(v['entrance']), 'yaw': v['yaw'], 'width': v['width'], 'depth': v['depth'], 'observations': v['observations']} for k, v in st['slots'].items()], open(out + '/slots.json', 'w'))
 

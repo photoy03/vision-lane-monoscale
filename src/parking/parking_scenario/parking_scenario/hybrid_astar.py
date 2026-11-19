@@ -38,6 +38,10 @@ class PlannerParams:
     time_limit_s: float = 1.0
     heuristic_weight: float = 1.5
     max_expansions: int = 60000
+    # Off by default. The search tests the body as circles on cell centres, so a path may graze an
+    # occupied cell by up to about half a cell. With this on, a found path whose exact body box touches
+    # a lethal cell is reported as failed ("footprint") instead of being shown.
+    footprint_check: bool = False
 
 
 @dataclass
@@ -378,6 +382,9 @@ class HybridAStar:
         first = chain[1][3] if len(chain) > 1 else (final_run[0][3] if final_run else False)
         chain[0] = (chain[0][0], chain[0][1], chain[0][2], first)
         poses = chain + final_run
+        if p.footprint_check and any(self.footprint_hits(cm, x, y, yaw) for x, y, yaw, _ in poses):
+            result.reason = "footprint"
+            return result
         result.poses = poses
         result.ok = True
         for a, b in zip(poses, poses[1:]):

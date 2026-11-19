@@ -37,3 +37,9 @@ docs/design/
 docs/reports/
 *_REPORT.md
 *_REPORT_*.md
+
+# 실차 녹화 (작업공간 안에 두지만 커밋하지 않음)
+/rosbag/
+
+# 컴퓨터별 빌드 설정 (tools/build/local.bash.example 참고)
+/tools/build/local.bash

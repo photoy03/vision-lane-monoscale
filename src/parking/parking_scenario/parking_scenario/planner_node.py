@@ -61,7 +61,14 @@ class PlannerNode(Node):
                                width=float(d("vehicle.width_m", 1.82).value),
                                wheelbase=float(d("vehicle.wheelbase_m", 2.70).value),
                                max_steer_rad=float(d("vehicle.max_steer_rad", 0.55).value))
-        params = PlannerParams(time_limit_s=float(d("time_limit_sec", 1.0).value))
+        defaults = PlannerParams()
+        # step_m / xy_resolution_m: search step and lattice cell (defaults 0.35 / 0.25). 0.6 / 0.4 was
+        # measured 3.8x faster on the 22 planning problems of the two 11/13 recordings, all solved,
+        # with shorter paths and fewer gear changes; it is not the default until a new recording agrees.
+        params = PlannerParams(time_limit_s=float(d("time_limit_sec", 1.0).value),
+                               step_m=float(d("step_m", defaults.step_m).value),
+                               xy_resolution=float(d("xy_resolution_m", defaults.xy_resolution).value),
+                               footprint_check=bool(d("footprint_check", False).value))
         self.planner = HybridAStar(self.vehicle, params)
         self.margin = params.window_margin_m
         self.course_out = float(d("course_out_m", 1.0).value)

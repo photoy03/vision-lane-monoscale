@@ -173,7 +173,16 @@ class GoalSelector:
     """Nearest CONFIRMED + FREE slot; keeps it until it stops being CONFIRMED + FREE."""
 
     def __init__(self, heading_weight: float = 1.0, max_distance: float = 25.0,
-                 release_distance: float = 0.0, release_hold_sec: float = 2.0) -> None:
+                 release_distance: float = 0.0, release_hold_sec: float = 2.0,
+                 mode: str = "sticky", switch_margin: float = 3.0, switch_hold_sec: float = 1.0) -> None:
+        # mode "sticky" (default): the first choice is kept while it is CONFIRMED + FREE.
+        # mode "nearest": the goal follows the vehicle: when another usable slot has been cheaper than
+        # the selected one by switch_margin (metres of cost) for switch_hold_sec, it takes over.
+        # The driver wants the slot that can be reached now, not the first one seen on the way.
+        if mode not in ("sticky", "nearest"):
+            raise ValueError("select mode must be sticky or nearest")
+        self.mode, self.switch_margin, self.switch_hold_sec = mode, switch_margin, switch_hold_sec
+        self.better_since: float | None = None
         self.heading_weight = heading_weight
         self.max_distance = max_distance
         # Optional (0 = off, third-party ruling 2026-11-19): a goal left farther behind than
@@ -205,20 +214,34 @@ class GoalSelector:
                 self.far_since = None
         if self.selected is None:
             self.far_since = None
-        if self.selected is None:
+        def cost_of(slot):
+            gx, gy, gyaw = slot["goal"]
+            distance = math.hypot(gx - ego[0], gy - ego[1])
+            turn = abs(math.atan2(math.sin(gyaw - ego[2]), math.cos(gyaw - ego[2])))
+            return distance, distance + self.heading_weight * turn
+
+        if self.selected is None or self.mode == "nearest":
             best, best_cost = None, float("inf")
             for slot_id, slot in slots.items():
                 if not usable(slot):
                     continue
-                gx, gy, gyaw = slot["goal"]
-                distance = math.hypot(gx - ego[0], gy - ego[1])
+                distance, cost = cost_of(slot)
                 if distance > self.max_distance:
                     continue
-                turn = abs(math.atan2(math.sin(gyaw - ego[2]), math.cos(gyaw - ego[2])))
-                cost = distance + self.heading_weight * turn
                 if cost < best_cost:
                     best, best_cost = slot_id, cost
-            if best is not None:
-                self.selected = best
-                self.switches += 1
+            if self.selected is None:
+                self.better_since = None
+                if best is not None:
+                    self.selected = best
+                    self.switches += 1
+            elif best is not None and best != self.selected and \
+                    best_cost + self.switch_margin < cost_of(slots[self.selected])[1]:
+                now = t if t is not None else 0.0
+                self.better_since = now if self.better_since is None else self.better_since
+                if now - self.better_since >= self.switch_hold_sec:
+                    self.selected, self.better_since = best, None
+                    self.switches += 1
+            else:
+                self.better_since = None
         return self.selected

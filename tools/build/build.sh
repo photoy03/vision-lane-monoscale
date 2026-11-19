@@ -20,7 +20,10 @@ case "$support_backend" in
       exit 1
     fi
     support_cmake_args+=("-DCMAKE_CUDA_COMPILER=$support_cuda_root/bin/nvcc"
-      -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/gcc-11 -DMONOSCALE_CUDA_ARCHITECTURES=86)
+      "-DCMAKE_CUDA_HOST_COMPILER=${VISION_CUDA_HOST_COMPILER:-/usr/bin/gcc-11}"
+      "-DMONOSCALE_CUDA_ARCHITECTURES=${VISION_CUDA_ARCHITECTURES:-86}"
+      "-DCUDAToolkit_ROOT=$support_cuda_root")
+    export LD_LIBRARY_PATH="$support_cuda_root/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     # The tracker's CUDA OpenCV (GPU optical flow, road_step_gpu). --cmake-clean-cache below
     # forgets it every build, so it is passed here: the environment variable if set (empty
     # to build against the system OpenCV), else the workspace's usual install if present.
@@ -36,6 +39,6 @@ case "$support_backend" in
   *) echo 'Usage: bash tools/build/build.sh [cuda|cpu]' >&2; exit 2 ;;
 esac
 cd "$support_root"
-export CMAKE_BUILD_PARALLEL_LEVEL=2
+export CMAKE_BUILD_PARALLEL_LEVEL=${VISION_BUILD_JOBS:-2}
 colcon build --base-paths src --symlink-install --cmake-clean-cache \
-  --parallel-workers 2 --cmake-args "${support_cmake_args[@]}"
+  --parallel-workers ${VISION_BUILD_WORKERS:-2} --cmake-args "${support_cmake_args[@]}"

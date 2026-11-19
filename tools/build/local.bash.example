@@ -1,0 +1,10 @@
+# Copy to tools/build/local.bash (not committed) and edit for this machine.
+# Without local.bash the build uses the laptop's defaults: /usr/local/cuda-11.8, architecture 86, gcc-11, 2 jobs.
+# Example: desktop with an RTX 5080 (needs CUDA 12.8 or newer, compute capability 12.0).
+export VISION_CUDA_ROOT=$HOME/opt/cuda-12.8
+export VISION_CUDA_ARCHITECTURES=120
+# export VISION_CUDA_HOST_COMPILER=/usr/bin/gcc-11
+export VISION_BUILD_JOBS=8        # compile jobs per package
+export VISION_BUILD_WORKERS=4     # packages built at once
+# CUDA OpenCV for the tracker's GPU optical flow; empty = system OpenCV (CPU optical flow).
+# export MONOSCALE_TRACKER_OPENCV_DIR=

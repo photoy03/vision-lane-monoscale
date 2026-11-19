@@ -14,6 +14,7 @@ Outputs  /perception/lidar_occupancy_grid       nav_msgs/OccupancyGrid, map (-1 
 from __future__ import annotations
 
 import math
+from array import array
 from dataclasses import replace
 
 import numpy as np
@@ -61,6 +62,9 @@ class ScenarioNode(Node):
         p.select_max_distance_m = float(d("select_max_distance_m", p.select_max_distance_m).value)
         p.release_distance_m = float(d("release_distance_m", 0.0).value)      # 0 = off
         p.release_hold_sec = float(d("release_hold_sec", 2.0).value)
+        p.select_mode = str(d("select_mode", "sticky").value)
+        p.select_switch_margin_m = float(d("select_switch_margin_m", p.select_switch_margin_m).value)
+        p.select_switch_hold_sec = float(d("select_switch_hold_sec", p.select_switch_hold_sec).value)
         self.core = Scenario(p)
         self.frame = str(d("map_frame", "map").value)
         self.use_lane_map = bool(d("use_lane_map_segments", False).value)
@@ -194,7 +198,7 @@ class ScenarioNode(Node):
         msg.info.height, msg.info.width = int(data.shape[0]), int(data.shape[1])
         msg.info.origin.position.x, msg.info.origin.position.y = float(origin[0]), float(origin[1])
         msg.info.origin.orientation.w = 1.0
-        msg.data = data.reshape(-1).tolist()
+        msg.data = array("b", data.tobytes())          # same values as .tolist(), without a Python list
         self.grid_pub.publish(msg)
 
 

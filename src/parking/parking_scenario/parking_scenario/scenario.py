@@ -42,6 +42,9 @@ class ScenarioParams:
     select_max_distance_m: float = 25.0
     release_distance_m: float = 0.0        # 0 = off; ruling value 35.0
     release_hold_sec: float = 2.0
+    select_mode: str = "sticky"            # "nearest": follow the nearest usable slot (see GoalSelector)
+    select_switch_margin_m: float = 3.0
+    select_switch_hold_sec: float = 1.0
 
 
 class Scenario:
@@ -54,7 +57,9 @@ class Scenario:
         self.occupancy = OccupancyState(self.p.free_confirmations)
         self.selector = GoalSelector(max_distance=self.p.select_max_distance_m,
                                      release_distance=self.p.release_distance_m,
-                                     release_hold_sec=self.p.release_hold_sec)
+                                     release_hold_sec=self.p.release_hold_sec, mode=self.p.select_mode,
+                                     switch_margin=self.p.select_switch_margin_m,
+                                     switch_hold_sec=self.p.select_switch_hold_sec)
         self.pending_scans: list = []
         self.details: dict[int, dict] = {}
         self.scan_stats: dict = {}
