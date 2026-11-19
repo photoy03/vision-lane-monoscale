@@ -1,0 +1,110 @@
+diff --git a/src/parking/parking_scenario/parking_scenario/scenario.py b/src/parking/parking_scenario/parking_scenario/scenario.py
+index 6bb4f95..63e86ef 100644
+--- a/src/parking/parking_scenario/parking_scenario/scenario.py
++++ b/src/parking/parking_scenario/parking_scenario/scenario.py
+@@ -23,7 +23,7 @@ from parking_scenario.lidar_occupancy import (GridParams, LidarMount, LidarOccup
+                                               decode_vlp16_packet)
+ from parking_scenario.slot_logic import (FREE, OCCUPIED, UNKNOWN, GoalSelector, OccupancyRule,
+                                          OccupancyState, Vehicle, body_clear, classify_slot,
+-                                         duplicates, goal_for_slot)
++                                         duplicates, goal_for_slot, off_grid)
+ 
+ 
+ @dataclass
+@@ -45,6 +45,7 @@ class ScenarioParams:
+     select_mode: str = "sticky"            # "nearest": follow the nearest usable slot (see GoalSelector)
+     select_switch_margin_m: float = 3.0
+     select_switch_hold_sec: float = 1.0
++    row_gate_m: float = 0.0                # 0 = off; a slot farther than this from its row's grid is not selected (off_grid)
+ 
+ 
+ class Scenario:
+@@ -144,7 +145,11 @@ class Scenario:
+         for slot_id in duplicates(slots):
+             del slots[slot_id]
+         self.occupancy.forget(slots)
+-        selected = self.selector.update(slots, ego, self.poses.t[-1]) if ego is not None else None
++        candidates = slots
++        if self.p.row_gate_m > 0.0:
++            outside = off_grid(slots, self.p.row_gate_m)
++            candidates = {k: v for k, v in slots.items() if k not in outside}
++        selected = self.selector.update(candidates, ego, self.poses.t[-1]) if ego is not None else None
+         return {"ego": ego, "slots": slots, "selected": selected,
+                 "goal": slots[selected]["goal"] if selected is not None else None, "grid": grid}
+ 
+diff --git a/src/parking/parking_scenario/parking_scenario/slot_logic.py b/src/parking/parking_scenario/parking_scenario/slot_logic.py
+index 390760b..9f3ecaa 100644
+--- a/src/parking/parking_scenario/parking_scenario/slot_logic.py
++++ b/src/parking/parking_scenario/parking_scenario/slot_logic.py
+@@ -117,6 +117,58 @@ def duplicates(slots: dict) -> set:
+     return hidden
+ 
+ 
++def off_grid(slots: dict, tolerance: float, min_row: int = 4) -> set:
++    """IDs of confirmed slots that do not sit on the regular grid of their row.
++
++    Slots of one row (similar direction, entrances on one line) are spaced by a whole number of slot
++    pitches. The pitch (2.2 .. 2.8 m) and the phase that put the most slots within `tolerance` are taken
++    as the row's grid when they hold at least min_row slots and 60 % of the row; the others are off the
++    grid (a rectangle built on a wrong line sits half a metre beside its place). Rows with fewer than
++    min_row slots are not judged."""
++    ids = [k for k, v in slots.items() if v["confirmed"]]
++    parent = {k: k for k in ids}
++
++    def find(k):
++        while parent[k] != k:
++            parent[k] = parent[parent[k]]
++            k = parent[k]
++        return k
++
++    centre = {k: (slots[k]["entrance"][0] + 0.5 * slots[k]["depth"] * math.cos(slots[k]["yaw"]),
++                  slots[k]["entrance"][1] + 0.5 * slots[k]["depth"] * math.sin(slots[k]["yaw"])) for k in ids}
++    for n, a in enumerate(ids):
++        ca, sa = math.cos(slots[a]["yaw"]), math.sin(slots[a]["yaw"])
++        for b in ids[n + 1:]:
++            turn = slots[b]["yaw"] - slots[a]["yaw"]
++            if abs(math.atan2(math.sin(turn), math.cos(turn))) > math.radians(10.0):
++                continue
++            dx, dy = centre[b][0] - centre[a][0], centre[b][1] - centre[a][1]
++            if abs(ca * dx + sa * dy) <= 1.0 and abs(-sa * dx + ca * dy) <= 8.0:
++                parent[find(a)] = find(b)
++    rows: dict = {}
++    for k in ids:
++        rows.setdefault(find(k), []).append(k)
++    out = set()
++    for members in rows.values():
++        if len(members) < min_row:
++            continue
++        yaws = sorted(slots[members[0]]["yaw"] + math.atan2(math.sin(slots[k]["yaw"] - slots[members[0]]["yaw"]),
++                                                             math.cos(slots[k]["yaw"] - slots[members[0]]["yaw"])) for k in members)
++        yaw = yaws[len(yaws) // 2]
++        v = np.array([-math.sin(yaw) * centre[k][0] + math.cos(yaw) * centre[k][1] for k in members])
++        best = None
++        for pitch in np.arange(2.20, 2.801, 0.01):
++            for phase in v:
++                r = (v - phase + 0.5 * pitch) % pitch - 0.5 * pitch
++                inside = np.abs(r) <= tolerance
++                score = (int(inside.sum()), -float(np.abs(r[inside]).sum()))
++                if best is None or score > best[0]:
++                    best = (score, inside)
++        if best[0][0] >= max(min_row, math.ceil(0.6 * len(members))):
++            out.update(k for k, ok in zip(members, best[1]) if not ok)
++    return out
++
++
+ class OccupancyState:
+     """Per-slot temporal rule: OCCUPIED after 1, FREE after n in a row, UNKNOWN at once."""
+ 
+diff --git a/tools/eval/parking_scenario/scenario_offline.py b/tools/eval/parking_scenario/scenario_offline.py
+index 3ab86da..b416781 100644
+--- a/tools/eval/parking_scenario/scenario_offline.py
++++ b/tools/eval/parking_scenario/scenario_offline.py
+@@ -45,7 +45,7 @@ if LIVE:                                                  # poses and lines by t
+     Z_ = np.load(NPZ); PUB_ = {float(a): float(b) for a, b in Z_['published']}; PA_ = {round(float(a), 6): float(b) for a, b in Z_['pose_arrival']}
+     ARRIVE = lambda e: PUB_.get(e[0], e[0]) if e[1] == 'npz_lines' else (PA_.get(round(e[0], 6), e[0] + 0.04) if e[1] == '/localization/kinematic_state' else e[0])
+     events.sort(key=ARRIVE)
+-P.release_distance_m = float(os.environ.get('RELEASE', 0.0)); P.select_mode = os.environ.get('SELECT', 'sticky'); P.select_max_distance_m = float(os.environ.get('SELMAX', 25.0)); P.select_switch_margin_m = float(os.environ.get('SWITCH', 3.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
++P.release_distance_m = float(os.environ.get('RELEASE', 0.0)); P.row_gate_m = float(os.environ.get('ROWGATE') or 0.0); P.select_mode = os.environ.get('SELECT', 'sticky'); P.select_max_distance_m = float(os.environ.get('SELMAX', 25.0)); P.select_switch_margin_m = float(os.environ.get('SWITCH', 3.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
+ from parking_scenario.hybrid_astar import PlannerParams
+ sc = Scenario(P); planner = HybridAStar(P.vehicle, PlannerParams(step_m=float(os.environ.get('PSTEP', 0.35)), xy_resolution=float(os.environ.get('PRES', 0.25)), footprint_check=bool(os.environ.get('PFOOT')), native=bool(os.environ.get('PNATIVE')), cost_table=os.environ.get('PTABLE', '1') != '0', heuristic_weight=float(os.environ.get('PHW', 1.5)))); DUMP = []
+ if os.environ.get('PLAN_DET'):                      # harness only: search limited by expansions, not wall clock
