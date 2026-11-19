@@ -1,0 +1,166 @@
+diff --git a/src/parking/parking_assist/parking_assist/parking_space_detector_jpeg.py b/src/parking/parking_assist/parking_assist/parking_space_detector_jpeg.py
+index 09da462..12dcad6 100644
+--- a/src/parking/parking_assist/parking_assist/parking_space_detector_jpeg.py
++++ b/src/parking/parking_assist/parking_assist/parking_space_detector_jpeg.py
+@@ -9,10 +9,24 @@ of transport at 30 Hz. Here the same detector runs with one change of input: the
+ it arrives and is decoded only when the detector asks for a frame, as it does with raw images
+ (newest frame only, older ones dropped).
+ 
+-  parking_space_detector_jpeg --jpeg-topic /measurement/front/image_raw/compressed <detector arguments>
++  parking_space_detector_jpeg --jpeg-topic /measurement/front/image_raw/compressed [--pose-sync] <detector arguments>
+ 
+ Without --jpeg-topic this is the unchanged detector.
++
++--pose-sync (off by default): the pose of a frame is interpolated at the frame's stamp.
++The detector takes the single pose whose stamp is nearest to the frame's among those received so far.
++On every frame it projects its map-frame tracks back into base_link with that pose and publishes them,
++so a pose that is dt too old moves every published line by speed x dt along the travel direction. The
++LiDAR pose comes at 9 Hz and sometimes pauses for 0.3 .. 0.6 s; in the live runs of 2026-11-20 the pose
++used was more than 0.1 s old in 5 % of the frames and up to 0.58 s old, which is 0.4 .. 0.9 m at
++driving speed: the size and direction of the wrongly placed slots. With --pose-sync a frame is handed to
++the detector only when a pose with a later stamp has arrived (the camera's frames arrive about 0.11 s
++after their stamp, the pose about 0.04 s after its own, so most frames do not wait and the others wait
++for one pose, about 0.04 s), and its pose is interpolated between the two neighbours. During a pause of
++the pose the frames wait and only the newest one is kept; after MAX_HOLD_SEC without a pose the frame is
++released without a pose: the detector then publishes nothing for it (as before the first pose arrives).
+ """
++import math
+ import sys
+ import time
+ 
+@@ -21,6 +35,9 @@ import numpy as np
+ 
+ import parking_assist.parking_space_detector as detector
+ 
++MAX_HOLD_SEC = 0.6
++EDGE_TOLERANCE_SEC = 0.02       # pose-sync: a frame this close to the newest (or oldest) pose takes that pose as it is
++
+ 
+ def main() -> int:
+     argv = sys.argv
+@@ -29,6 +46,9 @@ def main() -> int:
+     index = argv.index("--jpeg-topic")
+     topic = argv[index + 1]
+     del argv[index:index + 2]
++    pose_sync = "--pose-sync" in argv
++    if pose_sync:
++        argv.remove("--pose-sync")
+     from rclpy.qos import qos_profile_sensor_data
+     from sensor_msgs.msg import CompressedImage
+ 
+@@ -36,9 +56,15 @@ def main() -> int:
+         def __init__(self, args):
+             self._jpeg = None
+             self._decode_errors = 0
++            self._blocked_since = None                    # pose-sync: since when a frame has been waiting for its pose
++            self.held_frames = 0                          # frames released only after waiting
++            self.unsynced_frames = 0                      # frames released without a later pose (MAX_HOLD_SEC)
++            self.frames = 0
++            self._reported = time.perf_counter()
+             super().__init__(args)
+             self.node.create_subscription(CompressedImage, topic, self._jpeg_callback, qos_profile_sensor_data)
+-            self.node.get_logger().info(f"front camera JPEG from {topic}, decoded here (newest frame only)")
++            self.node.get_logger().info(f"front camera JPEG from {topic}, decoded here (newest frame only)"
++                                        + (", pose interpolated at the frame stamp (pose-sync)" if pose_sync else ""))
+ 
+         def _jpeg_callback(self, message) -> None:
+             arrival = time.perf_counter()
+@@ -49,7 +75,26 @@ def main() -> int:
+ 
+         def get_latest(self):
+             with self.lock:
+-                item, self._jpeg = self._jpeg, None
++                item = self._jpeg
++                if item is not None and pose_sync:
++                    now = time.perf_counter()
++                    covered = bool(self.poses) and self.poses[-1][0] >= item[3]
++                    if not covered:
++                        if self._blocked_since is None:
++                            self._blocked_since = now
++                        if now - self._blocked_since < MAX_HOLD_SEC:
++                            return None, None, None, None  # stays (or is replaced by a newer frame) until its pose is in
++                        self.unsynced_frames += 1
++                    elif self._blocked_since is not None:
++                        self.held_frames += 1
++                    self._blocked_since = None
++                    self.frames += 1
++                    if now - self._reported >= 30.0:
++                        self._reported = now
++                        self.node.get_logger().info(
++                            f"pose-sync: {self.frames} frames, {self.held_frames} waited for their pose, "
++                            f"{self.unsynced_frames} released without one")
++                self._jpeg = None
+             if item is None:
+                 return super().get_latest()               # a raw image, if somebody publishes one
+             data, arrival, period, stamp = item
+@@ -61,6 +106,24 @@ def main() -> int:
+                 return None, None, None, None
+             return frame, arrival, period, stamp
+ 
++        def pose_at(self, stamp: float):
++            if not pose_sync:
++                return super().pose_at(stamp)
++            with self.lock:
++                poses = self.poses
++                if not poses:
++                    return None
++                if stamp >= poses[-1][0] or stamp <= poses[0][0]:
++                    t, pose = poses[-1] if stamp >= poses[-1][0] else poses[0]
++                    if abs(t - stamp) > EDGE_TOLERANCE_SEC:
++                        return None                       # no pose for this frame: the detector publishes nothing for it
++                    return detector.RobotPose2D(pose.x, pose.y, pose.yaw)
++                high = next(i for i in range(len(poses) - 1, -1, -1) if poses[i][0] <= stamp) + 1
++                (t0, a), (t1, b) = poses[high - 1], poses[high]
++            f = (stamp - t0) / (t1 - t0) if t1 > t0 else 0.0
++            turn = math.atan2(math.sin(b.yaw - a.yaw), math.cos(b.yaw - a.yaw))
++            return detector.RobotPose2D(a.x + f * (b.x - a.x), a.y + f * (b.y - a.y), a.yaw + f * turn)
++
+     detector.RosFrameAndPoseSource = JpegSource
+     return detector.main()
+ 
+diff --git a/src/vision_mapping_bringup/config/parking.yaml b/src/vision_mapping_bringup/config/parking.yaml
+index 80d1d12..1cc6171 100644
+--- a/src/vision_mapping_bringup/config/parking.yaml
++++ b/src/vision_mapping_bringup/config/parking.yaml
+@@ -24,6 +24,10 @@ launch_arguments:
+   #     Needed on the vehicle (vehicle_live.launch.py, image_input compressed_gray), where no raw
+   #     image topic exists and the detector would otherwise receive nothing.
+   parking_detector_input: ''
++  # With parking_detector_input jpeg: true = the detector gets each frame with the pose interpolated at
++  # the frame's stamp instead of the nearest pose received so far (see parking_space_detector_jpeg.py).
++  # Empty / false: as before.
++  parking_detector_pose_sync: ''
+   # Slot size the goal search expects (empty = package default 2.60 x 4.37 m, the CARLA
+   # lots; a Korean standard bay is 2.5 x 5.0 m).
+   parking_slot_width_m: ''
+diff --git a/src/vision_mapping_bringup/vision_mapping_bringup/nodes/parking.py b/src/vision_mapping_bringup/vision_mapping_bringup/nodes/parking.py
+index b146067..e029751 100644
+--- a/src/vision_mapping_bringup/vision_mapping_bringup/nodes/parking.py
++++ b/src/vision_mapping_bringup/vision_mapping_bringup/nodes/parking.py
+@@ -65,6 +65,13 @@ def nodes(ctx):
+             executable = 'parking_space_detector_jpeg'
+             jpeg_topic = ctx.compressed_topics[0] if ctx.compressed_topics else '/measurement/front/image_raw/compressed'
+             arguments = ['--jpeg-topic', jpeg_topic] + arguments
++        pose_sync = ctx.args.arg('parking_detector_pose_sync').strip().lower()
++        if pose_sync not in ('', 'true', 'false'):
++            raise ValueError('parking_detector_pose_sync must be true, false or empty')
++        if pose_sync == 'true':
++            if detector_input != 'jpeg':
++                raise ValueError('parking_detector_pose_sync:=true needs parking_detector_input:=jpeg')
++            arguments = ['--pose-sync'] + arguments
+         nice = ctx.args.arg('parking_detector_nice').strip()
+         if nice and not (nice.isdigit() and 1 <= int(nice) <= 19):
+             raise ValueError('parking_detector_nice must be 1..19 or empty')
+diff --git a/tools/run/parking_live.sh b/tools/run/parking_live.sh
+index 793f947..af4d0cf 100755
+--- a/tools/run/parking_live.sh
++++ b/tools/run/parking_live.sh
+@@ -85,7 +85,7 @@ if (( ! record )); then live+=(--no-record); fi
+ if [[ -n "$record_dir" ]]; then live+=(--record-dir "$record_dir"); fi
+ # The pipeline arguments of the evaluated replays (tools/eval/parking_scenario/run_live.sh).
+ # parking_detector_input:=jpeg: on the vehicle the cameras deliver JPEG only; without it the detector gets no image.
+-live+=(-- launch_parking_assist:=true parking_detector_input:=jpeg map_extent_mode:=rolling
++live+=(-- launch_parking_assist:=true parking_detector_input:=jpeg ${PARKING_DETECTOR_POSE_SYNC:+parking_detector_pose_sync:=$PARKING_DETECTOR_POSE_SYNC} map_extent_mode:=rolling
+   occupancy_rolling_radius_m:=500 "${pipeline_args[@]}")
+ 
+ live_pid="" scenario_pid="" hud_pid="" outputs_pid="" status_pid="" stopped=0

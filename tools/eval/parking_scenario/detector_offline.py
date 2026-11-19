@@ -23,6 +23,7 @@ import parking_assist.parking_space_detector as D
 args = D.parse_args(); sys.argv = argv_keep
 import os
 DT = float(os.environ.get('DT', 0.0))              # harness-only camera stamp shift
+PARITY = int(os.environ.get('PARITY') or 0)           # harness only: 1 = the other half of the frames (how much the result depends on which frames are used)
 MPP = float(args.meters_per_pixel); CAMX = 0.08
 st = lambda s: s.sec + s.nanosec * 1e-9
 
@@ -46,7 +47,7 @@ H, W = valid.shape
 smoother = D.TemporalThresholdSmoother(args.threshold_lpf_alpha); tracker = D.TemporalVectorTracker(args); frame = 0; rows = []; vec = []; glare = []
 for m in read(conv + '/bag', {'/measurement/front/image_raw/compressed': CompressedImage}):
     t = st(m.header.stamp) + DT; frame += 1
-    if frame % 2 or t < P[0, 0] or t > P[-1, 0]:
+    if frame % 2 != PARITY or t < P[0, 0] or t > P[-1, 0]:
         continue
     x, y, yaw = (float(np.interp(t, P[:, 0], P[:, c])) for c in (1, 2, 3))
     img = cv2.imdecode(np.frombuffer(m.data, np.uint8), cv2.IMREAD_COLOR)

@@ -39,6 +39,12 @@ events += list(read(conv, {'/velodyne_packets': VelodyneScan}))
 LINE_DT = float(os.environ.get('LINE_DT', 0.0))
 events = [(t + LINE_DT, tp, m) if tp in ('/parking/lines', 'npz_lines') else (t, tp, m) for t, tp, m in events]   # harness-only stamp shift
 events.sort(key=lambda e: e[0])
+LIVE = bool(os.environ.get('LIVE_ORDER')) and bool(NPZ)     # harness only: the events in the order they reach scenario_node (detector_live_sim.py)
+ARRIVE = lambda e: e[0]
+if LIVE:                                                  # poses and lines by their arrival time, LiDAR scans by their stamp (they arrive at once)
+    Z_ = np.load(NPZ); PUB_ = {float(a): float(b) for a, b in Z_['published']}; PA_ = {round(float(a), 6): float(b) for a, b in Z_['pose_arrival']}
+    ARRIVE = lambda e: PUB_.get(e[0], e[0]) if e[1] == 'npz_lines' else (PA_.get(round(e[0], 6), e[0] + 0.04) if e[1] == '/localization/kinematic_state' else e[0])
+    events.sort(key=ARRIVE)
 P.release_distance_m = float(os.environ.get('RELEASE', 0.0)); P.select_mode = os.environ.get('SELECT', 'sticky'); P.select_max_distance_m = float(os.environ.get('SELMAX', 25.0)); P.select_switch_margin_m = float(os.environ.get('SWITCH', 3.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
 from parking_scenario.hybrid_astar import PlannerParams
 sc = Scenario(P); planner = HybridAStar(P.vehicle, PlannerParams(step_m=float(os.environ.get('PSTEP', 0.35)), xy_resolution=float(os.environ.get('PRES', 0.25)), footprint_check=bool(os.environ.get('PFOOT')), native=bool(os.environ.get('PNATIVE')), cost_table=os.environ.get('PTABLE', '1') != '0', heuristic_weight=float(os.environ.get('PHW', 1.5)))); DUMP = []
@@ -48,14 +54,17 @@ from parking_scenario.line_memory import LineGate
 gate = LineGate(float(os.environ.get('YAW', 0.0)))
 LYAW = math.radians(float(os.environ.get('LYAW', 0.0)))      # harness only (diagnosis): camera lines turned about the rig origin
 mem = LineMemory(float(os.environ.get('LINE_MEM', 2.0))); all_lines = []; timeline = []; next_step = None; last_seg = -1; lines_last = []; plan = None; plan_for = None; t0 = events[0][0]
+late_lines = 0
 for t, topic, m in events:
+    ta = ARRIVE((t, topic, m)) if LIVE else t
     if topic == '/localization/kinematic_state':
         q = m.pose.pose.orientation
         sc.on_pose(t, m.pose.pose.position.x, m.pose.pose.position.y, math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)))
     elif topic == '/velodyne_packets':
         sc.on_scan([(p.stamp.sec + p.stamp.nanosec * 1e-9, bytes(p.data)) for p in m.packets])
     else:
-        if sc.poses.t and sc.poses.t[0] <= t:
+        if LIVE and sc.poses.t and t > sc.poses.t[-1] + 0.2: late_lines += 1      # scenario_node.on_lines drops these
+        if (sc.poses.t and sc.poses.t[0] <= t) and (not LIVE or t <= sc.poses.t[-1] + 0.2):
             tq_ = min(t, sc.poses.t[-1]); x, y, yaw = (float(v) for v in sc.poses.at(tq_)); c, sn = math.cos(yaw + LYAW), math.sin(yaw + LYAW)
             if topic == 'npz_lines':
                 for r_ in m:
@@ -68,10 +77,15 @@ for t, topic, m in events:
                 for a_, b_ in zip(pts, pts[1:]):
                     if gate.enabled and not gate.accept(sc.poses, tq_): continue
                     mem.add(t, a_, b_); all_lines.append((a_[0], a_[1], b_[0], b_[1]))
-        if t - last_seg >= 0.4:
+        if not LIVE and t - last_seg >= 0.4:
             last_seg = t; lines_last = mem.lines(t); sc.on_segments(int(t * 1e9), lines_last)
-    if next_step is None or t >= next_step:
-        next_step = t + 0.2
+    if next_step is None or ta >= next_step:
+        next_step = ta + 0.2
+        if LIVE:                                          # scenario_node.step: its clock is the stamp of the newest pose
+            if not sc.poses.t: continue
+            t = sc.poses.t[-1]
+            if t - last_seg >= 0.4:
+                last_seg = t; lines_last = mem.lines(t); sc.on_segments(int(t * 1e9), lines_last)
         st = sc.step()
         if st['ego'] is None: continue
         rec = {'t': round(t - t0, 2), 'ego': [round(v, 3) for v in st['ego']], 'selected': st['selected'], 'goal': [round(v, 3) for v in st['goal']] if st['goal'] else None,
@@ -117,3 +131,4 @@ json.dump([{'id': k, 'confirmed': bool(v['confirmed']), 'state': int(v['state'])
 print('releases', sc.selector.releases, 'gate accepted', gate.accepted, 'dropped', gate.dropped_yaw_rate)
 print('slots', {k: (v['confirmed'], v['state'], v['observations'], round(v['width'], 2), round(v['depth'], 2), v['detail']) for k, v in st['slots'].items()})
 print('selection switches', sc.selector.switches, 'lines', len(lines_last))
+if LIVE: print('live order: line frames dropped for being more than 0.2 s ahead of the newest pose', late_lines)
