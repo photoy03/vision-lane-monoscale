@@ -1,0 +1,94 @@
+diff --git a/src/parking/parking_scenario/parking_scenario/scenario.py b/src/parking/parking_scenario/parking_scenario/scenario.py
+index 6bb4f95..f4e6669 100644
+--- a/src/parking/parking_scenario/parking_scenario/scenario.py
++++ b/src/parking/parking_scenario/parking_scenario/scenario.py
+@@ -23,7 +23,7 @@ from parking_scenario.lidar_occupancy import (GridParams, LidarMount, LidarOccup
+                                               decode_vlp16_packet)
+ from parking_scenario.slot_logic import (FREE, OCCUPIED, UNKNOWN, GoalSelector, OccupancyRule,
+                                          OccupancyState, Vehicle, body_clear, classify_slot,
+-                                         duplicates, goal_for_slot)
++                                         duplicates, gap_centre_shift, goal_for_slot)
+ 
+ 
+ @dataclass
+@@ -45,6 +45,9 @@ class ScenarioParams:
+     select_mode: str = "sticky"            # "nearest": follow the nearest usable slot (see GoalSelector)
+     select_switch_margin_m: float = 3.0
+     select_switch_hold_sec: float = 1.0
++    # Off by default (LiDAR used for the position, allowed by the user 2026-11-20): the goal of a slot
++    # between two parked cars is moved sideways to the middle of the free gap (slot_logic.gap_centre_shift).
++    gap_centre: bool = False
+ 
+ 
+ class Scenario:
+@@ -126,7 +129,14 @@ class Scenario:
+             else:
+                 observed, detail = classify_slot(grid[0], grid[1], grid[2], entrance, track.yaw,
+                                                  track.width, track.depth, self.p.rule)
+-            goal = goal_for_slot(entrance, track.yaw, track.depth, self.p.vehicle, self.p.reverse_parking)
++            goal_entrance = entrance
++            if self.p.gap_centre and observed == FREE:
++                shift = gap_centre_shift(grid[0], grid[1], grid[2], entrance, track.yaw, track.width,
++                                         track.depth, self.p.vehicle)
++                if shift:
++                    detail = dict(detail, gap_shift=round(shift, 2))
++                    goal_entrance = (entrance[0] - shift * math.sin(track.yaw), entrance[1] + shift * math.cos(track.yaw))
++            goal = goal_for_slot(goal_entrance, track.yaw, track.depth, self.p.vehicle, self.p.reverse_parking)
+             # An empty-looking slot the body does not fit into (rectangle slid onto a neighbour,
+             # pillar at the edge) is not FREE: the body at the goal must be clear of obstacles.
+             if observed == FREE and not body_clear(grid[0], grid[1], grid[2], goal, self.p.vehicle):
+diff --git a/src/parking/parking_scenario/parking_scenario/slot_logic.py b/src/parking/parking_scenario/parking_scenario/slot_logic.py
+index 390760b..9082f8d 100644
+--- a/src/parking/parking_scenario/parking_scenario/slot_logic.py
++++ b/src/parking/parking_scenario/parking_scenario/slot_logic.py
+@@ -98,6 +98,37 @@ def body_clear(grid, origin, res, pose, vehicle, margin=0.20, occupied_value=70)
+     return not bool((grid[rows[ok], cols[ok]] >= occupied_value).any())
+ 
+ 
++def gap_centre_shift(grid, origin, res, entrance, yaw, width, depth, vehicle, search: float = 1.5,
++                     max_shift: float = 1.0, min_cells: int = 4, occupied_value: int = 70):
++    """Sideways shift (m, + = left of the slot axis) that puts the slot axis in the middle of the free
++    gap between the LiDAR obstacles on both sides (parked cars), or 0.0.
++
++    A slot between two parked cars is often the only rectangle seen there and its painted lines are
++    half hidden, so the vision rectangle can sit most of a metre off; the cars themselves show where
++    the gap is. Used only when obstacles stand on BOTH sides within `search` of the slot's edges, the
++    gap is wide enough for the body plus 0.3 m a side, and the shift is at most max_shift."""
++    c, s = math.cos(yaw), math.sin(yaw)
++    reach = 0.5 * width + search
++    u = np.arange(0.8, max(0.9, depth - 0.5), res)                 # along the depth, away from the entrance line
++    v = np.arange(-reach, reach + 1e-6, res)
++    uu, vv = np.meshgrid(u, v)
++    cols = np.floor((entrance[0] + c * uu - s * vv - origin[0]) / res).astype(int)
++    rows = np.floor((entrance[1] + s * uu + c * vv - origin[1]) / res).astype(int)
++    ok = (rows >= 0) & (rows < grid.shape[0]) & (cols >= 0) & (cols < grid.shape[1])
++    hit = np.zeros(uu.shape, dtype=bool)
++    hit[ok] = grid[rows[ok], cols[ok]] >= occupied_value
++    per_v = hit.sum(axis=1)                                         # obstacle cells at each sideways offset
++    left = [float(x) for x, n in zip(v, per_v) if x > 0.0 and n >= min_cells]
++    right = [float(x) for x, n in zip(v, per_v) if x < 0.0 and n >= min_cells]
++    if not left or not right:
++        return 0.0
++    edge_left, edge_right = min(left), max(right)
++    if edge_left - edge_right < vehicle.width + 0.6:
++        return 0.0
++    shift = 0.5 * (edge_left + edge_right)
++    return shift if abs(shift) <= max_shift else 0.0
++
++
+ def duplicates(slots: dict) -> set:
+     """IDs of slots whose centre lies inside a slot with more observations (the same painted
+     slot tracked twice). The better-observed one is kept."""
+diff --git a/tools/eval/parking_scenario/scenario_offline.py b/tools/eval/parking_scenario/scenario_offline.py
+index f2e807f..2c20960 100644
+--- a/tools/eval/parking_scenario/scenario_offline.py
++++ b/tools/eval/parking_scenario/scenario_offline.py
+@@ -45,7 +45,7 @@ if LIVE:                                                  # poses and lines by t
+     Z_ = np.load(NPZ); PUB_ = {float(a): float(b) for a, b in Z_['published']}; PUB_.update({round(k, 6): v for k, v in list(PUB_.items())}); PA_ = {round(float(a), 6): float(b) for a, b in Z_['pose_arrival']}
+     ARRIVE = lambda e: PUB_.get(e[0], PUB_.get(round(e[0] - LINE_DT, 6), e[0] - LINE_DT + 0.13)) if e[1] == 'npz_lines' else (PA_.get(round(e[0], 6), e[0] + 0.04) if e[1] == '/localization/kinematic_state' else e[0])
+     events.sort(key=ARRIVE)
+-P.release_distance_m = float(os.environ.get('RELEASE', 0.0)); P.select_mode = os.environ.get('SELECT', 'sticky'); P.select_max_distance_m = float(os.environ.get('SELMAX', 25.0)); P.select_switch_margin_m = float(os.environ.get('SWITCH', 3.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
++P.release_distance_m = float(os.environ.get('RELEASE', 0.0)); P.gap_centre = bool(os.environ.get('GAPC')); P.grid = replace(P.grid, obstacle_min_height=float(os.environ.get('OBSMIN') or P.grid.obstacle_min_height)); P.select_mode = os.environ.get('SELECT', 'sticky'); P.select_max_distance_m = float(os.environ.get('SELMAX', 25.0)); P.select_switch_margin_m = float(os.environ.get('SWITCH', 3.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
+ from parking_scenario.hybrid_astar import PlannerParams
+ sc = Scenario(P); planner = HybridAStar(P.vehicle, PlannerParams(step_m=float(os.environ.get('PSTEP', 0.35)), xy_resolution=float(os.environ.get('PRES', 0.25)), footprint_check=bool(os.environ.get('PFOOT')), native=bool(os.environ.get('PNATIVE')), cost_table=os.environ.get('PTABLE', '1') != '0', heuristic_weight=float(os.environ.get('PHW', 1.5)))); DUMP = []
+ if os.environ.get('PLAN_DET'):                      # harness only: search limited by expansions, not wall clock
