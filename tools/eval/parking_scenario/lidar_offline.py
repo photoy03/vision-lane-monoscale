@@ -6,7 +6,7 @@ import numpy as np, rosbag2_py, cv2
 from rclpy.serialization import deserialize_message
 from nav_msgs.msg import Odometry
 from velodyne_msgs.msg import VelodyneScan
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_scenario')
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_scenario'))
 from parking_scenario.lidar_occupancy import *
 bag, out = sys.argv[1], sys.argv[2]
 mount = LidarMount(roll_deg=float(sys.argv[3]) if len(sys.argv) > 3 else 0.0, pitch_deg=float(sys.argv[4]) if len(sys.argv) > 4 else 0.0)

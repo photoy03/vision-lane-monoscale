@@ -10,8 +10,8 @@ POSE=clamp reproduces the harness (pose = last pose received before the line sta
 import json, math, os, sys
 from dataclasses import replace
 import numpy as np
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_scenario')
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_slot_mapping')
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_scenario'))
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_slot_mapping'))
 from parking_slot_mapping import geometry as G
 from parking_slot_mapping.registry import SlotRegistry
 from parking_scenario.line_memory import LineGate, LineMemory

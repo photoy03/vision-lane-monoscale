@@ -15,8 +15,8 @@ from rclpy.serialization import deserialize_message
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CompressedImage
 from velodyne_msgs.msg import VelodyneScan
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_scenario')
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_assist')
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_scenario'))
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_assist'))
 from parking_scenario.lidar_occupancy import LidarMount, LidarOccupancy, PoseTimeline, decode_vlp16_packet
 from parking_assist.parking_space_detector import make_fisheye_bev_map
 

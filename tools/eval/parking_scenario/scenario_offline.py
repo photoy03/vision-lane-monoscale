@@ -9,8 +9,8 @@ from velodyne_msgs.msg import VelodyneScan
 from vision_lane_interfaces.msg import MarkingSegmentArray
 from visualization_msgs.msg import MarkerArray
 from parking_scenario.line_memory import LineMemory
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_scenario')
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_slot_mapping')
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_scenario'))
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_slot_mapping'))
 from parking_scenario.scenario import *
 from parking_scenario.line_memory import LineMemory
 from parking_scenario.hybrid_astar import HybridAStar, CostMap

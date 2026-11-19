@@ -33,50 +33,101 @@
 기준점: 차량의 모든 중심은 뒷바퀴 축이다. 지도 쪽 `base_link`(리그)는 뒷바퀴 축에서 3.61 m 앞이고,
 시나리오가 뒷바퀴 축으로 환산한다(`rig_to_rear_axle_m`).
 
-## 2. 새 컴퓨터에서 시작하기
+## 2. 새 컴퓨터에서 시작하기 (위에서부터 그대로 복사해 실행)
 
-저장소만으로는 부족하다. 아래 세 가지를 직접 옮겨야 한다.
+전제: Ubuntu 22.04, ROS 2 Humble 설치됨. 작업공간은 `~/vision_support_ws`에 둔다(다른 곳이면 `WS` 환경변수).
 
-1. **저장소**: 이 브랜치는 push하지 않았다. 원격에 올리거나 `git bundle`로 옮긴다.
-2. **녹화**: `20261113_171835`(3개 파일, 197.7 s), `20261113_172234`(2개 파일, 133.4 s).
-   기존 위치는 노트북 `/home/jaehun/Desktop/ROSBAG/`. 저장소에 없다.
-3. **라이다 반사 지도**(`ref_*.npz`, 8 MB): 저장소에 넣지 않았다. `ref_map.py`로 다시 만들 수 있다.
-
-빌드와 시험은 `docs/RUN_KO.md`대로 한다.
+### 2-1. 저장소 받기
 
 ```bash
-bash tools/build/build.sh cuda
+git clone -b feat/lidar-parking-scenario https://github.com/photoy03/vision-lane-monoscale.git ~/vision_support_ws
+```
+
+### 2-2. 녹화 없이 바로 되는 확인 (빌드도 필요 없음, python3 + numpy만)
+
+```bash
+bash ~/vision_support_ws/tools/eval/parking_scenario/replay_lines.sh 172234
+```
+
+`confirmed 31, matched 27 / 74`가 나오면 칸 조립 코드와 기준 데이터가 제대로 온 것이다.
+회전 제외 옵션을 켠 값은 아래로 본다(`confirmed 29, matched 28`).
+
+```bash
+bash ~/vision_support_ws/tools/eval/parking_scenario/replay_lines.sh 172234 8
+```
+
+### 2-3. 빌드와 단위 시험
+
+의존성 설치와 빌드 환경은 `docs/RUN_KO.md`를 따른다. `velodyne_msgs`가 필요하다(`ros-humble-velodyne-msgs`).
+
+```bash
+cd ~/vision_support_ws && source /opt/ros/humble/setup.bash && rosdep install --from-paths src --ignore-src --rosdistro humble -r -y
 ```
 
 ```bash
-python3 -m pytest src/parking/parking_scenario/test src/parking/parking_slot_mapping/test -q
+cd ~/vision_support_ws && bash tools/build/build.sh cuda
 ```
 
-13개가 통과해야 한다.
+GPU가 없으면 `cuda` 대신 `cpu`.
 
-### 스크립트의 경로
+```bash
+cd ~/vision_support_ws && source install/setup.bash && python3 -m pytest src/parking/parking_scenario/test src/parking/parking_slot_mapping/test -q
+```
 
-`tools/eval/parking_scenario`의 스크립트는 노트북에서 쓰던 그대로라 절대 경로가 박혀 있다. 새 컴퓨터에서는
-아래 값을 먼저 고친다.
+`13 passed`가 나와야 한다.
 
-| 변수/경로 | 뜻 |
+### 2-4. 녹화 옮기기 (저장소에 없음)
+
+기존 노트북의 `/home/jaehun/Desktop/ROSBAG/` 아래 두 폴더를 새 컴퓨터의 `~/Desktop/ROSBAG/`로 복사한다.
+
+- `20261113_172234` (2개 파일, 133.4 s)
+- `20261113_171835` (3개 파일, 197.7 s)
+
+라이다 주행거리(`/lidar/odometry`)는 녹화 안에 들어 있어서 재생에는 KISS-ICP가 필요 없다.
+
+### 2-5. 전체 평가 한 번에
+
+변환 → 실시간 재생(0.5배속) → 결정적 검출 → 라이다 점유 포함 시나리오 → 기준 칸 비교까지 한 줄이다.
+녹화 하나에 약 20분, 디스크 약 4~6 GB를 쓴다. 출력 위치는 `WORK`(기본 `~/vision_lane_runs/parking_work`)다.
+
+```bash
+bash ~/vision_support_ws/tools/eval/parking_scenario/run_all.sh 172234
+```
+
+```bash
+bash ~/vision_support_ws/tools/eval/parking_scenario/run_all.sh 171835
+```
+
+기대값(옵션 끔): 172234는 `matched 27, precision 0.871`, 171835는 `matched 33, precision 0.805`, 둘 다 `wrong_free 0`.
+실시간 재생 단계가 실행마다 조금 달라서 일치 칸이 1~2개 다를 수 있다. 이 문서의 명령으로 172234를 다시 돌린 검증에서는 `matched 28, precision 0.875, wrong_free 0`이 나왔다.
+회전 제외 옵션을 켜려면 뒤에 값을 붙인다(변환·재생은 다시 하지 않는다).
+
+```bash
+bash ~/vision_support_ws/tools/eval/parking_scenario/run_all.sh 172234 8
+```
+
+경로가 다르면 앞에 환경변수를 붙인다. 디스크가 작으면 `WORK`를 외장 디스크로 준다.
+
+```bash
+WS=~/vision_support_ws BAGS=/data/ROSBAG WORK=/mnt/ssd/parking_work bash ~/vision_support_ws/tools/eval/parking_scenario/run_all.sh 172234
+```
+
+### 2-6. 스크립트 안내 (`tools/eval/parking_scenario`)
+
+| 파일 | 용도 |
 |---|---|
-| `/home/jaehun/vision_support_ws` | 작업공간 |
-| `R=/home/jaehun/vision_lane_runs/scenario_20261119` | 스크립트·결과 폴더 (지금은 `tools/eval/parking_scenario`) |
-| `S=/home/jaehun/Desktop/ROSBAG` | 원본 녹화 |
-| `T=/media/jaehun/477aad89-.../home/yh/_tmp_converted` | 변환 녹화(외장 SSD 임시 폴더) |
-| `O=/media/jaehun/477aad89-.../home/yh/_tmp_scenario7` | 시험 출력(외장 SSD 임시 폴더) |
-
-### 돌리는 순서
-
-1. 변환: `tools/run/rosbag_to_measurement.py 원본 출력 --front /cam1/image_raw/compressed --rear /cam0/image_raw/compressed --imu /imu_data`
-2. 실시간 재생 + 시나리오: `run_live.sh RUN_ID [런치 인자]` (환경변수 `CONV`, `MINFREE`, `run_live_ssd.sh`는 `OUTR`)
-3. 결정적 검출기: `detector_offline.py 변환폴더 재생폴더 OUT.npz` → `/parking/lines`와 같은 선
-4. 시나리오 오프라인: `LINES_NPZ=det.npz scenario_offline.py 재생폴더 변환폴더/bag 출력폴더` (환경변수 `YAW`, `RELEASE`, `LINE_MEM`, `PLAN_DET`)
-5. 평가: `eval_slots.py reference/ref_slots_*.json 출력폴더`
-6. 녹화 없이 조립만 재생: `assembly_diag.py replay_data/det_*.npz replay_data/pose_*.npy reference/ref_slots_*.json OUT.json`
-
-6번은 녹화가 없어도 돈다(빈 칸 판정만 빠진다).
+| `env.sh` | 공통 설정(`WS`, `BAGS`, `WORK`). 다른 스크립트가 불러 쓴다 |
+| `run_all.sh` | 2-5의 전체 평가 |
+| `run_live.sh 변환폴더 RUN_ID [런치 인자]` | 실시간 재생 1회. 예: `line_max_yaw_rate_dps:=8.0` |
+| `detector_offline.py 변환폴더 재생폴더 OUT.npz` | 결정적 검출(`/parking/lines`와 같은 선) |
+| `scenario_offline.py 재생폴더 변환폴더/bag 출력폴더` | 시나리오 오프라인. 환경변수 `LINES_NPZ`, `YAW`, `RELEASE`, `LINE_MEM`, `PLAN_DET` |
+| `eval_slots.py 기준.json 출력폴더` | 기준 칸과 비교 |
+| `replay_lines.sh`, `assembly_diag.py`, `asm_place.py` | 칸 조립 단계 추적(녹화 불필요) |
+| `detector_diag*.py`, `stage_slots.py` | 검출기 단계별 손실 추적 |
+| `ref_map.py`, `ref_rows.py`, `ref_crop.py` | 라이다 반사 지도와 기준 칸 만들기 |
+| `calib_lidar_x.py`, `band_fit.py`, `pitch_parallel.py` | 카메라·라이다 거리, 기울기 조사 |
+| `planner_replay.py` | 경로 계획 노드 결정적 재생 |
+| 그 밖의 `.sh`, `.py` | 초기 조사 기록용. 이 노트북 경로가 남아 있어 그대로는 안 돈다 |
 
 ## 3. 작업 규칙 (계속 지킬 것)
 
@@ -85,7 +136,7 @@ python3 -m pytest src/parking/parking_scenario/test src/parking/parking_slot_map
 - 모든 수정은 기본 꺼짐 옵션이다. 껐을 때 변경 전과 동일함을 확인한 뒤 커밋한다.
 - 실시간은 끔·켬 각 3회로 편차를 본다.
 - 라이다는 검증에만 쓴다. 거리에 배율을 곱하는 식으로 라이다에 값을 맞추는 것은 금지다.
-- 커밋은 로컬만, push는 하지 않는다. 범위는 11/13 낮 녹화다.
+- 커밋은 로컬에서 만들고, push는 사용자가 직접 한다(대신 push하지 않는다). 범위는 11/13 낮 녹화다.
 - 시험 데이터는 노트북이 아니라 외장 SSD에 쓰고, 시험이 끝나면 지운다(노트북 여유 약 6 GB).
 
 ## 4. 평가 방법

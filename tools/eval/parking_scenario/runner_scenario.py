@@ -18,7 +18,7 @@ import sys
 import time
 from typing import Any
 
-import sys as _s; _s.path.insert(0, "/home/jaehun/vision_support_ws/tools/run")
+import sys as _s; _s.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'tools/run'))
 from replay_preflight import check_dumps, requested_parameters
 import outputs_compress
 

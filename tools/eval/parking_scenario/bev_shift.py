@@ -8,7 +8,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CompressedImage
 from velodyne_msgs.msg import VelodyneScan
 from visualization_msgs.msg import MarkerArray
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_scenario'); sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_assist')
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_scenario')); sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_assist'))
 from parking_scenario.lidar_occupancy import *
 from parking_assist.parking_space_detector import make_fisheye_bev_map
 conv, run, out = sys.argv[1:4]; pitch = float(sys.argv[4]) if len(sys.argv) > 4 else 31.25; height = float(sys.argv[5]) if len(sys.argv) > 5 else 0.80

@@ -11,7 +11,7 @@ import numpy as np, rosbag2_py, cv2
 from rclpy.serialization import deserialize_message
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CompressedImage
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_assist')
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_assist'))
 conv, run, ref_path, out = sys.argv[1:5]; EXTRA = sys.argv[5:]
 argv_keep = sys.argv
 sys.argv = ['x', '--calib', conv + '/calibration.npz', '--width', '1920', '--height', '1080', '--camera-height-m', '0.8', '--camera-x-m', '0.08',

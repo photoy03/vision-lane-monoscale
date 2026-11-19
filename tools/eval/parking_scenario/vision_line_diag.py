@@ -9,7 +9,7 @@ from rclpy.serialization import deserialize_message
 from nav_msgs.msg import Odometry
 from velodyne_msgs.msg import VelodyneScan
 from visualization_msgs.msg import MarkerArray
-sys.path.insert(0, '/home/jaehun/vision_support_ws/src/parking/parking_scenario')
+sys.path.insert(0, __import__('os').path.join(__import__('os').environ.get('WS', __import__('os').path.expanduser('~/vision_support_ws')), 'src/parking/parking_scenario'))
 from parking_scenario.lidar_occupancy import *
 conv, run = sys.argv[1:3]
 def read(uri, topics):
