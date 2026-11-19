@@ -41,6 +41,8 @@ events = [(t + LINE_DT, tp, m) if tp in ('/parking/lines', 'npz_lines') else (t,
 events.sort(key=lambda e: e[0])
 P.release_distance_m = float(os.environ.get('RELEASE', 0.0));  LINE_DT = float(os.environ.get('LINE_DT', 0.0))
 sc = Scenario(P); planner = HybridAStar(P.vehicle)
+if os.environ.get('PLAN_DET'):                      # harness only: search limited by expansions, not wall clock
+    [v for v in vars(planner).values() if hasattr(v, 'time_limit_s')][0].time_limit_s = 1e9
 from parking_scenario.line_memory import LineGate
 gate = LineGate(float(os.environ.get('YAW', 0.0)))
 mem = LineMemory(float(os.environ.get('LINE_MEM', 2.0))); all_lines = []; timeline = []; next_step = None; last_seg = -1; lines_last = []; plan = None; plan_for = None; t0 = events[0][0]

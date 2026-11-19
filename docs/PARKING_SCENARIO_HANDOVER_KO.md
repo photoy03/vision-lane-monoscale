@@ -72,7 +72,7 @@ python3 -m pytest src/parking/parking_scenario/test src/parking/parking_slot_map
 1. 변환: `tools/run/rosbag_to_measurement.py 원본 출력 --front /cam1/image_raw/compressed --rear /cam0/image_raw/compressed --imu /imu_data`
 2. 실시간 재생 + 시나리오: `run_live.sh RUN_ID [런치 인자]` (환경변수 `CONV`, `MINFREE`, `run_live_ssd.sh`는 `OUTR`)
 3. 결정적 검출기: `detector_offline.py 변환폴더 재생폴더 OUT.npz` → `/parking/lines`와 같은 선
-4. 시나리오 오프라인: `LINES_NPZ=det.npz scenario_offline.py 재생폴더 변환폴더/bag 출력폴더` (환경변수 `YAW`, `RELEASE`, `LINE_MEM`)
+4. 시나리오 오프라인: `LINES_NPZ=det.npz scenario_offline.py 재생폴더 변환폴더/bag 출력폴더` (환경변수 `YAW`, `RELEASE`, `LINE_MEM`, `PLAN_DET`)
 5. 평가: `eval_slots.py reference/ref_slots_*.json 출력폴더`
 6. 녹화 없이 조립만 재생: `assembly_diag.py replay_data/det_*.npz replay_data/pose_*.npy reference/ref_slots_*.json OUT.json`
 
@@ -134,12 +134,18 @@ python3 -m pytest src/parking/parking_scenario/test src/parking/parking_slot_map
 | 중복·겹침 | 0 → 0 | 0 → 0 | 안 늘어남 | 통과 |
 | 빈 칸 오판 | 0 → 0 | 0 → 0 | 안 늘어남 | 통과 |
 
-- 꺼짐 동일성: 171835는 변경 전과 해시 동일. 172234는 칸 번호·위치·상태·선택이 동일하고 경로 탐색 2스텝만
-  다르다(탐색 제한 1초에 0.97초로 걸친 경우가 실행마다 달라지는 것, 옵션과 무관).
-- 같이 시험한 측면 거리 한계(4.0 m)는 일치 칸이 27→22, 33→29로 줄어 탈락, 코드에서 뺐다.
-- 실시간 끔·켬 각 3회(172234): **LIVE_RESULT_PENDING**
-- 두 녹화 모두 진단에 이미 써서 손대지 않은 검증 녹화가 없다. 통과해도 "실험용"이고, 새 녹화에서 같은
-  기준을 다시 넘어야 그 딱지를 뗀다.
+- 꺼짐 동일성: 두 녹화 모두 변경 전 코드와 해시 동일(171835 `8b71cb347a66876b`, 172234 `509f3abddc3f31f1`,
+  경로 탐색 경과 시간 필드만 제외). 172234는 처음에 경로 탐색 2스텝이 달랐는데, 탐색의 1초 제한이 실행마다
+  다르게 걸린 것이었다. 평가 도구에서 제한을 탐색 횟수 기준으로 바꿔(`PLAN_DET=1`) 다시 재생해 동일함을 확인했다.
+- 같이 시험한 측면 거리 한계(4.0 m)는 일치 칸이 27→22, 33→29로 줄어 탈락, 코드에서 뺐다. 다른 값으로 재시도 금지.
+- 실시간 끔·켬 각 3회(172234): 일치 칸 끔 17/19/22(중앙값 19), 켬 20/21/20(중앙값 20). 정밀도 끔
+  0.71/0.91/0.82, 켬 0.91/0.84/0.91. 빈 칸 오판은 6회 모두 0. 기준(켬 중앙값 ≥ 끔 중앙값 − 1) 통과.
+  실시간 평가는 재생 중 기록된 선을 같은 옵션값으로 오프라인 재처리한 것이다(노드가 낸 칸 지도를 직접
+  읽은 것은 아님). 노드 로그로 옵션이 실시간에 동작함은 확인했다(선 1428~1720개 제외).
+- **최종 판정: 기본 꺼짐·실험용으로 유지.** 두 녹화 모두 진단에 이미 써서 손대지 않은 검증 녹화가 없고,
+  회전 관련 근거는 대부분 171835에서 나왔다. 새 녹화에서 같은 기준을 넘어야 실험용 딱지를 뗀다.
+- 평가 도구 결함: 경로 탐색의 벽시계 제한 때문에 재생 결과가 실행마다 달라질 수 있다. 비교할 때는
+  `PLAN_DET=1`을 쓴다. 따로 고칠 항목이다.
 
 ## 7. 시도했다가 뺀 것 (다시 값만 바꿔 시도 금지)
 
