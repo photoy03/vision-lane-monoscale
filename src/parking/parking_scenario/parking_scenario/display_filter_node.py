@@ -43,7 +43,12 @@ class DisplayFilterNode(Node):
             time_constant_s=float(d("time_constant_sec", 0.6).value),
             max_offset_m=float(d("max_offset_m", 0.10).value),
             max_angle_deg=float(d("max_angle_deg", 1.5).value),
-            appear_updates=int(d("appear_updates", 3).value)))
+            appear_updates=int(d("appear_updates", 3).value),
+            align_rows=bool(d("align_rows", False).value),
+            align_max_offset_m=float(d("align_max_offset_m", 0.45).value),
+            align_fill_slots=int(d("align_fill_slots", 0).value),
+            free_only=bool(d("free_only", False).value),
+            free_state=int(ParkingSlot.OCCUPANCY_FREE), unknown_state=int(ParkingSlot.OCCUPANCY_UNKNOWN)))
         self.enabled = bool(d("filter_enabled", True).value)
         self.stale = float(d("stale_sec", 0.5).value)
         self.view_range = float(d("view_range_m", 30.0).value)
