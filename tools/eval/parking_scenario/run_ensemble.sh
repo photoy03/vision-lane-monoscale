@@ -7,6 +7,7 @@
 #             frame (30 / 20 / 10 frames a second), the scenario's inputs in the order they reach scenario_node
 # usage: [scenario options as for run_fast.sh] run_ensemble.sh 172234|171835 [TAG]
 #        e.g. YAW=8 SELECT=nearest SELMAX=15 SWITCH=1 PSTEP=0.6 PRES=0.4 PFOOT=1 PNATIVE=1 PTABLE=0 PHW=1.2 run_ensemble.sh 171835 preset
+#        SLOT_WIDTH=2.45 [SLOT_DEPTH=4.37]   nominal slot size of the slot assembly (default 2.60 x 4.37)
 # One line per version and the totals; outputs in $WORK/ens_REC_TAG_<version>. Needs run_fast.sh REC once.
 source "$(dirname "$0")/env.sh"
 rec=$1; tag=${2:-base}; C=$WORK/conv_$rec; R=$WORK/pose_$rec; raw=$BAGS/20261113_$rec
@@ -17,7 +18,7 @@ for ms in 16 50 100; do
   [ -f $WORK/livesim_nearest${ms}_$rec.npz ] || ( MODE=nearest PROC_MS=$ms python3 $EVAL/detector_live_sim.py $C $R $raw $WORK/livesim_nearest${ms}_$rec.npz > $WORK/livesim_nearest${ms}_$rec.log 2>&1 ) &
 done; wait
 run() {   # NAME NPZ [LIVE_ORDER]
-  ( LIVE_ORDER=$3 PLAN_DET=${PLAN_DET-1} LINES_NPZ=$2 python3 $EVAL/scenario_offline.py $R $C/bag $WORK/ens_${rec}_${tag}_$1 > $WORK/ens_${rec}_${tag}_$1.log 2>&1 ) &
+  ( LIVE_ORDER=$3 PLAN_DET=${PLAN_DET-1} LINES_NPZ=$2 python3 $EVAL/scenario_offline.py $R $C/bag $WORK/ens_${rec}_${tag}_$1 ${SLOT_WIDTH:+$SLOT_WIDTH ${SLOT_DEPTH:-4.37}} > $WORK/ens_${rec}_${tag}_$1.log 2>&1 ) &
 }
 run ideal-a $WORK/detfast_$rec.npz; run ideal-b $WORK/detfast_parity1_$rec.npz
 run live30 $WORK/livesim_nearest16_$rec.npz 1; run live20 $WORK/livesim_nearest50_$rec.npz 1; run live10 $WORK/livesim_nearest100_$rec.npz 1
