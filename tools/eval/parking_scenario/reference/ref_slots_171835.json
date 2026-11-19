@@ -1,0 +1,1607 @@
+[
+{
+"row": "N",
+"index": 0,
+"entrance": [
+5.025,
+27.919
+],
+"yaw": 1.5795,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 2.9,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 1,
+"entrance": [
+7.475,
+27.94
+],
+"yaw": 1.5795,
+"width": 2.55,
+"front_visible": 1.0,
+"path_distance": 2.63,
+"obstacle_cells": 2110,
+"occupied": true,
+"keep": true
+},
+{
+"row": "N",
+"index": 2,
+"entrance": [
+9.95,
+27.962
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.55,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 3,
+"entrance": [
+12.35,
+27.983
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.56,
+"obstacle_cells": 19,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 4,
+"entrance": [
+14.725,
+28.003
+],
+"yaw": 1.5795,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 2.61,
+"obstacle_cells": 23,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 5,
+"entrance": [
+17.125,
+28.024
+],
+"yaw": 1.5795,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.69,
+"obstacle_cells": 7,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 6,
+"entrance": [
+19.55,
+28.046
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.75,
+"obstacle_cells": 54,
+"occupied": true,
+"keep": true
+},
+{
+"row": "N",
+"index": 7,
+"entrance": [
+21.975,
+28.067
+],
+"yaw": 1.5795,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.78,
+"obstacle_cells": 1792,
+"occupied": true,
+"keep": true
+},
+{
+"row": "N",
+"index": 8,
+"entrance": [
+24.4,
+28.088
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.76,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 9,
+"entrance": [
+26.8,
+28.109
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.72,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 10,
+"entrance": [
+29.249,
+28.13
+],
+"yaw": 1.5795,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.69,
+"obstacle_cells": 1221,
+"occupied": true,
+"keep": true
+},
+{
+"row": "N",
+"index": 12,
+"entrance": [
+39.724,
+28.222
+],
+"yaw": 1.5795,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.45,
+"obstacle_cells": 383,
+"occupied": true,
+"keep": false
+},
+{
+"row": "N",
+"index": 13,
+"entrance": [
+42.124,
+28.243
+],
+"yaw": 1.5795,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 2.42,
+"obstacle_cells": 54,
+"occupied": true,
+"keep": true
+},
+{
+"row": "N",
+"index": 14,
+"entrance": [
+44.499,
+28.263
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.44,
+"obstacle_cells": 4,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 15,
+"entrance": [
+46.924,
+28.284
+],
+"yaw": 1.5795,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.48,
+"obstacle_cells": 2215,
+"occupied": true,
+"keep": true
+},
+{
+"row": "N",
+"index": 16,
+"entrance": [
+49.349,
+28.306
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.48,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 17,
+"entrance": [
+51.749,
+28.327
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.46,
+"obstacle_cells": 1,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 18,
+"entrance": [
+54.123,
+28.347
+],
+"yaw": 1.5795,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 2.41,
+"obstacle_cells": 17,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 19,
+"entrance": [
+56.498,
+28.368
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.37,
+"obstacle_cells": 36,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 20,
+"entrance": [
+58.898,
+28.389
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.32,
+"obstacle_cells": 19,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 21,
+"entrance": [
+61.323,
+28.41
+],
+"yaw": 1.5795,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.18,
+"obstacle_cells": 1954,
+"occupied": true,
+"keep": true
+},
+{
+"row": "N",
+"index": 22,
+"entrance": [
+63.723,
+28.431
+],
+"yaw": 1.5795,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 2.04,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "N",
+"index": 23,
+"entrance": [
+66.098,
+28.452
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.6,
+"obstacle_cells": 1868,
+"occupied": true,
+"keep": true
+},
+{
+"row": "N",
+"index": 24,
+"entrance": [
+68.498,
+28.473
+],
+"yaw": 1.5795,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 3.33,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 0,
+"entrance": [
+0.001,
+-22.425
+],
+"yaw": -3.1329,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 3.16,
+"obstacle_cells": 8,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 1,
+"entrance": [
+-0.02,
+-19.975
+],
+"yaw": -3.1329,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 3.1,
+"obstacle_cells": 1832,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 2,
+"entrance": [
+-0.042,
+-17.475
+],
+"yaw": -3.1329,
+"width": 2.55,
+"front_visible": 1.0,
+"path_distance": 3.04,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 3,
+"entrance": [
+-0.064,
+-14.95
+],
+"yaw": -3.1329,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.98,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 4,
+"entrance": [
+-0.086,
+-12.45
+],
+"yaw": -3.1329,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.92,
+"obstacle_cells": 2281,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 5,
+"entrance": [
+-0.107,
+-9.975
+],
+"yaw": -3.1329,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 3.01,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 7,
+"entrance": [
+-0.174,
+-2.376
+],
+"yaw": -3.1329,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 2.0,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 8,
+"entrance": [
+-0.195,
+0.049
+],
+"yaw": -3.1329,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 0.18,
+"obstacle_cells": 2,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 9,
+"entrance": [
+-0.217,
+2.549
+],
+"yaw": -3.1329,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.13,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 10,
+"entrance": [
+-0.24,
+5.199
+],
+"yaw": -3.1329,
+"width": 2.8,
+"front_visible": 0.92,
+"path_distance": 2.27,
+"obstacle_cells": 2706,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 11,
+"entrance": [
+-0.262,
+7.799
+],
+"yaw": -3.1329,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.29,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 12,
+"entrance": [
+-0.284,
+10.249
+],
+"yaw": -3.1329,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.31,
+"obstacle_cells": 48,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 13,
+"entrance": [
+-0.306,
+12.774
+],
+"yaw": -3.1329,
+"width": 2.55,
+"front_visible": 0.95,
+"path_distance": 2.31,
+"obstacle_cells": 3,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 14,
+"entrance": [
+-0.328,
+15.324
+],
+"yaw": -3.1329,
+"width": 2.55,
+"front_visible": 1.0,
+"path_distance": 2.35,
+"obstacle_cells": 4,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 17,
+"entrance": [
+-0.395,
+22.973
+],
+"yaw": -3.1329,
+"width": 2.55,
+"front_visible": 1.0,
+"path_distance": 2.99,
+"obstacle_cells": 1026,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wo",
+"index": 18,
+"entrance": [
+-0.417,
+25.473
+],
+"yaw": -3.1329,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 4.14,
+"obstacle_cells": 651,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 0,
+"entrance": [
+6.332,
+-21.997
+],
+"yaw": 0.0131,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 3.18,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 1,
+"entrance": [
+6.301,
+-19.597
+],
+"yaw": 0.0131,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 3.21,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 2,
+"entrance": [
+6.27,
+-17.198
+],
+"yaw": 0.0131,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 3.28,
+"obstacle_cells": 1812,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 3,
+"entrance": [
+6.238,
+-14.773
+],
+"yaw": 0.0131,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 3.33,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 4,
+"entrance": [
+6.206,
+-12.373
+],
+"yaw": 0.0131,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 3.37,
+"obstacle_cells": 70,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 5,
+"entrance": [
+6.177,
+-10.148
+],
+"yaw": 0.0131,
+"width": 2.1,
+"front_visible": 1.0,
+"path_distance": 3.28,
+"obstacle_cells": 1341,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 6,
+"entrance": [
+6.145,
+-7.723
+],
+"yaw": 0.0131,
+"width": 2.75,
+"front_visible": 1.0,
+"path_distance": 2.99,
+"obstacle_cells": 1845,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 7,
+"entrance": [
+6.112,
+-5.149
+],
+"yaw": 0.0131,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.66,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 8,
+"entrance": [
+6.08,
+-2.749
+],
+"yaw": 0.0131,
+"width": 2.4,
+"front_visible": 0.95,
+"path_distance": 2.74,
+"obstacle_cells": 1899,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 9,
+"entrance": [
+6.049,
+-0.349
+],
+"yaw": 0.0131,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 3.51,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 10,
+"entrance": [
+6.017,
+2.126
+],
+"yaw": 0.0131,
+"width": 2.55,
+"front_visible": 0.98,
+"path_distance": 4.1,
+"obstacle_cells": 2239,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 11,
+"entrance": [
+5.984,
+4.576
+],
+"yaw": 0.0131,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 3.97,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 12,
+"entrance": [
+5.953,
+6.975
+],
+"yaw": 0.0131,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 3.9,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 13,
+"entrance": [
+5.922,
+9.375
+],
+"yaw": 0.0131,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 3.88,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 14,
+"entrance": [
+5.89,
+11.825
+],
+"yaw": 0.0131,
+"width": 2.55,
+"front_visible": 1.0,
+"path_distance": 3.78,
+"obstacle_cells": 2264,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 15,
+"entrance": [
+5.858,
+14.275
+],
+"yaw": 0.0131,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 3.69,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Wi",
+"index": 16,
+"entrance": [
+5.824,
+16.825
+],
+"yaw": 0.0131,
+"width": 2.75,
+"front_visible": 1.0,
+"path_distance": 3.72,
+"obstacle_cells": 2432,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 1,
+"entrance": [
+65.972,
+-21.176
+],
+"yaw": -3.1285,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 4.77,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 2,
+"entrance": [
+65.94,
+-18.751
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.72,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 3,
+"entrance": [
+65.908,
+-16.326
+],
+"yaw": -3.1285,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 4.7,
+"obstacle_cells": 1850,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 4,
+"entrance": [
+65.876,
+-13.901
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.66,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 5,
+"entrance": [
+65.845,
+-11.501
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.57,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 6,
+"entrance": [
+65.813,
+-9.102
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.53,
+"obstacle_cells": 1544,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 7,
+"entrance": [
+65.782,
+-6.677
+],
+"yaw": -3.1285,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 4.52,
+"obstacle_cells": 1562,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 8,
+"entrance": [
+65.75,
+-4.252
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.59,
+"obstacle_cells": 1699,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 9,
+"entrance": [
+65.719,
+-1.852
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.64,
+"obstacle_cells": 6,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 10,
+"entrance": [
+65.687,
+0.548
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.67,
+"obstacle_cells": 12,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 11,
+"entrance": [
+65.656,
+2.947
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.64,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 12,
+"entrance": [
+65.624,
+5.347
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.63,
+"obstacle_cells": 1876,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 13,
+"entrance": [
+65.593,
+7.747
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.59,
+"obstacle_cells": 1271,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 14,
+"entrance": [
+65.562,
+10.147
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.56,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 15,
+"entrance": [
+65.53,
+12.547
+],
+"yaw": -3.1285,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 4.53,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Ei",
+"index": 16,
+"entrance": [
+65.498,
+14.971
+],
+"yaw": -3.1285,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 4.55,
+"obstacle_cells": 1846,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 0,
+"entrance": [
+72.943,
+-23.768
+],
+"yaw": 0.0175,
+"width": 2.15,
+"front_visible": 1.0,
+"path_distance": 1.83,
+"obstacle_cells": 5,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 1,
+"entrance": [
+72.903,
+-21.493
+],
+"yaw": 0.0175,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.01,
+"obstacle_cells": 3,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 2,
+"entrance": [
+72.861,
+-19.069
+],
+"yaw": 0.0175,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.16,
+"obstacle_cells": 5,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 3,
+"entrance": [
+72.818,
+-16.644
+],
+"yaw": 0.0175,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.18,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 4,
+"entrance": [
+72.776,
+-14.245
+],
+"yaw": 0.0175,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.22,
+"obstacle_cells": 1,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 5,
+"entrance": [
+72.734,
+-11.82
+],
+"yaw": 0.0175,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.28,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 6,
+"entrance": [
+72.692,
+-9.395
+],
+"yaw": 0.0175,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.33,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 7,
+"entrance": [
+72.65,
+-6.971
+],
+"yaw": 0.0175,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.35,
+"obstacle_cells": 1631,
+"occupied": true,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 8,
+"entrance": [
+72.607,
+-4.546
+],
+"yaw": 0.0175,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.26,
+"obstacle_cells": 1,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 9,
+"entrance": [
+72.565,
+-2.146
+],
+"yaw": 0.0175,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.21,
+"obstacle_cells": 4,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 10,
+"entrance": [
+72.523,
+0.253
+],
+"yaw": 0.0175,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.16,
+"obstacle_cells": 5,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 11,
+"entrance": [
+72.482,
+2.653
+],
+"yaw": 0.0175,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.17,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 12,
+"entrance": [
+72.44,
+5.053
+],
+"yaw": 0.0175,
+"width": 2.4,
+"front_visible": 1.0,
+"path_distance": 2.18,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 13,
+"entrance": [
+72.397,
+7.477
+],
+"yaw": 0.0175,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.2,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "Eo",
+"index": 14,
+"entrance": [
+72.355,
+9.877
+],
+"yaw": 0.0175,
+"width": 2.35,
+"front_visible": 1.0,
+"path_distance": 2.22,
+"obstacle_cells": 2056,
+"occupied": true,
+"keep": true
+},
+{
+"row": "S",
+"index": 1,
+"entrance": [
+12.09,
+-33.902
+],
+"yaw": -1.549,
+"width": 2.6,
+"front_visible": 0.96,
+"path_distance": 2.85,
+"obstacle_cells": 1460,
+"occupied": true,
+"keep": true
+},
+{
+"row": "S",
+"index": 3,
+"entrance": [
+16.589,
+-33.804
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 3.3,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 4,
+"entrance": [
+19.089,
+-33.749
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 3.25,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 5,
+"entrance": [
+21.588,
+-33.695
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 3.26,
+"obstacle_cells": 1920,
+"occupied": true,
+"keep": true
+},
+{
+"row": "S",
+"index": 6,
+"entrance": [
+24.087,
+-33.64
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 3.23,
+"obstacle_cells": 1,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 7,
+"entrance": [
+26.612,
+-33.585
+],
+"yaw": -1.549,
+"width": 2.55,
+"front_visible": 1.0,
+"path_distance": 2.91,
+"obstacle_cells": 2292,
+"occupied": true,
+"keep": true
+},
+{
+"row": "S",
+"index": 8,
+"entrance": [
+29.111,
+-33.531
+],
+"yaw": -1.549,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 2.43,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 9,
+"entrance": [
+31.611,
+-33.476
+],
+"yaw": -1.549,
+"width": 2.55,
+"front_visible": 1.0,
+"path_distance": 2.0,
+"obstacle_cells": 2376,
+"occupied": true,
+"keep": true
+},
+{
+"row": "S",
+"index": 10,
+"entrance": [
+34.135,
+-33.421
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 1.78,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 11,
+"entrance": [
+36.609,
+-33.367
+],
+"yaw": -1.549,
+"width": 2.45,
+"front_visible": 1.0,
+"path_distance": 1.9,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 12,
+"entrance": [
+39.134,
+-33.312
+],
+"yaw": -1.549,
+"width": 2.6,
+"front_visible": 1.0,
+"path_distance": 2.01,
+"obstacle_cells": 2107,
+"occupied": true,
+"keep": true
+},
+{
+"row": "S",
+"index": 13,
+"entrance": [
+41.683,
+-33.256
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.01,
+"obstacle_cells": 5,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 14,
+"entrance": [
+44.183,
+-33.202
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.07,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 15,
+"entrance": [
+46.682,
+-33.147
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.08,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 16,
+"entrance": [
+49.181,
+-33.093
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.13,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 17,
+"entrance": [
+51.681,
+-33.038
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.28,
+"obstacle_cells": 2364,
+"occupied": true,
+"keep": true
+},
+{
+"row": "S",
+"index": 18,
+"entrance": [
+54.18,
+-32.984
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.29,
+"obstacle_cells": 9,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 19,
+"entrance": [
+56.68,
+-32.929
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.21,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+},
+{
+"row": "S",
+"index": 20,
+"entrance": [
+59.179,
+-32.874
+],
+"yaw": -1.549,
+"width": 2.5,
+"front_visible": 1.0,
+"path_distance": 2.14,
+"obstacle_cells": 0,
+"occupied": false,
+"keep": true
+}
+]
